@@ -1,0 +1,30 @@
+#include <windows.h>
+101 ICON "@ICON@"
+201 RCDATA "@INPUT@"
+STRINGTABLE
+BEGIN
+202 L"@payload_hash@"
+203 L"@RELEASE_TAG@"
+END
+1 VERSIONINFO
+FILEVERSION @version_numbers@,0
+PRODUCTVERSION @version_numbers@,0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+BLOCK "StringFileInfo"
+BEGIN
+BLOCK "040904B0"
+BEGIN
+VALUE "FileDescription", "FluxTop resource monitor launcher\0"
+VALUE "FileVersion", "@VERSION@\0"
+VALUE "ProductName", "FluxTop\0"
+VALUE "ProductVersion", "@RELEASE_TAG@\0"
+VALUE "OriginalFilename", "FluxTop.exe\0"
+END
+END
+BLOCK "VarFileInfo"
+BEGIN
+VALUE "Translation", 0x0409, 1200
+END
+END

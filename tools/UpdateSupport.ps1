@@ -1,4 +1,24 @@
 # Shared launcher helpers; dot-sourcing this file has no update/build side effects.
+function New-FluxMonitorStartInfo {
+    param([string]$Executable, [string]$Repository, [string[]]$AppArguments, [switch]$StandardUser)
+    $start = @{ FilePath = $Executable; WorkingDirectory = $Repository; ErrorAction = 'Stop' }
+    $nativeArguments = ''
+    if ($AppArguments.Count -gt 0) {
+        $nativeArguments = (($AppArguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join ' ')
+    }
+    if ($nativeArguments) { $start.ArgumentList = $nativeArguments }
+    if ($StandardUser) { $start.NoNewWindow = $true }
+    else { $start.Verb = 'RunAs' }
+    return $start
+}
+
+function Test-FluxElevationCancelled([Exception]$Exception) {
+    for ($error = $Exception; $null -ne $error; $error = $error.InnerException) {
+        if ($error -is [ComponentModel.Win32Exception] -and $error.NativeErrorCode -eq 1223) { return $true }
+    }
+    return $false
+}
+
 function ConvertTo-NativeArgument([string]$Value) {
     # Windows CRT argv quoting, including embedded quotes and trailing backslashes.
     return '"' + [regex]::Replace([regex]::Replace($Value, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1') + '"'

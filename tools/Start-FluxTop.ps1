@@ -2,6 +2,8 @@
 param(
     [switch]$NoUpdate,
     [switch]$PrepareOnly,
+    [switch]$StandardUser,
+    [switch]$Autostart,
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$AppArguments
 )
 
@@ -11,6 +13,19 @@ $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $stateDirectory = Join-Path $repository 'out/launcher'
 $lock = $null
 $exe = $null
+if ($Autostart) {
+    $env:GIT_TERMINAL_PROMPT = '0'
+    $env:GCM_INTERACTIVE = 'Never'
+    Start-Sleep -Seconds 30
+    $AppArguments = @('--overlay', '--tray')
+    # No console survives startup; retain diagnostics on disk.
+    [void](New-Item -ItemType Directory -Path $stateDirectory -Force)
+    $startupLog = Join-Path $stateDirectory 'autostart.log'
+    $writer = [IO.StreamWriter]::new($startupLog, $false, [Text.Encoding]::UTF8)
+    $writer.AutoFlush = $true
+    [Console]::SetError($writer)
+    [Console]::SetOut($writer)
+}
 try {
     [void](New-Item -ItemType Directory -Path $stateDirectory -Force)
     try {
@@ -58,14 +73,17 @@ try {
 }
 
 if ($PrepareOnly) { exit 0 }
-# Share the console, then exit the PowerShell host instead of keeping it resident.
+# Request elevation only for the prepared monitor; no resident updater host.
 try {
-    $nativeArguments = (($AppArguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join ' ')
-    $start = @{ FilePath = $exe; WorkingDirectory = $repository; NoNewWindow = $true; ErrorAction = 'Stop' }
-    if ($nativeArguments) { $start.ArgumentList = $nativeArguments }
+    $start = New-FluxMonitorStartInfo -Executable $exe -Repository $repository -AppArguments $AppArguments -StandardUser:$StandardUser
+    if ($Autostart -and -not $StandardUser) { $start.WindowStyle = 'Hidden' }
     Start-Process @start | Out-Null
     exit 0
 } catch {
+    if (Test-FluxElevationCancelled $_.Exception) {
+        [Console]::Error.WriteLine('FluxTop: administrator startup was cancelled in UAC. No monitor was started.')
+        exit 1223
+    }
     [Console]::Error.WriteLine("FluxTop launcher: $($_.Exception.Message)")
     exit 1
 }

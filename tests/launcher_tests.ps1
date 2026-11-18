@@ -20,7 +20,7 @@ $manifest = Join-Path $state 'last-good.json'
 # Deliberately broken candidate: the launcher must retain the previous executable.
 Set-Content -LiteralPath (Join-Path $fixture 'CMakeLists.txt') -Value 'message(FATAL_ERROR "Intentional launcher fallback test")'
 $powershell = (Get-Command powershell.exe).Source
-$launch = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $toolsDirectory 'Start-FluxTop.ps1'), '-NoUpdate')
+$launch = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $toolsDirectory 'Start-FluxTop.ps1'), '-NoUpdate', '-StandardUser')
 $expected = (Invoke-FluxProcess -File $installed -Directory $fixture -Arguments @('--version')).Out
 $result = Invoke-FluxProcess -File $powershell -Directory $fixture -Arguments ($launch + @('--version')) -TimeoutSeconds 120
 if ($result.ExitCode -ne 0 -or $result.Out -ne $expected -or $result.Error -notmatch 'keeping the previous executable') {

@@ -1,0 +1,8 @@
+foreach(required INPUT OUTPUT ICON VERSION RELEASE_TAG TEMPLATE)
+    if(NOT DEFINED ${required})
+        message(FATAL_ERROR "Missing ${required}")
+    endif()
+endforeach()
+file(SHA256 "${INPUT}" payload_hash)
+string(REPLACE "." "," version_numbers "${VERSION}")
+configure_file("${TEMPLATE}" "${OUTPUT}" @ONLY)
