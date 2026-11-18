@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-labelledby="title desc">
+  <title id="title">FluxTop small application mark</title>
+  <desc id="desc">Clean vector reconstruction of the supplied FluxTop logo. Transparent background; no embedded raster or font dependency.</desc>
+  <defs>
+    <linearGradient id="edge" x1="6" y1="4" x2="27" y2="27" gradientUnits="userSpaceOnUse"><stop stop-color="#00e0ee"/><stop offset="1" stop-color="#007aff"/></linearGradient>
+    <linearGradient id="ring" x1="2" y1="28" x2="30" y2="16" gradientUnits="userSpaceOnUse"><stop stop-color="#00c8f3"/><stop offset=".55" stop-color="#00f0df"/><stop offset="1" stop-color="#008dff"/></linearGradient>
+  </defs>
+  <path d="M26 12C32 13 33 17 28 22L26 21C30 17 30 15 26 14Z" fill="url(#ring)"/>
+  <rect x="6" y="4" width="21" height="23" rx="4" fill="#031e38" stroke="url(#edge)" stroke-width="2"/>
+  <path d="M7 10V8Q7 5 10 5H23Q26 5 26 8V10Z" fill="#0088ef"/>
+  <g fill="#00d6ed"><rect x="10" y="15" width="2" height="3" rx=".5"/><rect x="13" y="13" width="2" height="5" rx=".5"/><rect x="16" y="11" width="2" height="7" rx=".5"/></g>
+  <g fill="#777dff"><rect x="20" y="15" width="2" height="3" rx=".5"/><rect x="23" y="12" width="2" height="6" rx=".5"/></g>
+  <path d="M10 23H14L16 20L19 25L21 22H25" fill="none" stroke="#00e4e4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M4 23C-1 27 3 31 14 29C23 28 29 23 31 19L29 20C24 25 16 28 8 28C4 28 2 27 4 25Z" fill="url(#ring)"/>
+</svg>

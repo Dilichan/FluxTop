@@ -17,6 +17,7 @@
 *.db
 *.db-wal
 *.db-shm
+*.db-journal
 .env
 .env.*
 !.env.example

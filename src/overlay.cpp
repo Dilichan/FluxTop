@@ -1,0 +1,707 @@
+#include "fluxtop/overlay.hpp"
+#include "fluxtop/app_icons.hpp"
+#include "fluxtop/autostart.hpp"
+#include "fluxtop/sampler.hpp"
+#include "fluxtop/windows.hpp"
+#include "fluxtop/resource_ids.h"
+
+#include <windowsx.h>
+#include <commctrl.h>
+#include <shellapi.h>
+#include <d2d1.h>
+#include <dwrite.h>
+#include <wrl/client.h>
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cmath>
+#include <filesystem>
+#include <iomanip>
+#include <sstream>
+
+namespace fluxtop {
+namespace {
+using Microsoft::WRL::ComPtr;
+constexpr wchar_t overlay_class[] = L"FluxTop.Overlay.Window";
+constexpr wchar_t client_class[] = L"FluxTop.Client.Window";
+constexpr UINT sample_message = WM_APP + 10, tray_message = WM_APP + 11, icon_message = WM_APP + 12;
+constexpr int toggle_hotkey = 1, client_hotkey = 2;
+enum Control : UINT { open_client = 100, toggle_table, quit_app, top_control, sort_control, font_control,
+    alpha_control, visible_control, move_control, icons_control, stats_control, startup_control,
+    alpha_label, interval_control, summary_control, metric_control = 200 };
+constexpr unsigned all_metrics = 31;
+constexpr std::array<const wchar_t*,5> metric_names{L"CPU",L"RAM",L"GPU",L"GPU RAM",L"Rx/Tx"};
+constexpr std::array<float,5> metric_widths{5.8f,5.8f,5.8f,10.4f,16.0f};
+constexpr UINT_PTR settings_timer = 1;
+
+std::wstring wide(std::string_view value) {
+    if (value.empty()) return {};
+    const int size = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
+    if (!size) return L"?";
+    std::wstring result(static_cast<std::size_t>(size), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), result.data(), size);
+    for (auto& c : result) if (c < 32) c = L' ';
+    return result;
+}
+std::wstring decimal(double value, int precision = 1) {
+    std::wostringstream out; out.imbue(std::locale::classic());
+    out << std::fixed << std::setprecision(precision) << value; return out.str();
+}
+std::wstring percent(std::optional<double> value) { return value ? decimal(*value) + L"%" : L"—"; }
+std::wstring memory(std::optional<std::uint64_t> value) {
+    if (!value) return L"—";
+    const double mib = static_cast<double>(*value) / 1048576.0;
+    return mib >= 1024 ? decimal(mib / 1024) + L" GiB" : decimal(mib) + L" MiB";
+}
+std::wstring rate(std::optional<double> value) {
+    if (!value) return L"—";
+    if (*value >= 1048576) return decimal(*value / 1048576) + L" MiB/s";
+    if (*value >= 1024) return decimal(*value / 1024) + L" KiB/s";
+    return decimal(*value, 0) + L" B/s";
+}
+std::wstring network_rate(std::optional<double> rx, std::optional<double> tx) {
+    if (!rx || !tx) return rate(rx) + L" / " + rate(tx);
+    const auto maximum = std::max(*rx,*tx);
+    const double scale = maximum >= 1048576 ? 1048576 : maximum >= 1024 ? 1024 : 1;
+    const auto unit = scale == 1048576 ? L" MiB/s" : scale == 1024 ? L" KiB/s" : L" B/s";
+    return decimal(*rx/scale,scale==1 ? 0 : 1)+L" / "+decimal(*tx/scale,scale==1 ? 0 : 1)+unit;
+}
+void require_hr(HRESULT result, const char* operation) {
+    if (FAILED(result)) throw std::runtime_error(std::string(operation) + " failed (HRESULT " + std::to_string(static_cast<unsigned long>(result)) + ")");
+}
+std::wstring env(const wchar_t* name) {
+    std::wstring value(32768, L'\0');
+    const auto size = GetEnvironmentVariableW(name, value.data(), static_cast<DWORD>(value.size()));
+    if (!size || size >= value.size()) return {};
+    value.resize(size); return value;
+}
+std::filesystem::path local_file(const wchar_t* override_name, const wchar_t* filename) {
+    if (auto value = env(override_name); !value.empty()) return std::filesystem::absolute(value);
+    const auto base = env(L"LOCALAPPDATA");
+    return base.empty() ? std::filesystem::path{} : std::filesystem::path(base) / L"FluxTop" / filename;
+}
+
+struct Row {
+    std::uint32_t pid{};
+    std::optional<std::uint64_t> created;
+    std::wstring name, cpu, ram, gpu, vram, network;
+    bool operator==(const Row&) const = default;
+};
+
+class Overlay {
+public:
+    explicit Overlay(Options options) : options_(options) {}
+    ~Overlay();
+    int run();
+private:
+    static LRESULT CALLBACK dispatch(HWND window, UINT message, WPARAM wp, LPARAM lp);
+    static LRESULT CALLBACK client_dispatch(HWND window, UINT message, WPARAM wp, LPARAM lp);
+    LRESULT message(UINT message, WPARAM wp, LPARAM lp);
+    LRESULT client_message(HWND window, UINT message, WPARAM wp, LPARAM lp);
+    void load_settings();
+    void save_settings() noexcept;
+    void load_icons();
+    void fonts();
+    void add_tray();
+    void tray_menu();
+    void show_client();
+    void init_client();
+    void layout_client();
+    void apply_client();
+    void client_stats();
+    HWND control(const wchar_t* kind, const wchar_t* label, DWORD style, UINT id, int x, int y, int width, int height);
+    void set_visible(bool visible);
+    void activity();
+    void movement();
+    void receive();
+    void update_view();
+    void fit_table();
+    void release_surface();
+    void surface();
+    void paint();
+    void draw_text(std::wstring_view value, D2D1_RECT_F rect, IDWriteTextFormat* font);
+    std::array<D2D1_RECT_F,6> columns(float y, float height) const;
+    float text_size() const { return static_cast<float>(options_.font_size); }
+    float row_height() const { return text_size() * 1.6f; }
+    bool summary_only() const { return summary_ || !metrics_; }
+    unsigned active_metrics() const { return metrics_ ? metrics_ : all_metrics; }
+    float table_width() const {
+        float width = summary_only() ? 0 : 12.0f + (show_icons_ ? 1.7f : 0);
+        for (unsigned i=0;i<metric_names.size();++i) if (active_metrics() & (1U<<i)) {
+            if (width) width += .6f;
+            width += metric_widths[i];
+        }
+        return text_size()*width+4;
+    }
+    float dip(int px) const { return static_cast<float>(px) * 96.0f / static_cast<float>(dpi_); }
+    int pixels(float value) const { return static_cast<int>(value * static_cast<float>(dpi_) / 96.0f + .5f); }
+    std::size_t visible_rows(float height) const {
+        return static_cast<std::size_t>(std::max(0.0f, (height - row_height() - 4 + .01f) / row_height()));
+    }
+
+    Options options_;
+    HWND hwnd_{}, client_{};
+    HICON icon_{}, large_icon_{};
+    HFONT client_font_{};
+    UINT dpi_ = 96, client_dpi_ = 96, taskbar_created_{};
+    bool tray_ = false, toggle_key_ = false, client_key_ = false, visible_ = true;
+    bool moving_ = false, show_icons_ = true, stopping_ = false, initializing_client_ = false;
+    unsigned opacity_ = 100;
+    unsigned metrics_ = all_metrics;
+    bool summary_ = false;
+    int x_ = CW_USEDEFAULT, y_ = CW_USEDEFAULT;
+    std::wstring settings_;
+    std::size_t scroll_{};
+    int exit_code_{};
+    struct Child { HWND window; RECT bounds; };
+    std::vector<Child> controls_;
+    SamplingWorker worker_;
+    std::unique_ptr<AppIconCache> icons_;
+    std::atomic<bool> icon_posted_{false};
+    std::mutex mailbox_mutex_;
+    std::optional<Snapshot> pending_, snapshot_;
+    std::string pending_error_, error_;
+    bool posted_ = false, pending_finished_ = false;
+    std::vector<Row> rows_;
+    ComPtr<ID2D1Factory> factory_;
+    ComPtr<IDWriteFactory> write_factory_;
+    ComPtr<IDWriteTextFormat> body_font_, number_font_;
+    ComPtr<ID2D1DCRenderTarget> target_;
+    ComPtr<ID2D1SolidColorBrush> brush_;
+    HDC dc_{};
+    HBITMAP bitmap_{};
+    HGDIOBJ old_bitmap_{};
+    void* bits_{};
+    SIZE bitmap_size_{};
+};
+
+Overlay::~Overlay() {
+    worker_.stop(); icons_.reset();
+    if (client_ && IsWindow(client_)) DestroyWindow(client_);
+    if (hwnd_ && IsWindow(hwnd_)) DestroyWindow(hwnd_);
+    release_surface();
+    if (client_font_) DeleteObject(client_font_);
+    if (icon_) DestroyIcon(icon_);
+    if (large_icon_) DestroyIcon(large_icon_);
+}
+void Overlay::load_settings() {
+    settings_ = local_file(L"FLUXTOP_OVERLAY_SETTINGS", L"overlay.ini").wstring();
+    if (settings_.empty()) return;
+    const auto read = [&](const wchar_t* key, int fallback) { return static_cast<int>(GetPrivateProfileIntW(L"overlay", key, fallback, settings_.c_str())); };
+    x_ = read(L"x", CW_USEDEFAULT); y_ = read(L"y", CW_USEDEFAULT);
+    if (read(L"layout_version", 0) >= 2) opacity_ = static_cast<unsigned>(std::clamp(read(L"opacity", 100), 1, 100));
+    const auto saved_metrics = static_cast<unsigned>(read(L"metrics", all_metrics));
+    metrics_ = read(L"layout_version", 0) >= 3 ? saved_metrics & all_metrics
+        : (saved_metrics & 15U) | ((saved_metrics & 48U) ? 16U : 0U);
+    summary_ = read(L"summary_only", 0) != 0;
+    if (!options_.interval_explicit) options_.interval_ms = static_cast<unsigned>(std::clamp(read(L"interval_ms", 1000), 1000, 10000));
+    show_icons_ = read(L"icons", 1) != 0;
+    if (!options_.font_explicit) options_.font_size = static_cast<unsigned>(std::clamp(read(L"font_size", 16), 10, 36));
+    if (!options_.top_explicit) {
+        options_.top = static_cast<unsigned>(std::clamp(read(L"top", 10), 1, 100));
+    }
+    if (!options_.sort_explicit) options_.sort = static_cast<Sort>(std::clamp(read(L"sort", 0), 0, 7));
+    if (!options_.gpu && (options_.sort == Sort::gpu || options_.sort == Sort::vram)) options_.sort = Sort::cpu;
+}
+void Overlay::save_settings() noexcept {
+    if (settings_.empty() || !hwnd_) return;
+    try {
+        std::error_code error; std::filesystem::create_directories(std::filesystem::path(settings_).parent_path(), error);
+        if (error) return;
+        RECT rect{}; if (!GetWindowRect(hwnd_, &rect)) return;
+        const auto save = [&](const wchar_t* key, int value) { WritePrivateProfileStringW(L"overlay", key, std::to_wstring(value).c_str(), settings_.c_str()); };
+        save(L"layout_version", 3); save(L"x", rect.left); save(L"y", rect.top);
+        save(L"font_size", static_cast<int>(options_.font_size)); save(L"top", static_cast<int>(options_.top));
+        save(L"sort", static_cast<int>(options_.sort)); save(L"opacity", static_cast<int>(opacity_)); save(L"icons", show_icons_ ? 1 : 0);
+        save(L"metrics", static_cast<int>(metrics_)); save(L"summary_only", summary_ ? 1 : 0);
+        save(L"interval_ms", static_cast<int>(options_.interval_ms));
+    } catch (...) {}
+}
+void Overlay::load_icons() {
+    const auto module = GetModuleHandleW(nullptr);
+    const auto small_icon = static_cast<HICON>(LoadImageW(module, MAKEINTRESOURCEW(IDI_FLUXTOP), IMAGE_ICON,
+        GetSystemMetricsForDpi(SM_CXSMICON, dpi_), GetSystemMetricsForDpi(SM_CYSMICON, dpi_), 0));
+    const auto big_icon = static_cast<HICON>(LoadImageW(module, MAKEINTRESOURCEW(IDI_FLUXTOP), IMAGE_ICON,
+        GetSystemMetricsForDpi(SM_CXICON, dpi_), GetSystemMetricsForDpi(SM_CYICON, dpi_), 0));
+    if (!small_icon || !big_icon) { if (small_icon) DestroyIcon(small_icon); if (big_icon) DestroyIcon(big_icon); throw windows_error("LoadImageW FluxTop icon"); }
+    for (const auto window : {hwnd_,client_}) if (window && IsWindow(window)) {
+        SendMessageW(window, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small_icon));
+        SendMessageW(window, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big_icon));
+        SetClassLongPtrW(window, GCLP_HICONSM, reinterpret_cast<LONG_PTR>(small_icon));
+        SetClassLongPtrW(window, GCLP_HICON, reinterpret_cast<LONG_PTR>(big_icon));
+    }
+    if (icon_) DestroyIcon(icon_); if (large_icon_) DestroyIcon(large_icon_);
+    icon_ = small_icon; large_icon_ = big_icon;
+    if (tray_) {
+        NOTIFYICONDATAW data{}; data.cbSize = sizeof(data); data.hWnd = hwnd_; data.uID = 1; data.uFlags = NIF_ICON; data.hIcon = icon_;
+        Shell_NotifyIconW(NIM_MODIFY, &data);
+    }
+}
+void Overlay::fonts() {
+    body_font_.Reset(); number_font_.Reset();
+    const auto font = [&](const wchar_t* family, ComPtr<IDWriteTextFormat>& output) {
+        require_hr(write_factory_->CreateTextFormat(family, nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL, text_size(), L"ru-ru", &output), "Overlay font");
+        output->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        output->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER,0,0};
+        ComPtr<IDWriteInlineObject> ellipsis;
+        require_hr(write_factory_->CreateEllipsisTrimmingSign(output.Get(), &ellipsis), "Text trimming");
+        output->SetTrimming(&trim, ellipsis.Get());
+    };
+    font(L"Segoe UI", body_font_); font(L"Consolas", number_font_);
+    number_font_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+}
+void Overlay::fit_table() {
+    RECT rect{}; GetWindowRect(hwnd_, &rect);
+    MONITORINFO monitor{sizeof(monitor)};
+    if (!GetMonitorInfoW(MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST), &monitor)) return;
+    const auto& area = monitor.rcWork; const int margin = pixels(8);
+    const int width = std::min(pixels(table_width()), static_cast<int>(area.right-area.left-margin*2));
+    const int requested_height = static_cast<int>(std::ceil((row_height() * static_cast<float>(summary_only() ? 1 : options_.top+1) + 4) * static_cast<float>(dpi_) / 96.0f));
+    const int height = std::min(requested_height, static_cast<int>(area.bottom-area.top-margin*2));
+    const int x = std::clamp(static_cast<int>(rect.left), static_cast<int>(area.left+margin), static_cast<int>(area.right-margin-width));
+    const int y = std::clamp(static_cast<int>(rect.top), static_cast<int>(area.top+margin), static_cast<int>(area.bottom-margin-height));
+    SetWindowPos(hwnd_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
+}
+void Overlay::add_tray() {
+    NOTIFYICONDATAW data{}; data.cbSize = sizeof(data); data.hWnd = hwnd_; data.uID = 1;
+    data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP; data.uCallbackMessage = tray_message; data.hIcon = icon_;
+    wcscpy_s(data.szTip, L"FluxTop — открыть клиент");
+    tray_ = Shell_NotifyIconW(NIM_ADD, &data) != FALSE;
+    if (tray_) { data.uVersion = NOTIFYICON_VERSION; Shell_NotifyIconW(NIM_SETVERSION, &data); }
+}
+void Overlay::tray_menu() {
+    const auto popup = CreatePopupMenu(); if (!popup) return;
+    AppendMenuW(popup, MF_STRING, open_client, L"Открыть клиент");
+    AppendMenuW(popup, MF_STRING, toggle_table, visible_ ? L"Скрыть таблицу" : L"Показать таблицу");
+    AppendMenuW(popup, MF_SEPARATOR, 0, nullptr); AppendMenuW(popup, MF_STRING, quit_app, L"Выход");
+    POINT point{}; GetCursorPos(&point); SetForegroundWindow(hwnd_);
+    const auto selected = TrackPopupMenu(popup, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, hwnd_, nullptr);
+    DestroyMenu(popup); PostMessageW(hwnd_, WM_NULL, 0, 0);
+    if (selected == open_client) show_client(); else if (selected == toggle_table) set_visible(!visible_); else if (selected == quit_app) DestroyWindow(hwnd_);
+}
+
+HWND Overlay::control(const wchar_t* kind, const wchar_t* label, DWORD style, UINT id, int x, int y, int width, int height) {
+    const auto window = CreateWindowExW(0, kind, label, WS_CHILD | WS_VISIBLE | style, 0, 0, 1, 1,
+        client_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr), nullptr);
+    if (!window) throw windows_error("Client control");
+    controls_.push_back({window, {x,y,x+width,y+height}}); return window;
+}
+void Overlay::show_client() {
+    if (client_) { ShowWindow(client_, SW_RESTORE); SetForegroundWindow(client_); return; }
+    client_ = CreateWindowExW(0, client_class, L"FluxTop", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+        CW_USEDEFAULT, CW_USEDEFAULT, 640, 560, nullptr, nullptr, GetModuleHandleW(nullptr), this);
+    if (!client_) throw windows_error("Create client");
+    client_dpi_ = GetDpiForWindow(client_); layout_client();
+    ShowWindow(client_, SW_SHOW); SetForegroundWindow(client_); activity();
+}
+void Overlay::init_client() {
+    initializing_client_ = true;
+    control(L"STATIC", L"Таблица поверх приложений", 0, 0, 22, 18, 540, 25);
+    control(L"STATIC", L"Количество приложений (1–100)", 0, 0, 22, 62, 260, 24);
+    const auto top = control(L"EDIT", std::to_wstring(options_.top).c_str(), WS_BORDER | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, top_control, 290, 58, 268, 29);
+    SendMessageW(top, EM_SETLIMITTEXT, 3, 0);
+    control(L"STATIC", L"Сортировка", 0, 0, 22, 106, 230, 24);
+    const auto sort = control(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, sort_control, 290, 102, 268, 160);
+    for (const auto label : {L"CPU", L"RAM", L"GPU", L"Память GPU", L"Авто — всплески нагрузки", L"Rx — приём", L"Tx — передача", L"Rx/Tx — суммарный трафик"}) SendMessageW(sort, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
+    SendMessageW(sort, CB_SETCURSEL, static_cast<WPARAM>(options_.sort), 0);
+    control(L"STATIC", L"Размер текста, px (10–36)", 0, 0, 22, 150, 250, 24);
+    const auto edit = control(L"EDIT", std::to_wstring(options_.font_size).c_str(), WS_BORDER | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, font_control, 290, 146, 268, 29);
+    SendMessageW(edit, EM_SETLIMITTEXT, 2, 0);
+    control(L"STATIC", (L"Непрозрачность: " + std::to_wstring(opacity_) + L"%").c_str(), 0, alpha_label, 22, 194, 260, 24);
+    const auto alpha = control(TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, alpha_control, 290, 190, 268, 32);
+    SendMessageW(alpha, TBM_SETRANGE, TRUE, MAKELPARAM(1,100));
+    SendMessageW(alpha, TBM_SETPOS, TRUE, opacity_);
+    const auto icons = control(L"BUTTON", L"Показывать иконки приложений", BS_AUTOCHECKBOX | WS_TABSTOP, icons_control, 22, 238, 380, 26);
+    SendMessageW(icons, BM_SETCHECK, show_icons_ ? BST_CHECKED : BST_UNCHECKED, 0);
+    const auto visible = control(L"BUTTON", L"Показывать таблицу", BS_AUTOCHECKBOX | WS_TABSTOP, visible_control, 22, 271, 380, 26);
+    SendMessageW(visible, BM_SETCHECK, visible_ ? BST_CHECKED : BST_UNCHECKED, 0);
+    const auto move = control(L"BUTTON", L"Перемещать таблицу мышью", BS_AUTOCHECKBOX | WS_TABSTOP, move_control, 22, 304, 380, 26);
+    SendMessageW(move, BM_SETCHECK, moving_ ? BST_CHECKED : BST_UNCHECKED, 0);
+    const auto startup = control(L"BUTTON", L"Автозапуск при входе в Windows (с запросом UAC)", BS_AUTOCHECKBOX | WS_TABSTOP, startup_control, 22, 337, 536, 26);
+    SendMessageW(startup, BM_SETCHECK, autostart_enabled() ? BST_CHECKED : BST_UNCHECKED, 0);
+    control(L"STATIC", L"Сбор и обновление, секунд (1–10)", 0, 0, 22, 382, 260, 24);
+    const auto interval = control(L"EDIT", std::to_wstring(std::clamp(options_.interval_ms/1000, 1U, 10U)).c_str(),
+        WS_BORDER | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, interval_control, 290, 378, 268, 29);
+    SendMessageW(interval, EM_SETLIMITTEXT, 2, 0);
+    control(L"STATIC", L"Показывать показатели:", 0, 0, 22, 422, 536, 24);
+    for (unsigned i=0;i<metric_names.size();++i) {
+        const auto box = control(L"BUTTON", metric_names[i], BS_AUTOCHECKBOX | WS_TABSTOP,
+            metric_control+i, 22+static_cast<int>(i)*90, 451, 90, 26);
+        SendMessageW(box, BM_SETCHECK, (metrics_ & (1U<<i)) ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    const auto summary = control(L"BUTTON", L"Только общие показатели (без списка приложений)", BS_AUTOCHECKBOX | WS_TABSTOP,
+        summary_control, 22, 487, 536, 26);
+    SendMessageW(summary, BM_SETCHECK, summary_ ? BST_CHECKED : BST_UNCHECKED, 0);
+    control(L"STATIC", L"", 0, stats_control, 22, 531, 536, 140);
+    control(L"STATIC", L"Ctrl+Alt+F9 — клиент   ·   Ctrl+Alt+F10 — таблица", 0, 0, 22, 681, 540, 24);
+    control(L"BUTTON", L"Завершить работу", WS_TABSTOP, quit_app, 373, 715, 185, 32);
+    initializing_client_ = false; client_stats();
+}
+void Overlay::layout_client() {
+    if (!client_) return;
+    const auto px = [this](int value) { return MulDiv(value, static_cast<int>(client_dpi_), 96); };
+    const auto font = CreateFontW(-px(14), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    for (const auto& child : controls_) {
+        SendMessageW(child.window, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        MoveWindow(child.window, px(child.bounds.left), px(child.bounds.top), px(child.bounds.right-child.bounds.left), px(child.bounds.bottom-child.bounds.top), TRUE);
+    }
+    if (client_font_) DeleteObject(client_font_); client_font_ = font;
+    RECT rect{0,0,px(580),px(770)};
+    AdjustWindowRectExForDpi(&rect, static_cast<DWORD>(GetWindowLongPtrW(client_, GWL_STYLE)), FALSE, 0, client_dpi_);
+    SetWindowPos(client_, nullptr, 0, 0, rect.right-rect.left, rect.bottom-rect.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+void Overlay::apply_client() {
+    const auto old_font_size = options_.font_size;
+    BOOL valid_size{}, valid_top{}, valid_interval{};
+    const auto size = GetDlgItemInt(client_, font_control, &valid_size, FALSE);
+    const auto top = GetDlgItemInt(client_, top_control, &valid_top, FALSE);
+    const auto selected_sort = SendDlgItemMessageW(client_, sort_control, CB_GETCURSEL, 0, 0);
+    const auto seconds = GetDlgItemInt(client_, interval_control, &valid_interval, FALSE);
+    const auto alpha = SendDlgItemMessageW(client_, alpha_control, TBM_GETPOS, 0, 0);
+    if (alpha < 1 || alpha > 100 || selected_sort < 0 || selected_sort > 7) return;
+    if (valid_top && top >= 1 && top <= 100) options_.top = top;
+    if (valid_size && size >= 10 && size <= 36) options_.font_size = size;
+    if (options_.gpu || (selected_sort != 2 && selected_sort != 3)) options_.sort = static_cast<Sort>(selected_sort);
+    else SendDlgItemMessageW(client_, sort_control, CB_SETCURSEL, static_cast<WPARAM>(options_.sort), 0);
+    if (valid_interval && seconds >= 1 && seconds <= 10 && seconds*1000 != options_.interval_ms) {
+        options_.interval_ms = seconds*1000; worker_.set_interval(options_.interval_ms);
+    }
+    opacity_ = static_cast<unsigned>(alpha); show_icons_ = SendDlgItemMessageW(client_, icons_control, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    SetDlgItemTextW(client_, alpha_label, (L"Непрозрачность: " + std::to_wstring(opacity_) + L"%").c_str());
+    metrics_ = 0;
+    for (unsigned i=0;i<metric_names.size();++i) if (SendDlgItemMessageW(client_,metric_control+i,BM_GETCHECK,0,0)==BST_CHECKED) metrics_ |= 1U<<i;
+    summary_ = SendDlgItemMessageW(client_,summary_control,BM_GETCHECK,0,0)==BST_CHECKED;
+    scroll_ = 0; if (old_font_size != options_.font_size) fonts();
+    fit_table(); update_view(); save_settings(); client_stats();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+void Overlay::client_stats() {
+    if (!client_) return;
+    std::wstring info;
+    if (!error_.empty()) info = L"Ошибка сбора: " + wide(error_);
+    else if (snapshot_) {
+        const auto& s = *snapshot_;
+        info = L"Процессов: " + std::to_wstring(s.processes.size()) + L"   ·   Недоступно: " + std::to_wstring(s.inaccessible)
+            + L"\r\nМонитор: CPU " + percent(s.self_cpu_percent) + L"   ·   RAM " + memory(s.self_working_set)
+            + L"\r\nДоступ: " + (s.elevated.value_or(false) ? std::wstring(L"администратор") : std::wstring(L"обычный"))
+            + L"   ·   GPU: " + wide(s.gpu_status) + L"   ·   Время сбора: " + decimal(s.collection_ms) + L" мс";
+        info += L"\r\nИконок в памяти: " + std::to_wstring(icons_ ? icons_->stats().entries : 0) + L" / 64";
+        info += L"   ·   Сеть: " + wide(s.network_status);
+        info += L"\r\nЗаписей показателей в БД: " + (s.history_records ? std::to_wstring(*s.history_records) : L"—");
+        if (!s.history_error.empty()) info += L"\r\nОшибка записи истории: " + wide(s.history_error);
+    } else info = L"Ожидание первого снимка…";
+    SetDlgItemTextW(client_, stats_control, info.c_str());
+}
+
+void Overlay::movement() {
+    auto style = GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
+    if (moving_) style &= ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT); else style |= WS_EX_TRANSPARENT;
+    SetWindowLongPtrW(hwnd_, GWL_EXSTYLE, style);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+void Overlay::activity() { /* History collection continues even when both windows are hidden. */ }
+void Overlay::set_visible(bool visible) {
+    if (visible == visible_) return;
+    if (!visible && !tray_ && !toggle_key_ && !client_) return;
+    visible_ = visible;
+    if (!visible) { ShowWindow(hwnd_, SW_HIDE); release_surface(); icons_.reset(); }
+    else { ShowWindow(hwnd_, SW_SHOWNOACTIVATE); update_view(); InvalidateRect(hwnd_, nullptr, FALSE); }
+    if (client_) SendDlgItemMessageW(client_, visible_control, BM_SETCHECK, visible ? BST_CHECKED : BST_UNCHECKED, 0);
+    activity();
+}
+void Overlay::receive() {
+    bool finished{};
+    {
+        std::lock_guard lock(mailbox_mutex_);
+        if (pending_) snapshot_ = std::move(pending_);
+        error_ = std::move(pending_error_); finished = pending_finished_;
+        pending_.reset(); pending_finished_ = false; posted_ = false;
+    }
+    update_view(); client_stats();
+    if (visible_) InvalidateRect(hwnd_, nullptr, FALSE);
+    if (finished) {
+        if (visible_) {
+            paint();
+            const auto capture = env(L"FLUXTOP_OVERLAY_CAPTURE");
+            if (!capture.empty() && !save_argb_png(capture,bits_,static_cast<unsigned>(bitmap_size_.cx),static_cast<unsigned>(bitmap_size_.cy))) exit_code_=1;
+        }
+        DestroyWindow(hwnd_);
+    }
+}
+void Overlay::update_view() {
+    if (!snapshot_) return;
+    auto& s = *snapshot_; sort_processes(s.processes, options_.sort);
+    std::vector<Row> next;
+    for (std::size_t i = 0; !summary_only() && i < std::min(s.processes.size(), static_cast<std::size_t>(options_.top)); ++i) {
+        const auto& p = s.processes[i];
+        auto name = wide(p.name); if (name.ends_with(L".exe")) name.resize(name.size()-4);
+        next.push_back({p.pid,p.creation_time,std::move(name),percent(p.cpu_percent),memory(p.working_set),percent(p.gpu_percent),memory(p.dedicated_gpu_bytes),network_rate(p.rx_bytes_per_second,p.tx_bytes_per_second)});
+    }
+    if (visible_ && show_icons_ && !summary_only()) {
+        if (!icons_) icons_ = std::make_unique<AppIconCache>(local_file(L"FLUXTOP_ICON_DB", L"icons.db"), [this] {
+            if (!icon_posted_.exchange(true)) PostMessageW(hwnd_, icon_message, 0, 0);
+        });
+        for (const auto& row : next) icons_->request(row.pid,row.created);
+    } else if (!show_icons_ || summary_only()) icons_.reset();
+    if (next != rows_) { rows_ = std::move(next); if (visible_) InvalidateRect(hwnd_, nullptr, FALSE); }
+}
+
+void Overlay::release_surface() {
+    brush_.Reset(); target_.Reset();
+    if (dc_) { if (old_bitmap_) SelectObject(dc_, old_bitmap_); DeleteDC(dc_); }
+    if (bitmap_) DeleteObject(bitmap_);
+    dc_ = nullptr; bitmap_ = nullptr; old_bitmap_ = nullptr; bits_ = nullptr; bitmap_size_ = {};
+}
+void Overlay::surface() {
+    RECT rect{}; GetClientRect(hwnd_, &rect);
+    const SIZE size{std::max<LONG>(1,rect.right),std::max<LONG>(1,rect.bottom)};
+    if (target_ && size.cx == bitmap_size_.cx && size.cy == bitmap_size_.cy) return;
+    release_surface();
+    dc_ = CreateCompatibleDC(nullptr); if (!dc_) throw windows_error("CreateCompatibleDC");
+    BITMAPINFO info{}; info.bmiHeader.biSize = sizeof(info.bmiHeader); info.bmiHeader.biWidth = size.cx;
+    info.bmiHeader.biHeight = -size.cy; info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32; info.bmiHeader.biCompression = BI_RGB;
+    bitmap_ = CreateDIBSection(dc_, &info, DIB_RGB_COLORS, &bits_, nullptr, 0); if (!bitmap_) throw windows_error("Overlay ARGB bitmap");
+    old_bitmap_ = SelectObject(dc_, bitmap_); bitmap_size_ = size;
+    auto properties = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED),static_cast<float>(dpi_),static_cast<float>(dpi_));
+    require_hr(factory_->CreateDCRenderTarget(&properties,&target_), "Transparent render target");
+    require_hr(target_->BindDC(dc_,&rect), "Bind transparent bitmap");
+    require_hr(target_->CreateSolidColorBrush(D2D1::ColorF(1,1,1,1),&brush_), "Text brush");
+    target_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+}
+void Overlay::draw_text(std::wstring_view value, D2D1_RECT_F rect, IDWriteTextFormat* font) {
+    auto shadow = rect; shadow.left += 1; shadow.right += 1; shadow.top += 1; shadow.bottom += 1;
+    brush_->SetColor(D2D1::ColorF(0,0,0,.8f));
+    target_->DrawText(value.data(),static_cast<UINT32>(value.size()),font,shadow,brush_.Get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    brush_->SetColor(D2D1::ColorF(1,1,1,1));
+    target_->DrawText(value.data(),static_cast<UINT32>(value.size()),font,rect,brush_.Get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
+}
+std::array<D2D1_RECT_F,6> Overlay::columns(float y, float height) const {
+    std::array<D2D1_RECT_F,6> result{};
+    const float fs = text_size(), gap = fs*.6f;
+    float start = 2;
+    if (!summary_only()) {
+        start += show_icons_ ? fs*1.7f : 0;
+        result[0] = D2D1::RectF(start,y,start+fs*12,y+height);
+        start = result[0].right+gap;
+    }
+    for (unsigned i=0;i<metric_names.size();++i) if (active_metrics() & (1U<<i)) {
+        result[i+1] = D2D1::RectF(start,y,start+fs*metric_widths[i],y+height);
+        start = result[i+1].right+gap;
+    }
+    return result;
+}
+void Overlay::paint() {
+    if (!visible_ || !hwnd_) return;
+    surface(); target_->BeginDraw(); target_->Clear(D2D1::ColorF(0,0,0,moving_ ? 1.0f/255.0f : 0));
+    const auto scale = std::min(1.0f,dip(bitmap_size_.cx)/table_width());
+    target_->SetTransform(D2D1::Matrix3x2F::Scale(scale,1));
+    auto header = columns(1,row_height());
+    header[0].left = 2; // The heading starts at the table edge, above the icon column.
+    if (!summary_only()) draw_text(L"Приложение",header[0],body_font_.Get());
+    std::array<std::wstring,5> totals{L"—",L"—",L"—",L"—",L"— / —"};
+    if (snapshot_) {
+        const auto& s = *snapshot_;
+        std::optional<double> ram;
+        if (s.total_ram_used && s.total_ram_capacity && *s.total_ram_capacity)
+            ram = 100.0 * static_cast<double>(*s.total_ram_used) / static_cast<double>(*s.total_ram_capacity);
+        totals = {percent(s.total_cpu_percent),percent(ram),percent(s.total_gpu_percent),
+            memory(s.total_gpu_memory),network_rate(s.total_rx_bytes_per_second,s.total_tx_bytes_per_second)};
+    }
+    for (std::size_t i=1;i<header.size();++i) if (active_metrics() & (1U<<(i-1)))
+        draw_text(std::wstring(metric_names[i-1])+L" "+totals[i-1],header[i],number_font_.Get());
+    const auto count = visible_rows(dip(bitmap_size_.cy));
+    scroll_ = std::min(scroll_, rows_.size()>count ? rows_.size()-count : 0);
+    for (std::size_t i=0;i<count && i+scroll_<rows_.size();++i) {
+        const auto& row = rows_[i+scroll_]; const float y = 1+static_cast<float>(i+1)*row_height();
+        const auto cells = columns(y,row_height());
+        if (show_icons_ && icons_) if (const auto icon = icons_->get(row.pid,row.created)) {
+            ComPtr<ID2D1Bitmap> image;
+            require_hr(target_->CreateBitmap(D2D1::SizeU(AppIcon::size,AppIcon::size),icon->pixels.data(),AppIcon::size*4,
+                D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED)),&image), "Application icon bitmap");
+            const float side = text_size()*1.3f, top = y+(row_height()-side)/2;
+            target_->DrawBitmap(image.Get(),D2D1::RectF(2,top,2+side,top+side));
+        }
+        draw_text(row.name,cells[0],body_font_.Get());
+        const std::array values{row.cpu,row.ram,row.gpu,row.vram,row.network};
+        for (std::size_t column=0;column<metric_names.size();++column) if (active_metrics() & (1U<<column))
+            draw_text(values[column],cells[column+1],number_font_.Get());
+    }
+    const auto result = target_->EndDraw();
+    if (result == D2DERR_RECREATE_TARGET) { release_surface(); return; }
+    require_hr(result,"Transparent table paint");
+    RECT rect{}; GetWindowRect(hwnd_,&rect); POINT destination{rect.left,rect.top}, source{};
+    BLENDFUNCTION blend{AC_SRC_OVER,0,static_cast<BYTE>(opacity_*255/100),AC_SRC_ALPHA};
+    if (!UpdateLayeredWindow(hwnd_,nullptr,&destination,&bitmap_size_,dc_,&source,0,&blend,ULW_ALPHA)) throw windows_error("UpdateLayeredWindow");
+}
+
+int Overlay::run() {
+    load_settings(); dpi_ = GetDpiForSystem(); load_icons();
+    require_hr(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,factory_.GetAddressOf()), "Direct2D factory");
+    require_hr(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,__uuidof(IDWriteFactory),reinterpret_cast<IUnknown**>(write_factory_.GetAddressOf())), "DirectWrite factory");
+    fonts();
+    WNDCLASSEXW cls{}; cls.cbSize=sizeof(cls); cls.hInstance=GetModuleHandleW(nullptr); cls.hIcon=large_icon_; cls.hIconSm=icon_;
+    cls.hCursor=LoadCursorW(nullptr,IDC_ARROW); cls.lpfnWndProc=dispatch; cls.lpszClassName=overlay_class;
+    if (!RegisterClassExW(&cls) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS) throw windows_error("Register overlay class");
+    cls.lpfnWndProc=client_dispatch; cls.lpszClassName=client_class; cls.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_BTNFACE+1);
+    if (!RegisterClassExW(&cls) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS) throw windows_error("Register client class");
+    if (x_==CW_USEDEFAULT || y_==CW_USEDEFAULT) { RECT area{}; SystemParametersInfoW(SPI_GETWORKAREA,0,&area,0); x_=area.right-pixels(table_width())-pixels(20); y_=area.top+pixels(20); }
+    const bool inspect = env(L"FLUXTOP_OVERLAY_INSPECT")==L"1";
+    const DWORD style=WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | (inspect ? WS_EX_APPWINDOW : WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+    hwnd_=CreateWindowExW(style,overlay_class,L"Таблица ресурсов",WS_POPUP,x_,y_,pixels(table_width()),pixels(row_height()*11+4),
+        nullptr,nullptr,GetModuleHandleW(nullptr),this);
+    if (!hwnd_) throw windows_error("Create transparent table");
+    dpi_=GetDpiForWindow(hwnd_); fit_table(); taskbar_created_=RegisterWindowMessageW(L"TaskbarCreated"); add_tray();
+    toggle_key_=RegisterHotKey(hwnd_,toggle_hotkey,MOD_CONTROL|MOD_ALT|MOD_NOREPEAT,VK_F10)!=FALSE;
+    client_key_=RegisterHotKey(hwnd_,client_hotkey,MOD_CONTROL|MOD_ALT|MOD_NOREPEAT,VK_F9)!=FALSE;
+    ShowWindow(hwnd_,SW_SHOWNOACTIVATE);
+    // A hidden-console startup can override the first ShowWindow call via STARTUPINFO.
+    ShowWindow(hwnd_,SW_SHOWNOACTIVATE);
+    if ((!options_.samples || inspect) && !options_.tray) show_client();
+    worker_.start(options_,[this](std::optional<Snapshot> snapshot,std::string error,bool finished) {
+        std::lock_guard lock(mailbox_mutex_); pending_=std::move(snapshot); pending_error_=std::move(error); pending_finished_=finished;
+        if (!posted_) posted_=PostMessageW(hwnd_,sample_message,0,0)!=FALSE;
+    });
+    MSG msg{}; BOOL result{};
+    while ((result=GetMessageW(&msg,nullptr,0,0))>0) {
+        if (!client_ || !IsDialogMessageW(client_,&msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+    }
+    worker_.stop(); icons_.reset();
+    if (result<0) throw windows_error("GetMessageW"); return static_cast<int>(msg.wParam);
+}
+
+LRESULT CALLBACK Overlay::dispatch(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
+    auto* app=reinterpret_cast<Overlay*>(GetWindowLongPtrW(window,GWLP_USERDATA));
+    if (msg==WM_NCCREATE) { app=static_cast<Overlay*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams); app->hwnd_=window; SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(app)); }
+    if (!app) return DefWindowProcW(window,msg,wp,lp);
+    try { return app->message(msg,wp,lp); }
+    catch (const std::exception& error) {
+        app->exit_code_=1;
+        if (!app->options_.samples) MessageBoxW(app->client_,wide(error.what()).c_str(),L"FluxTop — ошибка",MB_OK|MB_ICONERROR);
+        DestroyWindow(window); return 0;
+    }
+}
+LRESULT CALLBACK Overlay::client_dispatch(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
+    auto* app=reinterpret_cast<Overlay*>(GetWindowLongPtrW(window,GWLP_USERDATA));
+    if (msg==WM_NCCREATE) { app=static_cast<Overlay*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams); app->client_=window; SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(app)); }
+    if (!app) return DefWindowProcW(window,msg,wp,lp);
+    try { return app->client_message(window,msg,wp,lp); }
+    catch (const std::exception& error) { MessageBoxW(window,wide(error.what()).c_str(),L"FluxTop — ошибка клиента",MB_OK|MB_ICONERROR); DestroyWindow(window); return 0; }
+}
+LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
+    switch (msg) {
+    case WM_CREATE: client_dpi_=GetDpiForWindow(window); init_client(); return 0;
+    case WM_SIZE:
+        if (wp==SIZE_MINIMIZED) { PostMessageW(window,WM_CLOSE,0,0); return 0; }
+        break;
+    case WM_DPICHANGED: { client_dpi_=HIWORD(wp); const auto* r=reinterpret_cast<RECT*>(lp); SetWindowPos(window,nullptr,r->left,r->top,0,0,SWP_NOSIZE|SWP_NOZORDER); layout_client(); return 0; }
+    case WM_HSCROLL:
+        if (reinterpret_cast<HWND>(lp)==GetDlgItem(window,alpha_control)) {
+            opacity_=static_cast<unsigned>(SendDlgItemMessageW(window,alpha_control,TBM_GETPOS,0,0));
+            SetDlgItemTextW(window,alpha_label,(L"Непрозрачность: "+std::to_wstring(opacity_)+L"%").c_str());
+            InvalidateRect(hwnd_,nullptr,FALSE); SetTimer(window,settings_timer,300,nullptr); return 0;
+        }
+        break;
+    case WM_COMMAND:
+        if (initializing_client_) return 0;
+        if ((LOWORD(wp)==top_control || LOWORD(wp)==font_control || LOWORD(wp)==interval_control) && HIWORD(wp)==EN_CHANGE) {
+            SetTimer(window,settings_timer,300,nullptr); return 0;
+        }
+        if ((LOWORD(wp)==top_control || LOWORD(wp)==font_control || LOWORD(wp)==interval_control) && HIWORD(wp)==EN_KILLFOCUS) {
+            KillTimer(window,settings_timer); apply_client();
+            initializing_client_=true;
+            SetDlgItemInt(window,LOWORD(wp),LOWORD(wp)==top_control ? options_.top : LOWORD(wp)==font_control ? options_.font_size : std::clamp(options_.interval_ms/1000,1U,10U),FALSE);
+            initializing_client_=false; return 0;
+        }
+        if (LOWORD(wp)==sort_control && HIWORD(wp)==CBN_SELCHANGE) {
+            apply_client(); return 0;
+        }
+        if (LOWORD(wp)>=metric_control && LOWORD(wp)<metric_control+metric_names.size() && HIWORD(wp)==BN_CLICKED) {
+            apply_client(); return 0;
+        }
+        switch (LOWORD(wp)) {
+        case startup_control:
+            if (HIWORD(wp)==BN_CLICKED) {
+                try { set_autostart(SendDlgItemMessageW(window,startup_control,BM_GETCHECK,0,0)==BST_CHECKED); }
+                catch (const std::exception& error) { MessageBoxW(window,wide(error.what()).c_str(),L"Автозапуск FluxTop",MB_OK|MB_ICONERROR); }
+                SendDlgItemMessageW(window,startup_control,BM_SETCHECK,autostart_enabled() ? BST_CHECKED : BST_UNCHECKED,0);
+            }
+            return 0;
+        case icons_control: if (HIWORD(wp)==BN_CLICKED) apply_client(); return 0;
+        case summary_control: if (HIWORD(wp)==BN_CLICKED) apply_client(); return 0;
+        case move_control: moving_=SendDlgItemMessageW(window,move_control,BM_GETCHECK,0,0)==BST_CHECKED; movement(); return 0;
+        case visible_control: set_visible(SendDlgItemMessageW(window,visible_control,BM_GETCHECK,0,0)==BST_CHECKED); return 0;
+        case quit_app: DestroyWindow(hwnd_); return 0;
+        }
+        break;
+    case WM_TIMER:
+        if (wp==settings_timer) { KillTimer(window,settings_timer); apply_client(); return 0; }
+        break;
+    case WM_CLOSE: KillTimer(window,settings_timer); apply_client(); DestroyWindow(window); return 0;
+    case WM_DESTROY:
+        client_=nullptr; controls_.clear(); if (client_font_) { DeleteObject(client_font_); client_font_=nullptr; } activity(); return 0;
+    }
+    return DefWindowProcW(window,msg,wp,lp);
+}
+LRESULT Overlay::message(UINT msg,WPARAM wp,LPARAM lp) {
+    if (taskbar_created_ && msg==taskbar_created_) { add_tray(); return 0; }
+    switch (msg) {
+    case WM_ERASEBKGND: return 1;
+    case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+    case WM_PAINT: { PAINTSTRUCT data{}; BeginPaint(hwnd_,&data); EndPaint(hwnd_,&data); paint(); return 0; }
+    case WM_SIZE: if (visible_) InvalidateRect(hwnd_,nullptr,FALSE); return 0;
+    case WM_DPICHANGED: {
+        dpi_=HIWORD(wp); load_icons(); release_surface(); const auto* r=reinterpret_cast<RECT*>(lp);
+        SetWindowPos(hwnd_,nullptr,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE); fit_table(); return 0;
+    }
+    case WM_DISPLAYCHANGE: fit_table(); return 0;
+    case WM_EXITSIZEMOVE: save_settings(); return 0;
+    case WM_NCHITTEST: return moving_ ? HTCAPTION : HTTRANSPARENT;
+    case WM_MOUSEWHEEL: {
+        if (moving_) {
+            RECT rect{}; GetClientRect(hwnd_,&rect); const auto count=visible_rows(dip(rect.bottom)); const auto maximum=rows_.size()>count ? rows_.size()-count : 0;
+            if (GET_WHEEL_DELTA_WPARAM(wp)<0) scroll_=std::min(maximum,scroll_+1); else if (scroll_) --scroll_;
+            InvalidateRect(hwnd_,nullptr,FALSE);
+        }
+        return 0;
+    }
+    case WM_CONTEXTMENU: if (moving_) show_client(); return 0;
+    case WM_HOTKEY: if (wp==toggle_hotkey) set_visible(!visible_); else if (wp==client_hotkey) show_client(); return 0;
+    case tray_message:
+        if (lp==WM_LBUTTONDBLCLK || lp==NIN_KEYSELECT) show_client(); else if (lp==WM_RBUTTONUP || lp==WM_CONTEXTMENU) tray_menu(); return 0;
+    case sample_message: receive(); return 0;
+    case icon_message: icon_posted_=false; if (visible_) InvalidateRect(hwnd_,nullptr,FALSE); client_stats(); return 0;
+    case WM_CLOSE: DestroyWindow(hwnd_); return 0;
+    case WM_DESTROY: {
+        stopping_=true; save_settings(); worker_.stop(); icons_.reset();
+        if (client_) DestroyWindow(client_);
+        NOTIFYICONDATAW data{}; data.cbSize=sizeof(data); data.hWnd=hwnd_; data.uID=1;
+        if (tray_) Shell_NotifyIconW(NIM_DELETE,&data);
+        if (toggle_key_) UnregisterHotKey(hwnd_,toggle_hotkey); if (client_key_) UnregisterHotKey(hwnd_,client_hotkey);
+        tray_=false; toggle_key_=false; client_key_=false; PostQuitMessage(exit_code_); return 0;
+    }
+    }
+    return DefWindowProcW(hwnd_,msg,wp,lp);
+}
+} // namespace
+
+int run_overlay(const Options& options) {
+    // Finite diagnostic runs must really render, even alongside the user's monitor.
+    Handle instance(CreateMutexW(nullptr, FALSE, options.samples ? nullptr : L"Local\\FluxTop.Monitor.v1"));
+    if (!instance.valid()) throw windows_error("Create FluxTop instance mutex");
+    if (GetLastError()==ERROR_ALREADY_EXISTS) return 0;
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    const auto com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
+    struct Scope { bool active; ~Scope() { if (active) CoUninitialize(); } } scope{SUCCEEDED(com)};
+    INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_STANDARD_CLASSES|ICC_BAR_CLASSES}; InitCommonControlsEx(&controls);
+    FreeConsole();
+    try { Overlay app(options); return app.run(); }
+    catch (const std::exception& error) {
+        if (!options.samples) MessageBoxW(nullptr,wide(error.what()).c_str(),L"FluxTop — ошибка запуска",MB_OK|MB_ICONERROR);
+        return 1;
+    }
+}
+} // namespace fluxtop
