@@ -270,6 +270,7 @@ std::vector<Process> aggregate_application_processes(const std::vector<Process>&
             Process combined=root;
             combined.cpu_percent.reset(); combined.working_set.reset(); combined.private_bytes.reset();
             combined.gpu_percent.reset(); combined.dedicated_gpu_bytes.reset();
+            combined.presented_fps.reset();
             combined.rx_bytes_per_second.reset(); combined.tx_bytes_per_second.reset();
             combined.spike_score=0; combined.auto_scores.fill(0); combined.burst_scores.fill(0);
             combined.member_pids.clear();
@@ -282,6 +283,7 @@ std::vector<Process> aggregate_application_processes(const std::vector<Process>&
         add_bytes(combined.working_set,part.working_set);
         add_bytes(combined.private_bytes,part.private_bytes);
         max_gpu(combined.gpu_percent,part.gpu_percent); // Never sum independent WDDM engines.
+        max_gpu(combined.presented_fps,part.presented_fps); // Never sum unrelated FPS streams.
         add_bytes(combined.dedicated_gpu_bytes,part.dedicated_gpu_bytes);
         add_positive(combined.rx_bytes_per_second,part.rx_bytes_per_second);
         add_positive(combined.tx_bytes_per_second,part.tx_bytes_per_second);

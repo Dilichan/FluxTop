@@ -33,7 +33,8 @@ constexpr int toggle_hotkey = 1, client_hotkey = 2;
 enum Control : UINT { open_client = 100, toggle_table, quit_app, top_label, top_control, sort_control, font_control,
     alpha_control, visible_control, move_control, icons_control, stats_control, startup_control,
     alpha_label, interval_control, summary_control, header_colors_control, row_colors_control, animation_control, metric_control = 200, tab_control = 450 };
-constexpr unsigned all_metrics = 31;
+constexpr unsigned all_metrics = 63; // All six visible columns, including optional FPS.
+constexpr unsigned default_metrics = 31; // FPS is opt-in to keep idle overhead low.
 constexpr int load_band(double x) { return x < 50.0 ? 0 : x < 70.0 ? 1 : 2; }
 constexpr int temperature_band(double x) { return x < 65.0 ? 0 : x <= 80.0 ? 1 : 2; }
 static_assert(load_band(49.9) == 0 && load_band(50.0) == 1 && load_band(70.0) == 2);
@@ -102,7 +103,7 @@ std::filesystem::path local_file(const wchar_t* override_name, const wchar_t* fi
 struct Row {
     std::uint32_t pid{};
     std::optional<std::uint64_t> created;
-    std::wstring name, cpu, ram, gpu, vram, network;
+    std::wstring name, cpu, ram, gpu, vram, network, fps;
     // Each visible numeric cell has its own utilization and burst color.
     std::array<std::optional<double>,4> loads{}; // CPU / RAM / GPU / GPU RAM
     std::array<bool,6> bursts{};                 // CPU / RAM / GPU / GPU RAM / Rx / Tx
@@ -140,14 +141,15 @@ private:
     void fit_table();
     void release_surface();
     void surface();
-    void paint();
+    // Animation ticks repaint only the moving row area; ordinary updates repaint everything.
+    void paint(bool animation_only = false);
     void draw_text(std::wstring_view value, D2D1_RECT_F rect, IDWriteTextFormat* font,
         bool highlight = false, bool burst = false, std::optional<double> load = std::nullopt,
         float opacity = 1.0f);
     void draw_header_metric(unsigned column, const std::wstring& reading, std::optional<double> load,
         std::optional<double> temperature, D2D1_RECT_F rect, bool cpu_board = false);
     void draw_network_text(const Row& row, D2D1_RECT_F rect, float opacity = 1.0f);
-    std::array<D2D1_RECT_F,6> columns(float y, float height) const;
+    std::array<D2D1_RECT_F,7> columns(float y, float height) const;
     float text_size() const { return static_cast<float>(options_.font_size); }
     float row_height() const { return text_size() * 1.6f; }
     bool summary_only() const { return summary_ || !metrics_; }
@@ -173,7 +175,7 @@ private:
     bool tray_ = false, toggle_key_ = false, client_key_ = false, visible_ = true;
     bool moving_ = false, show_icons_ = true, stopping_ = false, initializing_client_ = false;
     unsigned opacity_ = 100;
-    unsigned metrics_ = all_metrics;
+    unsigned metrics_ = default_metrics;
     bool summary_ = false;
     bool header_colors_ = true, row_colors_ = true;
     bool animation_enabled_ = true;
@@ -199,6 +201,7 @@ private:
     std::vector<RowMotion> row_motion_;
     ULONGLONG row_animation_started_{};
     unsigned row_animation_duration_ms_{650};
+    float row_animation_last_painted_progress_{};
     bool row_animation_active_{};
     // D2D bitmaps are render-target resources: reuse until the icon or target changes.
     struct CachedBitmap {
@@ -238,7 +241,7 @@ void Overlay::load_settings() {
     const auto read = [&](const wchar_t* key, int fallback) { return static_cast<int>(GetPrivateProfileIntW(L"overlay", key, fallback, settings_.c_str())); };
     x_ = read(L"x", CW_USEDEFAULT); y_ = read(L"y", CW_USEDEFAULT);
     if (read(L"layout_version", 0) >= 2) opacity_ = static_cast<unsigned>(std::clamp(read(L"opacity", 100), 1, 100));
-    const auto saved_metrics = static_cast<unsigned>(read(L"metrics", all_metrics));
+    const auto saved_metrics = static_cast<unsigned>(read(L"metrics", default_metrics));
     metrics_ = read(L"layout_version", 0) >= 3 ? saved_metrics & all_metrics
         : (saved_metrics & 15U) | ((saved_metrics & 48U) ? 16U : 0U);
     summary_ = read(L"summary_only", 0) != 0;
@@ -422,7 +425,7 @@ void Overlay::init_client() {
     control(L"STATIC", L"Показывать показатели:", 0, 0, 22, 422, 536, 24);
     for (unsigned i=0;i<metric_names.size();++i) {
         const auto box = control(L"BUTTON", metric_names[i], BS_AUTOCHECKBOX | WS_TABSTOP,
-            metric_control+i, 22+static_cast<int>(i)*90, 451, 90, 26);
+            metric_control+i, 22+static_cast<int>(i)*104, 451, 98, 26);
         SendMessageW(box, BM_SETCHECK, (metrics_ & (1U<<i)) ? BST_CHECKED : BST_UNCHECKED, 0);
     }
     const auto summary = control(L"BUTTON", L"Только общие показатели (без списка приложений)", BS_AUTOCHECKBOX | WS_TABSTOP,
@@ -460,7 +463,7 @@ void Overlay::layout_client() {
         SendMessageW(child.window, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         MoveWindow(child.window, px(child.bounds.left), px(child.bounds.top+40), px(child.bounds.right-child.bounds.left), px(child.bounds.bottom-child.bounds.top), TRUE);
     }
-    const int page_width=client_page_==1?780:580;
+    const int page_width=client_page_==1?780:680;
     const int page_height=client_page_==1?920:840;
     if(tabs_) MoveWindow(tabs_,0,0,px(page_width),px(page_height),TRUE);
     if(statistics_) statistics_->resize(px(12),px(40),px(page_width-24),px(page_height-52));
@@ -536,6 +539,7 @@ void Overlay::set_visible(bool visible) {
         KillTimer(hwnd_,overlay_animation_timer);
         row_animation_active_=false;
         previous_rows_.clear();row_motion_.clear();
+        worker_.set_fps_targets({});
         ShowWindow(hwnd_, SW_HIDE); release_surface(); icons_.reset();
     }
     else { ShowWindow(hwnd_, SW_SHOWNOACTIVATE); update_view(); InvalidateRect(hwnd_, nullptr, FALSE); }
@@ -595,9 +599,28 @@ void Overlay::update_view() {
                 s.total_ram_capacity,s.total_gpu_memory_capacity);
         // No blink/flash effects in the overlay. AutoScore still uses burst data for ranking.
         std::array<bool,6> bursts{};
+        std::wstring fps=L"—";
+        if (p.presented_fps && std::isfinite(*p.presented_fps))
+            fps=std::to_wstring(static_cast<unsigned>(std::lround(*p.presented_fps)));
         next.push_back({p.pid,p.creation_time,std::move(name),percent(p.cpu_percent),
             memory(p.working_set),percent(p.gpu_percent),memory(p.dedicated_gpu_bytes),
-            network_rate(p.rx_bytes_per_second,p.tx_bytes_per_second),loads,bursts});    }
+            network_rate(p.rx_bytes_per_second,p.tx_bytes_per_second),std::move(fps),loads,bursts});    }
+    // Track only the currently displayed PID families. FPS is optional and off by default.
+    std::vector<std::uint32_t> fps_targets;
+    if (visible_ && !summary_only() && (metrics_ & (1U<<5))) {
+        fps_targets.reserve(128);
+        const auto visible_count=std::min(display.size(),static_cast<std::size_t>(options_.top));
+        // First track one PID per visible application so a large svchost family
+        // cannot monopolize the entire 128-PID budget.
+        for (std::size_t i=0;i<visible_count;++i) fps_targets.push_back(display[i]->pid);
+        for (std::size_t i=0;i<visible_count && fps_targets.size()<128;++i) {
+            for (const auto pid : display[i]->member_pids) {
+                if (fps_targets.size()==128) break;
+                if (pid!=display[i]->pid) fps_targets.push_back(pid);
+            }
+        }
+    }
+    worker_.set_fps_targets(std::move(fps_targets));
     if (visible_ && show_icons_ && !summary_only()) {
         if (!icons_) icons_ = std::make_unique<AppIconCache>(local_file(L"FLUXTOP_ICON_DB", L"icons.db"), [this] {
             if (!icon_posted_.exchange(true)) PostMessageW(hwnd_, icon_message, 0, 0);
@@ -646,12 +669,34 @@ void Overlay::update_view() {
                 if(pinned) from=i==0?0.0f:std::max(1.0f,from);
                 row_motion_.push_back({from,old});
             }
+            // Old rows were only needed to recover prior positions, not for painting.
+            // Release their strings and icons immediately instead of retaining two tables.
+            previous_rows_.clear();
+            // A newly inserted/replaced row at the same slot needs no animation.
+            bool has_motion=false;
+            for(std::size_t i=0;i<row_motion_.size();++i) {
+                if(std::abs(row_motion_[i].start_slot-static_cast<float>(i))>0.01f) {
+                    has_motion=true;break;
+                }
+            }
             row_animation_started_=tick;
-            // 1s sampling -> 650ms; 10s sampling -> 1600ms (bounded UI redraw cost).
+            // Sampling controls the transition duration, never the renderer's FPS.
             row_animation_duration_ms_=std::clamp(
                 static_cast<unsigned>(options_.interval_ms*0.65),350U,1600U);
-            row_animation_active_=true;
-            SetTimer(hwnd_,overlay_animation_timer,40,nullptr); // 25 FPS while active only.
+            row_animation_last_painted_progress_=0.0f;
+            row_animation_active_=has_motion;
+            // 25 FPS for tiny tables; 16 FPS for default 10 rows; lower cost for large tables.
+            const UINT frame_ms=rows_.size()<=5?40U:rows_.size()<=15?60U:
+                rows_.size()<=40?75U:90U;
+            if(has_motion) {
+                if(!SetTimer(hwnd_,overlay_animation_timer,frame_ms,nullptr)) {
+                    row_animation_active_=false;
+                    row_motion_.clear();
+                }
+            } else {
+                KillTimer(hwnd_,overlay_animation_timer);
+                row_motion_.clear();
+            }
         } else {
             rows_=std::move(next);
             KillTimer(hwnd_,overlay_animation_timer);
@@ -749,10 +794,11 @@ void Overlay::draw_header_metric(unsigned column, const std::wstring& reading, s
     }
     draw_text(line,rect,number_font_.Get());
     if (!header_colors_) return;
+    // A colored CPU/GPU heading has two ranges, but only needs one text layout.
+    ComPtr<IDWriteTextLayout> layout;
+    if (FAILED(write_factory_->CreateTextLayout(line.c_str(),static_cast<UINT32>(line.size()),
+        number_font_.Get(),rect.right-rect.left,rect.bottom-rect.top,&layout))) return;
     auto tint = [&](std::size_t offset, std::size_t length, D2D1_COLOR_F color) {
-        ComPtr<IDWriteTextLayout> layout;
-        if (FAILED(write_factory_->CreateTextLayout(line.c_str(),static_cast<UINT32>(line.size()),
-            number_font_.Get(),rect.right-rect.left,rect.bottom-rect.top,&layout))) return;
         DWRITE_HIT_TEST_METRICS hits[8]{};
         UINT32 count = 0;
         if (FAILED(layout->HitTestTextRange(static_cast<UINT32>(offset),static_cast<UINT32>(length),
@@ -781,20 +827,47 @@ void Overlay::draw_header_metric(unsigned column, const std::wstring& reading, s
         tint(temp_from,temp_length,color);
     }
 }
-std::array<D2D1_RECT_F,6> Overlay::columns(float y, float height) const {
+std::array<D2D1_RECT_F,7> Overlay::columns(float y, float height) const {
     const auto layout = calculate_overlay_columns(text_size(), active_metrics(), summary_only(), show_icons_);
-    std::array<D2D1_RECT_F,6> rects{};
+    std::array<D2D1_RECT_F,7> rects{};
     for (std::size_t index = 0; index < rects.size(); ++index) {
         rects[index] = D2D1::RectF(layout.left[index], y, layout.right[index], y + height);
     }
     return rects;
 }
-void Overlay::paint() {
+void Overlay::paint(bool animation_only) {
     if (!visible_ || !hwnd_) return;
-    surface(); target_->BeginDraw(); target_->Clear(D2D1::ColorF(0,0,0,moving_ ? 1.0f/255.0f : 0));
-    const auto scale = std::min(1.0f,dip(bitmap_size_.cx)/table_width());
+    RECT client{};GetClientRect(hwnd_,&client);
+    // A new/resized target has no previously painted heading to preserve.
+    if(!target_ || bitmap_size_.cx!=std::max<LONG>(1,client.right) ||
+        bitmap_size_.cy!=std::max<LONG>(1,client.bottom)) animation_only=false;
+    surface();target_->BeginDraw();
+    // Clear with the identity transform: the clipped body begins at the exact
+    // physical header boundary, even if the window is horizontally scaled.
+    target_->SetTransform(D2D1::Matrix3x2F::Identity());
+    const auto background=D2D1::ColorF(0,0,0,moving_ ? 1.0f/255.0f : 0);
+    if(animation_only && dip(bitmap_size_.cy)>row_height()+1) {
+        target_->PushAxisAlignedClip(D2D1::RectF(0,row_height()+1,
+            dip(bitmap_size_.cx),dip(bitmap_size_.cy)),D2D1_ANTIALIAS_MODE_ALIASED);
+        target_->Clear(background);
+        target_->PopAxisAlignedClip();
+    } else {
+        animation_only=false;
+        target_->Clear(background);
+    }
+    const auto scale=std::min(1.0f,dip(bitmap_size_.cx)/table_width());
     target_->SetTransform(D2D1::Matrix3x2F::Scale(scale,1));
-    auto header = columns(1,row_height());
+    // Column positions are immutable within one frame; don't recompute per row.
+    const auto geometry=calculate_overlay_columns(text_size(),active_metrics(),summary_only(),show_icons_);
+    const float height=row_height();
+    const auto row_cells=[&](float y) {
+        std::array<D2D1_RECT_F,6> cells{};
+        for(std::size_t column=0;column<cells.size();++column)
+            cells[column]=D2D1::RectF(geometry.left[column],y,geometry.right[column],y+height);
+        return cells;
+    };
+    if(!animation_only) {
+    auto header = row_cells(1);
     header[0].left = 2; // The heading starts at the table edge, above the icon column.
     if (!summary_only()) draw_text(L"Приложение",header[0],body_font_.Get());
     std::array<std::wstring,5> totals{L"—",L"—",L"—",L"—",L"— / —"};
@@ -821,10 +894,13 @@ void Overlay::paint() {
         cpu_temperature = s.cpu_temperature_c;
         gpu_temperature = s.gpu_temperature_c;
     }
-    for (std::size_t i=1;i<header.size();++i) if (active_metrics() & (1U<<(i-1)))
-        draw_header_metric(static_cast<unsigned>(i-1),totals[i-1],load[i-1],
+    for (std::size_t i=1;i<header.size();++i) if (active_metrics() & (1U<<(i-1))) {
+        if (i==6) draw_text(L"FPS",header[i],number_font_.Get());
+        else draw_header_metric(static_cast<unsigned>(i-1),totals[i-1],load[i-1],
             i==1 ? cpu_temperature : i==3 ? gpu_temperature : std::optional<double>{},header[i],
             i==1 && snapshot_ && snapshot_->cpu_temperature_board);
+    }
+    } // Header values and layout stay untouched during animation-only frames.
     const auto count=visible_rows(dip(bitmap_size_.cy));
     scroll_=std::min(scroll_,rows_.size()>count?rows_.size()-count:0);
     const float progress=row_animation_active_ && row_animation_duration_ms_
@@ -849,7 +925,7 @@ void Overlay::paint() {
         }
         const float opacity=1.0f; // Never fade newly appearing rows or their icons.
         const float y=1+(slot+1.0f)*row_height();
-        const auto cells=columns(y,row_height());
+        const auto cells=row_cells(y);
         if (show_icons_ && icons_) if (const auto icon = icons_->get(row.pid,row.created)) {
             auto found=icon_bitmaps_.find(row.pid);
             if (found==icon_bitmaps_.end() || found->second.created!=row.created || found->second.source!=icon) {
@@ -874,11 +950,11 @@ void Overlay::paint() {
         }
         draw_text(row.name,cells[0],body_font_.Get(),false,false,std::nullopt,opacity);
         const auto paint_values=[&](const Row& displayed,float alpha) {
-            const std::array<std::wstring_view,5> values{
-                displayed.cpu,displayed.ram,displayed.gpu,displayed.vram,displayed.network};
+            const std::array<std::wstring_view,6> values{
+                displayed.cpu,displayed.ram,displayed.gpu,displayed.vram,displayed.network,displayed.fps};
             for(std::size_t column=0;column<metric_names.size();++column) {
                 if(!(active_metrics() & (1U<<column))) continue;
-                if(column==4) draw_text(values[column],cells[column+1],number_font_.Get(),
+                if(column==4 || column==5) draw_text(values[column],cells[column+1],number_font_.Get(),
                     false,false,std::nullopt,alpha);
                 else draw_text(values[column],cells[column+1],number_font_.Get(),
                     true,false,displayed.loads[column],alpha);
@@ -894,6 +970,7 @@ void Overlay::paint() {
     RECT rect{}; GetWindowRect(hwnd_,&rect); POINT destination{rect.left,rect.top}, source{};
     BLENDFUNCTION blend{AC_SRC_OVER,0,static_cast<BYTE>(opacity_*255/100),AC_SRC_ALPHA};
     if (!UpdateLayeredWindow(hwnd_,nullptr,&destination,&bitmap_size_,dc_,&source,0,&blend,ULW_ALPHA)) throw windows_error("UpdateLayeredWindow");
+    if(row_animation_active_) row_animation_last_painted_progress_=progress;
 }
 
 int Overlay::run() {
@@ -1038,13 +1115,28 @@ LRESULT Overlay::message(UINT msg,WPARAM wp,LPARAM lp) {
     case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
     case WM_TIMER:
         if(wp==overlay_animation_timer) {
-            if(!row_animation_active_ ||
-                GetTickCount64()-row_animation_started_>=row_animation_duration_ms_) {
+            const auto elapsed=GetTickCount64()-row_animation_started_;
+            const bool finished=!row_animation_active_ || elapsed>=row_animation_duration_ms_;
+            const float progress=finished?1.0f:overlay_smoothstep(
+                static_cast<float>(elapsed)/static_cast<float>(row_animation_duration_ms_));
+            // Don't render sub-pixel movements. Ease-in/out otherwise wastes frames
+            // while the rows have not visibly moved since their last paint.
+            float largest_pixel_shift=0.0f;
+            if(!finished) for(std::size_t i=0;i<row_motion_.size();++i) {
+                const float travel=std::abs(static_cast<float>(i)-row_motion_[i].start_slot);
+                const float shift=travel*std::abs(progress-row_animation_last_painted_progress_)
+                    *row_height()*static_cast<float>(dpi_)/96.0f;
+                largest_pixel_shift=std::max(largest_pixel_shift,shift);
+            }
+            if(finished) {
                 KillTimer(hwnd_,overlay_animation_timer);
                 row_animation_active_=false;
                 previous_rows_.clear();row_motion_.clear();
             }
-            if(visible_) InvalidateRect(hwnd_,nullptr,FALSE);
+            // WM_PAINT from fresh readings/settings takes precedence over a row-only
+            // frame. Both execute on the UI thread, so no shared bitmap races.
+            if(visible_ && (finished || largest_pixel_shift>=0.85f) &&
+                !GetUpdateRect(hwnd_,nullptr,FALSE)) paint(true);
             return 0;
         }
         break;

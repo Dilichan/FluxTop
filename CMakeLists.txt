@@ -26,7 +26,7 @@ target_include_directories(fluxtop_history PUBLIC include)
 target_compile_features(fluxtop_history PUBLIC cxx_std_20)
 target_compile_definitions(fluxtop_history PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
 target_link_libraries(fluxtop_history PUBLIC fluxtop_core winsqlite3)
-add_executable(fluxtop src/main.cpp src/process_collector.cpp src/gpu_collector.cpp src/privileges.cpp src/sampler.cpp src/overlay.cpp src/statistics_page.cpp src/statistics_history.cpp src/network_collector.cpp src/autostart.cpp src/temperatures.cpp
+add_executable(fluxtop src/main.cpp src/process_collector.cpp src/gpu_collector.cpp src/fps_collector.cpp src/privileges.cpp src/sampler.cpp src/overlay.cpp src/statistics_page.cpp src/statistics_history.cpp src/network_collector.cpp src/autostart.cpp src/temperatures.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/fluxtop.rc")
 target_link_libraries(fluxtop PRIVATE fluxtop_core fluxtop_icons fluxtop_history psapi pdh advapi32 d2d1 dwrite shell32 user32 gdi32 ole32 oleaut32 wbemuuid comctl32 tdh uuid)
 target_compile_definitions(fluxtop PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN
@@ -91,6 +91,8 @@ if(BUILD_TESTING)
         -File "${PROJECT_SOURCE_DIR}/tests/statistics_tooltip_axis_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
     add_test(NAME overlay_animation_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
         -File "${PROJECT_SOURCE_DIR}/tests/overlay_animation_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
+    add_test(NAME fps_header_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+        -File "${PROJECT_SOURCE_DIR}/tests/fps_header_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
     set_tests_properties(history PROPERTIES TIMEOUT 20)
     add_executable(fluxtop_temperature_tests tests/temperature_tests.cpp src/temperatures.cpp)
     target_include_directories(fluxtop_temperature_tests PRIVATE include)

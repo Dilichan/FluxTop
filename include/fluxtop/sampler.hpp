@@ -6,6 +6,7 @@
 #include "fluxtop/process_collector.hpp"
 #include "fluxtop/network_collector.hpp"
 #include "fluxtop/history.hpp"
+#include "fluxtop/fps_collector.hpp"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -16,14 +17,18 @@
 namespace fluxtop {
 class Sampler {
 public:
-    Sampler(bool gpu, bool network);
+    Sampler(bool gpu, bool network, bool foreground_fps = false);
     Snapshot collect();
+    void set_fps_targets(std::vector<std::uint32_t> targets);
 private:
     Privileges privileges_;
     ProcessCollector processes_;
     GpuCollector gpu_;
     SpikeTracker spikes_;
     NetworkCollector network_;
+    FpsCollector fps_;
+    bool fps_enabled_{};
+    std::vector<std::uint32_t> fps_targets_;
     HistoryWriter history_{history_path()};
     std::chrono::steady_clock::time_point origin_;
     std::chrono::steady_clock::time_point previous_;
@@ -37,11 +42,13 @@ public:
     void pause(bool paused);
     void stop();
     void set_interval(unsigned milliseconds);
+    void set_fps_targets(std::vector<std::uint32_t> targets);
 private:
     std::atomic<bool> paused_{false};
     std::mutex mutex_;
     std::condition_variable_any wake_;
     std::jthread thread_;
+    std::vector<std::uint32_t> fps_targets_;
     std::atomic<unsigned> interval_{1000}, revision_{0};
 };
 } // namespace fluxtop

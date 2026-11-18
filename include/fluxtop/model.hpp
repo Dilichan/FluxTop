@@ -31,6 +31,7 @@ struct AutoRank {
 struct Process : RawProcess {
     std::optional<double> cpu_percent;
     std::optional<double> gpu_percent;
+    std::optional<double> presented_fps; // Optional per-PID frame presentation rate; not a resource sum.
     std::optional<std::uint64_t> dedicated_gpu_bytes;
     bool has_baseline{};
     double spike_score{};

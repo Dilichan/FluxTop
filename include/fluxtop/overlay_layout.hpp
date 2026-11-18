@@ -16,19 +16,19 @@ struct OverlayLayoutConfig {
     float left_padding = 2.0f;
     float right_padding = 2.0f;
     // CPU, RAM, GPU, GPU RAM, Rx/Tx; these are actual widths, without hidden minima.
-    std::array<float, 5> metric_widths{8.0f, 5.8f, 8.0f, 9.0f, 12.0f};
+    std::array<float, 6> metric_widths{8.0f, 5.8f, 8.0f, 9.0f, 12.0f, 5.5f};
 };
 
 // THE SINGLE PLACE TO CHANGE OVERLAY WIDTHS AND GAPS.
 inline constexpr OverlayLayoutConfig overlay_layout{};
-inline constexpr std::array<const wchar_t*, 5> metric_names{
-    L"CPU", L"RAM", L"GPU", L"GPU RAM", L"Rx/Tx"
+inline constexpr std::array<const wchar_t*, 6> metric_names{
+    L"CPU", L"RAM", L"GPU", L"GPU RAM", L"Rx/Tx", L"FPS"
 };
 
 struct OverlayColumnPositions {
     // 0 = application, 1..5 = the five resource metrics.
-    std::array<float, 6> left{};
-    std::array<float, 6> right{};
+    std::array<float, 7> left{};
+    std::array<float, 7> right{};
     float total_width{};
 };
 
