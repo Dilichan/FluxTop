@@ -53,7 +53,7 @@ private:
 enum class Sort { cpu, ram, gpu, vram, automatic, rx, tx, network };
 class SpikeTracker {
 public:
-    void update(std::vector<Process>& rows);
+    void update(std::vector<Process>& rows, std::optional<std::uint64_t> ram_capacity = std::nullopt, std::optional<std::uint64_t> gpu_capacity = std::nullopt);
 private:
     std::unordered_map<std::uint32_t, Process> previous_;
 };

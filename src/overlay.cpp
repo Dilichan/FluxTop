@@ -314,7 +314,7 @@ void Overlay::init_client() {
     SendMessageW(top, EM_SETLIMITTEXT, 3, 0);
     control(L"STATIC", L"Сортировка", 0, 0, 22, 106, 230, 24);
     const auto sort = control(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, sort_control, 290, 102, 268, 160);
-    for (const auto label : {L"CPU", L"RAM", L"GPU", L"Память GPU", L"Авто — всплески и нагрузка", L"Rx — приём", L"Tx — передача", L"Rx/Tx — суммарный трафик"}) SendMessageW(sort, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
+    for (const auto label : {L"CPU", L"RAM", L"GPU", L"Память GPU", L"Авто — рейтинг и всплески", L"Rx — приём", L"Tx — передача", L"Rx/Tx — суммарный трафик"}) SendMessageW(sort, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
     SendMessageW(sort, CB_SETCURSEL, static_cast<WPARAM>(options_.sort), 0);
     control(L"STATIC", L"Размер текста, px (10–36)", 0, 0, 22, 150, 250, 24);
     const auto edit = control(L"EDIT", std::to_wstring(options_.font_size).c_str(), WS_BORDER | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, font_control, 290, 146, 268, 29);
@@ -607,8 +607,7 @@ void Overlay::paint() {
         load[2] = s.total_gpu_percent;
         if (s.total_gpu_memory && s.total_gpu_memory_capacity && *s.total_gpu_memory_capacity) {
             load[3] = 100.0 * static_cast<double>(*s.total_gpu_memory) / static_cast<double>(*s.total_gpu_memory_capacity);
-            totals[3] = decimal(static_cast<double>(*s.total_gpu_memory) / 1073741824.0)
-                + L"/" + decimal(static_cast<double>(*s.total_gpu_memory_capacity) / 1073741824.0) + L" GiB";
+            totals[3] = decimal(static_cast<double>(*s.total_gpu_memory) / 1073741824.0) + L" GiB";
         }
         cpu_temperature = s.cpu_temperature_c;
         gpu_temperature = s.gpu_temperature_c;

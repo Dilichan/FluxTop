@@ -79,78 +79,58 @@ void sort_tests() {
     check(rows[0].pid==3 && rows[1].pid==4 && rows[2].pid==2 && rows[3].pid==1,"combined network sorts Rx+Tx, partial values unknown");
 }
 void spike_tests() {
+    constexpr std::uint64_t gib = 1073741824ULL;
     fluxtop::SpikeTracker tracker;
-    fluxtop::Process cpu, ram, gpu, vram;
-    cpu.pid = 1; ram.pid = 2; gpu.pid = 3; vram.pid = 4;
-    std::vector<fluxtop::Process> rows{cpu, ram, gpu, vram};
-    for (auto& row : rows) {
-        row.creation_time = 1; row.cpu_percent = 0; row.gpu_percent = 0;
-        row.working_set = 0; row.dedicated_gpu_bytes = 0;
-    }
-    tracker.update(rows);
-    check(rows[0].spike_score == 0, "first sample has no burst");
-    rows[0].cpu_percent = 10;
-    rows[1].working_set = 192ULL * 1048576;
-    rows[2].gpu_percent = 20;
-    rows[3].dedicated_gpu_bytes = 320ULL * 1048576;
-    tracker.update(rows);
-    fluxtop::sort_processes(rows, fluxtop::Sort::automatic);
-    check(rows[0].pid == 4 && rows[1].pid == 3 && rows[2].pid == 2 && rows[3].pid == 1,
-        "auto ranks resource bursts with normalized rates");
-    tracker.update(rows);
-    check(rows[0].spike_score == 0, "steady usage is no longer a new burst");
-    check(fluxtop::auto_rank(rows[1]).score >= 1.0, "steady GPU remains eligible after burst");
-    tracker.update(rows);
-    tracker.update(rows);
-    fluxtop::sort_processes(rows, fluxtop::Sort::automatic);
-    check(rows[0].pid == 3, "active steady GPU stays above low usage");
-
-    fluxtop::Process cpuHeavy;
-    cpuHeavy.pid = 99; cpuHeavy.creation_time = 7; cpuHeavy.cpu_percent = 85;
-    std::vector<fluxtop::Process> high{cpuHeavy};
-    tracker.update(high);
-    check(fluxtop::auto_rank(high[0]).metric == fluxtop::AutoMetric::cpu,
-        "high CPU ranks even on the first sample");
-    tracker.update(high);
-    check(fluxtop::auto_rank(high[0]).score >= 1.0,
-        "stable CPU load does not disappear from auto ranking");
-    check(fluxtop::auto_rank(high[0],2U).metric == fluxtop::AutoMetric::none,
-        "hidden CPU does not influence automatic ranking");
-
-    high[0].cpu_percent=0;
-    tracker.update(high);
-    check(fluxtop::auto_rank(high[0]).metric == fluxtop::AutoMetric::none,
-        "process drops from ranking when sustained load disappears");
-    high[0].creation_time=8; high[0].cpu_percent=100;
-    tracker.update(high);
-    check(high[0].spike_score == 0, "PID reuse cannot create a false burst");
-    tracker.update(high = {});
-    high = {cpuHeavy}; tracker.update(high);
-    check(high[0].spike_score == 0, "exited process baselines are removed");
-
-    fluxtop::Process network;
-    network.pid=100; network.creation_time=9;
-    network.rx_bytes_per_second=0; network.tx_bytes_per_second=0;
-    high={network}; tracker.update(high);
-    high[0].rx_bytes_per_second=131072;
-    tracker.update(high);
-    check(high[0].spike_score == 2.0, "Rx burst detection preserved");
-    check(fluxtop::auto_rank(high[0]).burst, "rising Rx value should be orange");
-    check(fluxtop::auto_rank(high[0]).metric == fluxtop::AutoMetric::rx,
-        "Rx is attributed to the exact network value");
-    tracker.update(high);
-    check(high[0].spike_score==0 && fluxtop::auto_rank(high[0]).metric == fluxtop::AutoMetric::rx,
-        "steady Rx remains ranked after burst");
-    check(!fluxtop::auto_rank(high[0]).burst, "stable Rx should be red, not orange");
-    high[0].tx_bytes_per_second=196608;
-    tracker.update(high);
-    check(high[0].spike_score == 3.0, "Tx burst detected independently");
-    check(fluxtop::auto_rank(high[0]).metric == fluxtop::AutoMetric::tx,
-        "Tx is attributed to the exact network value");
-    check(fluxtop::auto_rank(high[0],1U).metric == fluxtop::AutoMetric::none,
-        "hidden network column does not drive auto ranking");
+    fluxtop::Process gpu, cpu, memory, network;
+    gpu.pid=10; gpu.creation_time=1; gpu.gpu_percent=80;
+    cpu.pid=11; cpu.creation_time=1; cpu.cpu_percent=18;
+    memory.pid=12; memory.creation_time=1; memory.working_set=8*gib;
+    network.pid=13; network.creation_time=1; network.rx_bytes_per_second=0;
+    std::vector<fluxtop::Process> rows{memory,cpu,gpu,network};
+    tracker.update(rows,128*gib,8*gib);
+    fluxtop::sort_processes(rows,fluxtop::Sort::automatic);
+    check(rows[0].pid==10 && rows[1].pid==11 && rows[2].pid==12,
+        "sustained GPU and active CPU outrank allocated memory on 128 GiB host");
+    check(fluxtop::auto_rank(rows[0]).metric==fluxtop::AutoMetric::gpu,
+        "GPU load is the reason for a high ranking");
+    check(fluxtop::auto_rank(rows[2]).metric==fluxtop::AutoMetric::none,
+        "low physical RAM share does not force a red label");
+    tracker.update(rows,128*gib,8*gib);
+    check(fluxtop::auto_rank(rows[0]).metric==fluxtop::AutoMetric::gpu
+        && !fluxtop::auto_rank(rows[0]).burst,"stable GPU stays ranked red");
+    for (auto& p:rows) if(p.pid==11) p.cpu_percent=28;
+    tracker.update(rows,128*gib,8*gib);
+    auto cpuRow=std::find_if(rows.begin(),rows.end(),[](const auto& p){return p.pid==11;});
+    check(cpuRow != rows.end() && fluxtop::auto_rank(*cpuRow).burst
+        && fluxtop::auto_rank(*cpuRow).metric==fluxtop::AutoMetric::cpu,
+        "CPU step change gets orange even if sustained CPU is already high");
+    tracker.update(rows,128*gib,8*gib);
+    tracker.update(rows,128*gib,8*gib);
+    cpuRow=std::find_if(rows.begin(),rows.end(),[](const auto& p){return p.pid==11;});
+    check(cpuRow != rows.end() && !fluxtop::auto_rank(*cpuRow).burst
+        && fluxtop::auto_rank(*cpuRow).metric==fluxtop::AutoMetric::cpu,
+        "orange eventually returns to sustained red");
+    for (auto& p:rows) if(p.pid==13) p.rx_bytes_per_second=4*1048576.0;
+    tracker.update(rows,128*gib,8*gib);
+    auto netRow=std::find_if(rows.begin(),rows.end(),[](const auto& p){return p.pid==13;});
+    check(netRow != rows.end() && fluxtop::auto_rank(*netRow).burst
+        && fluxtop::auto_rank(*netRow).metric==fluxtop::AutoMetric::rx,
+        "Rx growth becomes orange and affects the rating");
+    check(netRow != rows.end() && fluxtop::auto_rank(*netRow,15U).metric==fluxtop::AutoMetric::none,
+        "hidden network column cannot control automatic ranking");
+    fluxtop::Process combined, solitary;
+    combined.pid=20; combined.creation_time=1; combined.cpu_percent=20; combined.gpu_percent=40;
+    solitary.pid=21; solitary.creation_time=1; solitary.cpu_percent=20;
+    std::vector<fluxtop::Process> pair{solitary,combined};
+    tracker.update(pair,128*gib,8*gib);
+    check(fluxtop::auto_rank(pair[1]).score > fluxtop::auto_rank(pair[0]).score,
+        "two independent heavy resources receive bounded complementary points");
+    for (auto& p:rows) if(p.pid==11) {p.cpu_percent=0; p.creation_time=2;}
+    tracker.update(rows,128*gib,8*gib);
+    cpuRow=std::find_if(rows.begin(),rows.end(),[](const auto& p){return p.pid==11;});
+    check(cpuRow != rows.end() && !fluxtop::auto_rank(*cpuRow).burst,
+        "PID reuse must not generate a false change event");
 }
-
 void output_tests() {
     check(fluxtop::json_escape("a\"\\\n\t\x01") == "\"a\\\"\\\\\\n\\t\\u0001\"", "JSON control escaping");
     check(fluxtop::json_escape("приложение") == "\"приложение\"", "UTF-8 preserved");

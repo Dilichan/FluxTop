@@ -35,51 +35,79 @@ std::vector<Process> CpuTracker::update(const std::vector<RawProcess>& raw, unsi
 }
 
 namespace {
-// Normalized sustained load + rising-edge burst; thresholds are deliberately conservative.
+// FluxTop AutoScore 0.2.1 scientific heuristic:
+// capacity normalization + dominant resource + bounded complementary score
+// + EWMA for retained pressure + separate short-lived rising-edge detector.
+// These weights are engineering choices to be calibrated, not research constants.
 constexpr double mib = 1048576.0;
-constexpr double kib = 1024.0;
-constexpr std::array<double,6> sustained_units{10.0,256.0*mib,10.0,256.0*mib,64.0*kib,64.0*kib};
-constexpr std::array<double,6> burst_units{5.0,64.0*mib,5.0,64.0*mib,64.0*kib,64.0*kib};
+constexpr double gib = 1073741824.0;
 constexpr std::array<unsigned,6> visible_bits{1U,2U,4U,8U,16U,16U};
-std::array<std::optional<double>,6> metric_values(const Process& p) {
-    return {p.cpu_percent,
-        p.working_set ? std::optional<double>(static_cast<double>(*p.working_set)) : std::nullopt,
-        p.gpu_percent,
-        p.dedicated_gpu_bytes ? std::optional<double>(static_cast<double>(*p.dedicated_gpu_bytes)) : std::nullopt,
-        p.rx_bytes_per_second,p.tx_bytes_per_second};
+std::array<std::optional<double>,6> metric_values(const Process& row) {
+    return {row.cpu_percent,
+        row.working_set ? std::optional<double>(static_cast<double>(*row.working_set)) : std::nullopt,
+        row.gpu_percent,
+        row.dedicated_gpu_bytes ? std::optional<double>(static_cast<double>(*row.dedicated_gpu_bytes)) : std::nullopt,
+        row.rx_bytes_per_second, row.tx_bytes_per_second};
 }
-double nonnegative(std::optional<double> value) {
-    return value && std::isfinite(*value) && *value > 0 ? *value : 0.0;
+double positive(std::optional<double> value) {
+    return value && std::isfinite(*value) && *value > 0.0 ? *value : 0.0;
+}
+double fraction_score(double amount, std::optional<std::uint64_t> capacity, double weight) {
+    if (!capacity || !*capacity) return 0.0; // Unknown is not treated as a small machine.
+    return std::clamp(100.0 * amount / static_cast<double>(*capacity) * weight, 0.0, 100.0);
+}
+double activity_score(std::size_t metric, double value,
+    std::optional<std::uint64_t> ram_capacity, std::optional<std::uint64_t> gpu_capacity) {
+    switch (metric) {
+    case 0: return std::clamp(value * 3.0, 0.0, 100.0); // 33.3% of all cores is high
+    case 1: return fraction_score(value,ram_capacity,0.70);
+    case 2: return std::clamp(value,0.0,100.0);       // GPU engine utilization
+    case 3: return fraction_score(value,gpu_capacity,0.65);
+    default: return std::clamp(90.0 * (1.0 - std::exp(-value / (2.0*mib))),0.0,90.0);
+    }
+}
+double change_score(std::size_t metric, double increase,
+    std::optional<std::uint64_t> ram_capacity, std::optional<std::uint64_t> gpu_capacity) {
+    if (increase <= 0.0) return 0.0;
+    switch (metric) {
+    case 0: return std::min(100.0,increase * 4.0);
+    case 1: return std::min(100.0,25.0*increase /
+        std::max(gib,ram_capacity ? static_cast<double>(*ram_capacity) * .02 : 2.0*gib));
+    case 2: return std::min(100.0,increase * 2.0);
+    case 3: return std::min(100.0,30.0*increase /
+        std::max(256.0*mib,gpu_capacity ? static_cast<double>(*gpu_capacity)*.08 : gib));
+    default: return std::min(100.0,100.0*(1.0-std::exp(-increase/(2.0*mib))));
+    }
 }
 } // namespace
 
-void SpikeTracker::update(std::vector<Process>& rows) {
+void SpikeTracker::update(std::vector<Process>& rows,
+    std::optional<std::uint64_t> ram_capacity, std::optional<std::uint64_t> gpu_capacity) {
     std::unordered_map<std::uint32_t, Process> next;
     next.reserve(rows.size());
     for (auto& row : rows) {
-        row.spike_score = 0;
-        row.auto_scores.fill(0);
-        row.burst_scores.fill(0);
+        row.spike_score = 0.0;
+        row.auto_scores.fill(0.0);
+        row.burst_scores.fill(0.0);
         const auto found = previous_.find(row.pid);
-        const bool same_process = row.creation_time && found != previous_.end()
+        const bool same = row.creation_time && found != previous_.end()
             && found->second.creation_time == row.creation_time;
-        const auto current = metric_values(row);
-        const auto previous = same_process ? metric_values(found->second)
+        const auto measurements = metric_values(row);
+        const auto old = same ? metric_values(found->second)
             : std::array<std::optional<double>,6>{};
-        for (std::size_t i = 0; i < current.size(); ++i) {
-            const double now = nonnegative(current[i]);
-            const double before = nonnegative(previous[i]);
-            const double burst = same_process && current[i] && previous[i] && now > before
-                ? (now-before) / burst_units[i] : 0.0;
-            row.spike_score = std::max(row.spike_score,burst);
-            row.burst_scores[i] = burst;
-            // Sustained load must rank even when the derivative is zero.
-            const double steady = now >= sustained_units[i]
-                ? std::log2(1.0 + now / sustained_units[i]) : 0.0;
-            // Decay previous priority only while the process is still significantly active.
-            const double retained = same_process && steady >= 1.0
-                ? found->second.auto_scores[i] * 0.65 : 0.0;
-            row.auto_scores[i] = std::max({steady,burst,retained});
+        for (std::size_t i=0; i<measurements.size(); ++i) {
+            if (!measurements[i] || !std::isfinite(*measurements[i]) || *measurements[i] < 0) continue;
+            const double now = positive(measurements[i]);
+            const double pressure = activity_score(i,now,ram_capacity,gpu_capacity);
+            // EWMA prevents constant reordering while retaining steady high load.
+            row.auto_scores[i] = same && old[i]
+                ? 0.65*pressure + 0.35*found->second.auto_scores[i] : pressure;
+            const double sudden = same && old[i]
+                ? change_score(i,now-positive(old[i]),ram_capacity,gpu_capacity) : 0.0;
+            row.spike_score = std::max(row.spike_score,sudden);
+            // Brief orange hold at 1-second sampling; a burst is not permanent.
+            row.burst_scores[i] = std::max(sudden,
+                same ? found->second.burst_scores[i]*0.45 : 0.0);
         }
         next.emplace(row.pid,row);
     }
@@ -88,19 +116,42 @@ void SpikeTracker::update(std::vector<Process>& rows) {
 
 AutoRank auto_rank(const Process& row, unsigned visible_metrics) {
     AutoRank result{};
-    for (std::size_t i = 0; i < row.auto_scores.size(); ++i) {
+    double top = 0.0, second = 0.0;
+    double best_burst = 0.0;
+    AutoMetric top_metric = AutoMetric::none, burst_metric = AutoMetric::none;
+    int leading_group = -1;
+    // Rx and Tx form one network category; do not double-count network.
+    for (std::size_t i=0;i<row.auto_scores.size();++i) {
         if (!(visible_metrics & visible_bits[i])) continue;
-        const double score = row.auto_scores[i];
-        if (std::isfinite(score) && score >= 1.0 && score > result.score) {
-            result.score = score;
-            result.metric = static_cast<AutoMetric>(i+1);
-            // Orange only when the burst actually determines the rank.
-            result.burst = row.burst_scores[i] >= 1.0 && row.burst_scores[i] >= score - 1e-9;
+        const double current = row.auto_scores[i];
+        const int group = i >= 4 ? 4 : static_cast<int>(i);
+        if (std::isfinite(current) && current > top) {
+            if (group != leading_group) second = top;
+            top = current;
+            top_metric = static_cast<AutoMetric>(i+1);
+            leading_group = group;
+        } else if (group != leading_group && std::isfinite(current) && current > second) {
+            second = current;
         }
+        const double event = row.burst_scores[i];
+        if (std::isfinite(event) && event > best_burst) {
+            best_burst = event;
+            burst_metric = static_cast<AutoMetric>(i+1);
+        }
+    }
+    // Scores are in 0..100 points. Complementary demand is bounded to 25%.
+    result.score = std::clamp(top + 0.25*second,0.0,100.0);
+    // An important fresh change gets temporary priority and an orange label.
+    if (best_burst >= 20.0) {
+        result.score = std::clamp(std::max(result.score,0.85*best_burst)
+            + 0.20*best_burst,0.0,100.0);
+        result.metric = burst_metric;
+        result.burst = true;
+    } else if (result.score >= 10.0) {
+        result.metric = top_metric;
     }
     return result;
 }
-
 void sort_processes(std::vector<Process>& rows, Sort sort, unsigned visible_metrics) {
     const auto value = [sort,visible_metrics](const Process& row) -> std::optional<double> {
         switch (sort) {
