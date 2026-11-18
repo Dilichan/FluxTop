@@ -40,8 +40,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $notesPath = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          & ./tools/Get-ReleaseNotes.ps1 -Tag $env:RELEASE_TAG -OutputPath $notesPath
+          if ($LASTEXITCODE -ne 0) { throw 'Release notes generation failed' }
           $arguments=@('release','create',$env:RELEASE_TAG,'out/release/FluxTop.exe','out/release/SHA256SUMS.txt','out/release/LICENSE.txt',
-            '--verify-tag','--title',"FluxTop $env:RELEASE_TAG",'--notes-file','docs/RELEASE_NOTES.md')
+            '--verify-tag','--title',"FluxTop $env:RELEASE_TAG",'--notes-file',$notesPath)
           if ($env:RELEASE_TAG -like '*-preview.*') { $arguments+='--prerelease' }
           & gh @arguments
           if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }

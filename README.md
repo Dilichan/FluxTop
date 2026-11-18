@@ -7,10 +7,10 @@
 Окно в фокусе закрепляется первой строкой в «Авто», а остальное сортируется
 по фактической нагрузке и её всплескам. Оверлей работает поверх окон и игр в borderless.
 
-**[Скачать FluxTop.exe для Windows](https://github.com/Dilichan/FluxTop/releases/download/v0.2.1/FluxTop.exe)** · [Все версии](https://github.com/Dilichan/FluxTop/releases) · [Сообщить об ошибке](https://github.com/Dilichan/FluxTop/issues)
+**[Скачать FluxTop.exe для Windows](https://github.com/Dilichan/FluxTop/releases/latest/download/FluxTop.exe)** · [Все версии](https://github.com/Dilichan/FluxTop/releases) · [Сообщить об ошибке](https://github.com/Dilichan/FluxTop/issues)
 
 Git, компилятор и отдельная установка Visual C++ Runtime не нужны.
-**Подготовка релиза 0.2.2.** Текущие возможности проверены на Windows; аппаратные датчики и
+Текущие возможности проверены на Windows; аппаратные датчики и
 часть показателей зависят от поддержки драйверов. [Что изменилось](docs/RELEASE_NOTES.md).
 
 ![Пример прозрачного оверлея FluxTop](assets/preview/overlay.svg)
