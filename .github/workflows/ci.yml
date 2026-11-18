@@ -24,13 +24,26 @@ jobs:
       - name: Test launcher fallback and locking
         shell: powershell
         run: ./tests/launcher_tests.ps1
+      - name: Test elevation policy without opening UAC
+        shell: powershell
+        run: ./tests/elevation_tests.ps1
       - name: Validate JSONL contract
         shell: pwsh
         run: |
+          $env:FLUXTOP_HISTORY_DB = Join-Path $env:GITHUB_WORKSPACE 'build/ci-history.db'
           $lines = & ./build/Release/fluxtop.exe --samples 2 --interval-ms 250 --no-gpu --jsonl
           if ($LASTEXITCODE -ne 0 -or $lines.Count -ne 2) { throw 'Collector failed or wrong sample count' }
           foreach ($line in $lines) {
             $sample = $line | ConvertFrom-Json
             if ($sample.schema_version -ne 1 -or $sample.gpu_status -ne 'disabled') { throw 'Invalid schema/status' }
             if ($sample.process_count -lt 1 -or $sample.self.working_set_bytes -le 0) { throw 'Missing live metrics' }
+            if ($sample.history_records -lt $sample.process_count -or $sample.history_error) { throw 'History write failed' }
           }
+      - name: Package downloadable EXE
+        shell: pwsh
+        run: ./tools/Package-Release.ps1 -SkipTests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FluxTop-windows-x64
+          path: out/release/*
+          if-no-files-found: error
