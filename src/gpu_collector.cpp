@@ -1,5 +1,6 @@
 #include "fluxtop/gpu_collector.hpp"
 #include "fluxtop/windows.hpp"
+#include "fluxtop/gpu_process_memory.hpp"
 #include <winternl.h>
 #include <d3dkmthk.h>
 #include <pdhmsg.h>
@@ -103,6 +104,9 @@ GpuCollector::GpuCollector(bool enabled) : enabled_(enabled) {
     if (engine_status != ERROR_SUCCESS) engine_ = nullptr;
     if (PdhAddEnglishCounterW(query_, L"\\GPU Adapter Memory(*)\\Dedicated Usage", 0, &adapter_memory_) != ERROR_SUCCESS)
         adapter_memory_ = nullptr;
+    // Same vendor-neutral PDH provider as GPU Engine; fallback for inaccessible D3DKMT process handles.
+    if (PdhAddEnglishCounterW(query_, L"\\GPU Process Memory(*)\\Dedicated Usage", 0, &process_memory_) != ERROR_SUCCESS)
+        process_memory_ = nullptr;
     if (!engine_) {
         std::cerr << "GPU: PDH engine counter unavailable (status=" << engine_status
                   << "); missing metrics stay unknown.\n";
@@ -156,6 +160,36 @@ bool GpuCollector::read(PDH_HCOUNTER counter,
     return false;
 }
 
+// Read validated per-process dedicated GPU memory from all LUID/physical adapters.
+// Does not synthesize total adapter usage or replace unknown memory with zero.
+bool GpuCollector::read_process_memory(std::unordered_map<std::uint32_t,std::uint64_t>& values) {
+    if (!process_memory_) return false;
+    constexpr DWORD max_bytes = 16 * 1024 * 1024;
+    for (int attempt=0; attempt<3; ++attempt) {
+        DWORD bytes = static_cast<DWORD>(buffer_.size() * sizeof(std::max_align_t));
+        DWORD count = 0;
+        auto* items = buffer_.empty() ? nullptr : reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer_.data());
+        const auto status = PdhGetFormattedCounterArrayW(process_memory_,
+            PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, &bytes, &count, items);
+        if (status == PDH_MORE_DATA) {
+            if (!bytes || bytes > max_bytes) return false;
+            buffer_.resize((bytes + sizeof(std::max_align_t)-1)/sizeof(std::max_align_t));
+            continue;
+        }
+        if (status != ERROR_SUCCESS) return false;
+        GpuMemoryCounterAccumulator accumulator;
+        for (DWORD i=0; i<count; ++i) {
+            const auto& item = items[i];
+            if (!item.szName || (item.FmtValue.CStatus != PDH_CSTATUS_VALID_DATA
+                && item.FmtValue.CStatus != PDH_CSTATUS_NEW_DATA)) continue;
+            accumulator.add(item.szName,item.FmtValue.doubleValue);
+        }
+        values = std::move(accumulator).take();
+        return !values.empty();
+    }
+    return false;
+}
+
 void GpuCollector::collect(Snapshot& snapshot) {
     snapshot.gpu_status = enabled_ ? "unavailable" : "disabled";
     if (!enabled_) return;
@@ -166,12 +200,29 @@ void GpuCollector::collect(Snapshot& snapshot) {
     if (collected && read(adapter_memory_, engine, memory_total, true) && memory_total
         && *memory_total < static_cast<double>(std::numeric_limits<std::uint64_t>::max()))
         snapshot.total_gpu_memory = static_cast<std::uint64_t>(*memory_total);
+    std::unordered_map<std::uint32_t,std::uint64_t> pdh_memory;
+    const bool pdh_memory_ok = collected && read_process_memory(pdh_memory);
     const bool memory_ok = collect_memory(snapshot);
-    snapshot.gpu_status = engine_ok && memory_ok ? "ready" : engine_ok || memory_ok ? "partial" : "unavailable";
+    snapshot.gpu_status = engine_ok && memory_ok ? "ready"
+        : engine_ok || memory_ok || pdh_memory_ok ? "partial" : "unavailable";
     for (auto& row : snapshot.processes) {
         // PDH has PID-only identity. Avoid joining a new or reused process on its first sample.
         if (!row.has_baseline) continue;
         if (const auto found = engine.find(row.pid); found != engine.end()) row.gpu_percent = found->second;
+        // A zero from a non-working driver query is ambiguous. Use positive PDH
+        // values only when the primary D3DKMT value is absent or zero.
+        if ((!row.dedicated_gpu_bytes || *row.dedicated_gpu_bytes == 0) && row.creation_time) {
+            const auto found = pdh_memory.find(row.pid);
+            if (found != pdh_memory.end() && found->second > 0) {
+                // PDH identifies processes by PID only. Verify the instance is still
+                // the same process before joining a counter to a snapshot row.
+                Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,row.pid));
+                FILETIME created{}, exited{}, kernel{}, user{};
+                if (process.valid() && GetProcessTimes(process.get(),&created,&exited,&kernel,&user)
+                    && filetime_ticks(created) == *row.creation_time)
+                    row.dedicated_gpu_bytes = found->second;
+            }
+        }
     }
 }
 } // namespace fluxtop

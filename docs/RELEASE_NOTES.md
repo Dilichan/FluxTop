@@ -1,3 +1,9 @@
+## Hardware Compatibility WMI (pre-release)
+
+- Добавлена работа с температурой CPU через обнаружение датчика по идентификатору: HWiNFO Shared Memory, LibreHardwareMonitor/OpenHardwareMonitor WMI. WMI опрашивается в отдельном потоке и не задерживает сбор основных метрик.
+- Проверены ограничения переносимости системных API: подробности в [HARDWARE_COMPATIBILITY.md](HARDWARE_COMPATIBILITY.md).
+- Когда физический CPU-датчик недоступен, сохраняется прочерк —°C; ACPI Thermal Zone не выдаётся за CPU Package.
+
 ## FluxTop 0.2.1
 
 - Исправлено: все доступные CPU/RAM/GPU/GPU RAM в таблице окрашиваются независимо по фактической нагрузке, а не только один определяющий рейтинг столбец. Всплеск Rx/Tx и каждой метрики выделяется отдельно.

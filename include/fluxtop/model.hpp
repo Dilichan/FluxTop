@@ -64,6 +64,9 @@ bool auto_metric_has_burst(const Process& row, AutoMetric metric);
 std::optional<double> auto_metric_load_percent(const Process& row, AutoMetric metric,
     std::optional<std::uint64_t> ram_capacity, std::optional<std::uint64_t> gpu_capacity);
 void sort_processes(std::vector<Process>& rows, Sort sort, unsigned visible_metrics = 31U);
+// Move the focused process to row zero without changing the order of other rows.
+// Return false if pid is zero or not present in this snapshot.
+bool prioritize_focused_process(std::vector<Process>& rows, std::uint32_t pid);
 std::optional<std::uint32_t> gpu_instance_pid(const std::wstring& instance);
 
 struct Snapshot {

@@ -220,6 +220,18 @@ void sort_processes(std::vector<Process>& rows, Sort sort, unsigned visible_metr
     });
 }
 
+// Called after auto-ranking, not as part of resource scoring.
+// Stable rotation keeps every other process in its original ranking order.
+bool prioritize_focused_process(std::vector<Process>& rows, std::uint32_t pid) {
+    if (!pid) return false;
+    const auto position = std::find_if(rows.begin(),rows.end(),[pid](const Process& p) {
+        return p.pid == pid;
+    });
+    if (position == rows.end()) return false;
+    if (position != rows.begin()) std::rotate(rows.begin(),position,position+1);
+    return true;
+}
+
 std::optional<std::uint32_t> gpu_instance_pid(const std::wstring& instance) {
     constexpr std::wstring_view prefix = L"pid_";
     if (!instance.starts_with(prefix)) return std::nullopt;

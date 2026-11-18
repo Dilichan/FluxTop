@@ -15,10 +15,12 @@ public:
 private:
     bool read(PDH_HCOUNTER counter,
               std::unordered_map<std::uint32_t, double>& values, std::optional<double>& total, bool adapter_memory = false);
+    bool read_process_memory(std::unordered_map<std::uint32_t,std::uint64_t>& values);
     bool enabled_;
     PDH_HQUERY query_{};
     PDH_HCOUNTER engine_{};
     PDH_HCOUNTER adapter_memory_{};
+    PDH_HCOUNTER process_memory_{};
     std::vector<std::max_align_t> buffer_;
 };
 } // namespace fluxtop

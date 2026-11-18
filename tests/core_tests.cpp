@@ -1,4 +1,5 @@
 #include "fluxtop/model.hpp"
+#include "fluxtop/gpu_process_memory.hpp"
 #include "fluxtop/options.hpp"
 #include "fluxtop/output.hpp"
 
@@ -230,6 +231,50 @@ void per_metric_colors_and_bursts_tests() {
     check(!fluxtop::auto_metric_has_burst(p,fluxtop::AutoMetric::gpu),
         "nonfinite burst cannot trigger coloring");
 }
+void gpu_process_memory_tests() {
+    constexpr double gib=1073741824.0;
+    fluxtop::GpuMemoryCounterAccumulator accumulator;
+    const auto first=L"pid_50836_luid_0x00000000_0x0000f7a1_phys_0";
+    const auto second=L"pid_50836_luid_0x00000000_0x00012755_phys_0";
+    check(accumulator.add(first,2.447*gib),"first GPU adapter PDH instance is valid");
+    check(accumulator.add(second,0.0),"different GPU adapter with zero usage is valid");
+    check(!accumulator.add(first,2.447*gib),"same GPU adapter must not double count");
+    check(accumulator.add(L"pid_999_luid_0x00000000_0x0000f7a1_phys_0",0.5*gib),
+        "another process memory is accounted independently");
+    check(!accumulator.add(L"pid_invalid_luid_0x00000000_phys_0",42.0),
+        "invalid PID is not attributed");
+    check(!accumulator.add(L"pid_50836_luid_invalid_phys_0",std::numeric_limits<double>::quiet_NaN()),
+        "NaN must not corrupt memory totals");
+    check(!accumulator.add(L"pid_50836_luid_invalid_phys_0",std::ldexp(1.0,64)),
+        "overlarge bytes must not overflow uint64");
+    const auto results=std::move(accumulator).take();
+    check(results.size()==2 && results.contains(50836U) && results.contains(999U),
+        "PDH LUID totals are grouped by PID only after validating instances");
+    if (const auto found=results.find(50836U); found!=results.end())
+        check(std::abs(static_cast<double>(found->second)/gib-2.447)<0.00001,
+            "GPU memory across two LUIDs should be 2.447 GiB, not zero or duplicated");
+}
+void focused_process_tests() {
+    fluxtop::Process a,b,c;
+    a.pid=101; a.auto_scores[2]=90.0;
+    b.pid=102; b.auto_scores[2]=60.0;
+    c.pid=103; c.auto_scores[2]=5.0;
+    std::vector<fluxtop::Process> rows{c,b,a};
+    fluxtop::sort_processes(rows,fluxtop::Sort::automatic);
+    check(rows[0].pid==101 && rows[1].pid==102 && rows[2].pid==103,
+        "initial automatic ranking is not affected by foreground handling");
+    check(fluxtop::prioritize_focused_process(rows,103),"focus PID is found");
+    check(rows[0].pid==103 && rows[1].pid==101 && rows[2].pid==102,
+        "focused low-load process is first; other ranks preserve order");
+    check(fluxtop::prioritize_focused_process(rows,101),"changing foreground PID is found");
+    check(rows[0].pid==101 && rows[1].pid==103 && rows[2].pid==102,
+        "new focus is first, stable remainder is preserved");
+    check(!fluxtop::prioritize_focused_process(rows,0),"zero PID leaves ranking untouched");
+    check(!fluxtop::prioritize_focused_process(rows,999),"unsampled PID leaves ranking untouched");
+    check(rows[0].pid==101 && rows[1].pid==103 && rows[2].pid==102,
+        "unavailable foreground has no effect");
+    check(fluxtop::prioritize_focused_process(rows,101),"already first PID remains valid");
+}
 void output_tests() {
     check(fluxtop::json_escape("a\"\\\n\t\x01") == "\"a\\\"\\\\\\n\\t\\u0001\"", "JSON control escaping");
     check(fluxtop::json_escape("приложение") == "\"приложение\"", "UTF-8 preserved");
@@ -269,10 +314,12 @@ void output_tests() {
 int main() {
     cpu_tests();
     sort_tests();
+    focused_process_tests();
     spike_tests();
     orange_burst_visibility_tests();
     per_metric_colors_and_bursts_tests();
     color_load_tests();
+    gpu_process_memory_tests();
     output_tests();
     check(fluxtop::gpu_instance_pid(L"pid_123_luid_0x000_0_phys_0_eng_1") == 123U, "parse GPU PID");
     check(!fluxtop::gpu_instance_pid(L"pid_42949672960_luid_0"), "overflow rejected");

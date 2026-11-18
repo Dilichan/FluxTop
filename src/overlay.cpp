@@ -25,6 +25,7 @@ using Microsoft::WRL::ComPtr;
 constexpr wchar_t overlay_class[] = L"FluxTop.Overlay.Window";
 constexpr wchar_t client_class[] = L"FluxTop.Client.Window";
 constexpr UINT sample_message = WM_APP + 10, tray_message = WM_APP + 11, icon_message = WM_APP + 12;
+constexpr UINT foreground_update_message = WM_APP + 13;
 constexpr int toggle_hotkey = 1, client_hotkey = 2;
 enum Control : UINT { open_client = 100, toggle_table, quit_app, top_control, sort_control, font_control,
     alpha_control, visible_control, move_control, icons_control, stats_control, startup_control,
@@ -38,6 +39,14 @@ static_assert(temperature_band(64.9) == 0 && temperature_band(65.0) == 1
 constexpr std::array<const wchar_t*,5> metric_names{L"CPU",L"RAM",L"GPU",L"GPU RAM",L"Rx/Tx"};
 constexpr std::array<float,5> metric_widths{5.0f,5.8f,5.8f,10.4f,14.0f};
 constexpr UINT_PTR settings_timer = 1;
+
+// An out-of-context WinEvent hook delivers foreground changes on this UI thread.
+// The callback only posts a message: resource collection is never done in the hook.
+thread_local HWND foreground_update_target{};
+void CALLBACK foreground_changed(HWINEVENTHOOK, DWORD event, HWND, LONG, LONG, DWORD, DWORD) {
+    if (event == EVENT_SYSTEM_FOREGROUND && foreground_update_target)
+        PostMessageW(foreground_update_target,foreground_update_message,0,0);
+}
 
 std::wstring wide(std::string_view value) {
     if (value.empty()) return {};
@@ -153,6 +162,8 @@ private:
     Options options_;
     HWND hwnd_{}, client_{};
     HICON icon_{}, large_icon_{};
+    HWINEVENTHOOK foreground_hook_{};
+    DWORD focused_pid_{};
     HFONT client_font_{};
     UINT dpi_ = 96, client_dpi_ = 96, taskbar_created_{};
     bool tray_ = false, toggle_key_ = false, client_key_ = false, visible_ = true;
@@ -188,6 +199,8 @@ private:
 };
 
 Overlay::~Overlay() {
+    if (foreground_hook_) { UnhookWinEvent(foreground_hook_); foreground_hook_ = nullptr; }
+    foreground_update_target = nullptr;
     worker_.stop(); icons_.reset();
     if (client_ && IsWindow(client_)) DestroyWindow(client_);
     if (hwnd_ && IsWindow(hwnd_)) DestroyWindow(hwnd_);
@@ -459,6 +472,15 @@ void Overlay::receive() {
 void Overlay::update_view() {
     if (!snapshot_) return;
     auto& s = *snapshot_; sort_processes(s.processes, options_.sort, active_metrics());
+    focused_pid_ = 0;
+    if (options_.sort == Sort::automatic) {
+        DWORD foreground_pid{};
+        if (const HWND foreground_window = GetForegroundWindow())
+            GetWindowThreadProcessId(foreground_window,&foreground_pid);
+        // A missing or unsampled process must not displace the normal ranking.
+        if (foreground_pid && prioritize_focused_process(s.processes,foreground_pid))
+            focused_pid_ = foreground_pid;
+    }
     std::vector<Row> next;
     for (std::size_t i = 0; !summary_only() && i < std::min(s.processes.size(), static_cast<std::size_t>(options_.top)); ++i) {
         const auto& p = s.processes[i];
@@ -653,7 +675,11 @@ void Overlay::paint() {
     const auto count = visible_rows(dip(bitmap_size_.cy));
     scroll_ = std::min(scroll_, rows_.size()>count ? rows_.size()-count : 0);
     for (std::size_t i=0;i<count && i+scroll_<rows_.size();++i) {
-        const auto& row = rows_[i+scroll_]; const float y = 1+static_cast<float>(i+1)*row_height();
+        // Row zero remains visible while the remaining auto-ranked rows scroll.
+        const bool fixed_focus = options_.sort == Sort::automatic && focused_pid_
+            && !rows_.empty() && rows_.front().pid == focused_pid_;
+        const auto& row = rows_[(fixed_focus && i==0) ? 0 : i+scroll_];
+        const float y = 1+static_cast<float>(i+1)*row_height();
         const auto cells = columns(y,row_height());
         if (show_icons_ && icons_) if (const auto icon = icons_->get(row.pid,row.created)) {
             ComPtr<ID2D1Bitmap> image;
@@ -700,6 +726,10 @@ int Overlay::run() {
     ShowWindow(hwnd_,SW_SHOWNOACTIVATE);
     // A hidden-console startup can override the first ShowWindow call via STARTUPINFO.
     ShowWindow(hwnd_,SW_SHOWNOACTIVATE);
+    foreground_update_target = hwnd_;
+    foreground_hook_ = SetWinEventHook(EVENT_SYSTEM_FOREGROUND,EVENT_SYSTEM_FOREGROUND,
+        nullptr,foreground_changed,0,0,WINEVENT_OUTOFCONTEXT);
+    // If the hook is unavailable, the regular snapshot still updates focused PID.
     if ((!options_.samples || inspect) && !options_.tray) show_client();
     worker_.start(options_,[this](std::optional<Snapshot> snapshot,std::string error,bool finished) {
         std::lock_guard lock(mailbox_mutex_); pending_=std::move(snapshot); pending_error_=std::move(error); pending_finished_=finished;
@@ -815,9 +845,14 @@ LRESULT Overlay::message(UINT msg,WPARAM wp,LPARAM lp) {
     case tray_message:
         if (lp==WM_LBUTTONDBLCLK || lp==NIN_KEYSELECT) show_client(); else if (lp==WM_RBUTTONUP || lp==WM_CONTEXTMENU) tray_menu(); return 0;
     case sample_message: receive(); return 0;
+    case foreground_update_message:
+        if (visible_ && options_.sort == Sort::automatic) update_view();
+        return 0;
     case icon_message: icon_posted_=false; if (visible_) InvalidateRect(hwnd_,nullptr,FALSE); client_stats(); return 0;
     case WM_CLOSE: DestroyWindow(hwnd_); return 0;
     case WM_DESTROY: {
+        if (foreground_hook_) { UnhookWinEvent(foreground_hook_); foreground_hook_ = nullptr; }
+        foreground_update_target = nullptr;
         stopping_=true; save_settings(); worker_.stop(); icons_.reset();
         if (client_) DestroyWindow(client_);
         NOTIFYICONDATAW data{}; data.cbSize=sizeof(data); data.hWnd=hwnd_; data.uID=1;

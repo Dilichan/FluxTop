@@ -20,7 +20,7 @@ Snapshot Sampler::collect() {
     snapshot.elevated = privileges_.elevated;
     snapshot.debug_privilege_enabled = privileges_.debug_enabled;
     gpu_.collect(snapshot);
-    const auto hwtemps = read_hwinfo_temperatures();
+    const auto hwtemps = read_hardware_temperatures();
     snapshot.cpu_temperature_c = hwtemps.cpu_c;
     if (!snapshot.gpu_temperature_c) snapshot.gpu_temperature_c = hwtemps.gpu_c;
     network_.collect(snapshot);
