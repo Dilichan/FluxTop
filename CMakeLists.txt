@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(FluxTop VERSION 0.2.1 LANGUAGES CXX RC)
+project(FluxTop VERSION 0.2.2 LANGUAGES CXX RC)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 set(FLUXTOP_RELEASE_TAG "v${PROJECT_VERSION}" CACHE STRING "GitHub release tag embedded in the downloadable launcher")
 
@@ -45,11 +45,11 @@ add_custom_command(OUTPUT "${launcher_resource}"
         -P "${PROJECT_SOURCE_DIR}/tools/Generate-LauncherResource.cmake"
     DEPENDS fluxtop "${PROJECT_SOURCE_DIR}/assets/branding/fluxtop.ico" "${PROJECT_SOURCE_DIR}/tools/Generate-LauncherResource.cmake" "${PROJECT_SOURCE_DIR}/src/launcher.rc.in"
     VERBATIM)
-add_executable(fluxtop_launcher WIN32 src/launcher.cpp "${launcher_resource}")
+add_executable(fluxtop_launcher WIN32 src/launcher.cpp src/installation.cpp "${launcher_resource}")
 target_include_directories(fluxtop_launcher PRIVATE include)
 target_compile_features(fluxtop_launcher PRIVATE cxx_std_20)
 target_compile_definitions(fluxtop_launcher PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
-target_link_libraries(fluxtop_launcher PRIVATE fluxtop_release_update shell32 user32 ole32 uuid)
+target_link_libraries(fluxtop_launcher PRIVATE fluxtop_release_update shell32 user32 ole32 advapi32 uuid)
 set_target_properties(fluxtop_launcher PROPERTIES OUTPUT_NAME FluxTop
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/package/$<CONFIG>")
 
@@ -65,6 +65,10 @@ if(BUILD_TESTING)
     add_test(NAME portable COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
         -File "${PROJECT_SOURCE_DIR}/tests/portable_tests.ps1" -Launcher "$<TARGET_FILE:fluxtop_launcher>"
         -Monitor "$<TARGET_FILE:fluxtop>" -FixtureRoot "${CMAKE_CURRENT_BINARY_DIR}")
+    add_test(NAME installation_fixture COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+        -File "${PROJECT_SOURCE_DIR}/tests/installation_tests.ps1"
+        -Launcher "$<TARGET_FILE:fluxtop_launcher>" -FixtureRoot "${CMAKE_CURRENT_BINARY_DIR}")
+    set_tests_properties(installation_fixture PROPERTIES TIMEOUT 30)
     set_tests_properties(release_update portable PROPERTIES TIMEOUT 30)
     add_executable(fluxtop_history_tests tests/history_tests.cpp)
     target_link_libraries(fluxtop_history_tests PRIVATE fluxtop_history)

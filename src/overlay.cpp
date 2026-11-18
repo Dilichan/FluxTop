@@ -37,7 +37,7 @@ static_assert(load_band(49.9) == 0 && load_band(50.0) == 1 && load_band(70.0) ==
 static_assert(temperature_band(64.9) == 0 && temperature_band(65.0) == 1
     && temperature_band(80.0) == 1 && temperature_band(80.1) == 2);
 constexpr std::array<const wchar_t*,5> metric_names{L"CPU",L"RAM",L"GPU",L"GPU RAM",L"Rx/Tx"};
-constexpr std::array<float,5> metric_widths{5.0f,5.8f,5.8f,10.4f,14.0f};
+constexpr std::array<float,5> metric_widths{5.0f,5.8f,5.0f,1.8f,14.0f};
 constexpr UINT_PTR settings_timer = 1;
 
 // An out-of-context WinEvent hook delivers foreground changes on this UI thread.

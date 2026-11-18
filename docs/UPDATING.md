@@ -2,7 +2,7 @@
 
 ## Скачиваемый FluxTop.exe
 
-Встроенный нативный launcher сначала проверяет публичные GitHub Releases
+После установки нативный launcher, доступный из меню «Пуск», проверяет GitHub Releases
 Dilichan/FluxTop через WinHTTP. Git и сборщик не требуются. Подходящие теги:
 vX.Y.Z и vX.Y.Z-preview.N, включая Preview. Из последних 20 релизов выбирается
 наибольшая версия выше текущей, с готовым asset FluxTop.exe и SHA-256 digest.

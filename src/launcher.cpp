@@ -1,5 +1,6 @@
 #include "fluxtop/windows.hpp"
 #include "fluxtop/release_update.hpp"
+#include "fluxtop/installation.hpp"
 #include <shellapi.h>
 #include <shlobj.h>
 #include <array>
@@ -63,22 +64,59 @@ void cache_launcher(const std::filesystem::path& directory) {
         throw fluxtop::windows_error("Publish launcher cache");
     }
 }
+// The GUI launcher requests UAC only for installation/registration.
+// Normal starts and fixture tests keep their existing elevation behavior.
+bool installer_is_elevated() {
+    HANDLE raw{};
+    if (!OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&raw))
+        throw fluxtop::windows_error("Inspect launcher token");
+    fluxtop::Handle token(raw);
+    TOKEN_ELEVATION elevation{};
+    DWORD bytes{};
+    if (!GetTokenInformation(token.get(),TokenElevation,&elevation,sizeof(elevation),&bytes))
+        throw fluxtop::windows_error("Read launcher elevation");
+    return elevation.TokenIsElevated != FALSE;
+}
+void request_install_elevation(const std::filesystem::path& path) {
+    SHELLEXECUTEINFOW command{};
+    command.cbSize=sizeof(command);
+    command.lpVerb=L"runas";
+    command.lpFile=path.c_str();
+    command.lpParameters=L"--install-and-launch";
+    command.nShow=SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&command)) {
+        const auto error=GetLastError();
+        if (error==ERROR_CANCELLED) return; // User declined UAC: no installation.
+        SetLastError(error);
+        throw fluxtop::windows_error("Request administrator rights for installation");
+    }
+}
 }
 int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
-    bool prepare=false;
+    bool prepare=false,install_only=false;
     try {
+        const HRESULT com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
+        if (FAILED(com) && com!=RPC_E_CHANGED_MODE)
+            throw std::runtime_error("Cannot initialize launcher COM apartment");
+        struct ComScope { bool initialized; ~ComScope() { if (initialized) CoUninitialize(); } } com_scope{SUCCEEDED(com)};
         int count{}; auto** argv=CommandLineToArgvW(GetCommandLineW(),&count);
         if (!argv) throw fluxtop::windows_error("Read launcher arguments");
         struct Arguments { wchar_t** value; ~Arguments(){ LocalFree(value); } } arguments{argv};
-        bool tray=false,autostart=false;
+        bool tray=false,autostart=false,uninstall=false,custom_directory=false,install_and_launch=false;
         std::filesystem::path directory;
         for (int i=1;i<count;++i) {
             const std::wstring_view arg(argv[i]);
             if (arg==L"--tray") tray=true;
             else if (arg==L"--autostart") { autostart=true; tray=true; }
             else if (arg==L"--prepare-only") prepare=true;
-            else if (arg==L"--data-dir" && i+1<count) directory=std::filesystem::absolute(argv[++i]);
-            else throw std::runtime_error("Supported launcher options: --tray, --prepare-only, --data-dir PATH");
+            else if (arg==L"--install-only") install_only=true;
+            else if (arg==L"--install-and-launch") install_and_launch=true;
+            else if (arg==L"--uninstall") uninstall=true;
+            else if (arg==L"--data-dir" && i+1<count) {
+                custom_directory=true;
+                directory=std::filesystem::absolute(argv[++i]);
+            }
+            else throw std::runtime_error("Supported options: --tray, --prepare-only, --install-only, --uninstall, --data-dir PATH");
         }
         if (directory.empty()) directory=data_directory();
         std::filesystem::create_directories(directory);
@@ -92,7 +130,87 @@ int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
         if (autostart && !prepare) Sleep(30000);
         wchar_t tag[128]{};
         if (!LoadStringW(module,203,tag,static_cast<int>(std::size(tag)))) throw std::runtime_error("Release version missing");
-        if (!prepare && fluxtop::try_release_update(directory,executable(),tag,tray)) return 0;
+        const auto self=executable();
+        const auto installed=directory/L"FluxTop.exe";
+        if (uninstall) {
+            if (custom_directory || !fluxtop::same_file(self,installed))
+                throw std::runtime_error("Run --uninstall from the installed FluxTop.exe");
+            if (fluxtop::monitor_running()) {
+                MessageBoxW(nullptr,L"FluxTop запущен. Сначала закройте его через значок в трее.",
+                    L"FluxTop — удаление",MB_OK|MB_ICONINFORMATION);
+                return 0;
+            }
+            if (MessageBoxW(nullptr,L"Удалить FluxTop? История, настройки и иконки останутся на диске.",
+                L"FluxTop — удаление",MB_YESNO|MB_ICONQUESTION)!=IDYES) return 0;
+            fluxtop::uninstall_application(directory);
+            return 0;
+        }
+        if (!prepare && fluxtop::monitor_running()) {
+            if (!autostart) MessageBoxW(nullptr,
+                L"FluxTop уже запущен. Откройте настройки через значок в трее или Ctrl+Alt+F9.",
+                L"FluxTop",MB_OK|MB_ICONINFORMATION);
+            return 0;
+        }
+        if (install_and_launch) {
+            if (custom_directory || !installer_is_elevated())
+                throw std::runtime_error("Installation requires an elevated launcher and the default user directory");
+            fluxtop::install_application(self,directory,tag,true);
+            fluxtop::launch_installed_application(directory,false);
+            return 0;
+        }
+        if (install_only) {
+            // --data-dir fixture runs are intentionally unelevated and isolated.
+            if (!custom_directory && !installer_is_elevated()) {
+                request_install_elevation(self);
+                return 0;
+            }
+            fluxtop::install_application(self,directory,tag,!custom_directory);
+            return 0;
+        }
+        if (!prepare && !custom_directory) {
+            if (!fluxtop::same_file(self,installed)) {
+                const bool registered=fluxtop::application_registered(installed);
+                const auto installed_tag=fluxtop::launcher_release_tag(installed);
+                const bool upgrade=installed_tag.empty() || fluxtop::newer_release(tag,installed_tag);
+                const wchar_t* prompt = !registered
+                    ? L"Установить FluxTop для текущего пользователя? Программа появится в меню «Пуск» и списке установленных приложений."
+                    : upgrade
+                        ? L"FluxTop уже установлен. Обновить установленную версию и запустить?"
+                        : L"FluxTop уже установлен. Запустить установленную копию?";
+                if (MessageBoxW(nullptr,prompt,L"FluxTop — установка",MB_YESNO|MB_ICONQUESTION)!=IDYES)
+                    return 0;
+                if (!registered || upgrade) {
+                    if (!installer_is_elevated()) {
+                        request_install_elevation(self);
+                        return 0;
+                    }
+                    fluxtop::install_application(self,directory,tag,true);
+                }
+                fluxtop::launch_installed_application(directory,false);
+                return 0;
+            }
+            if (!fluxtop::application_registered(installed)) {
+                // Never trigger an installation dialog during Startup/tray launch.
+                if (!autostart && !tray) {
+                    if (MessageBoxW(nullptr,
+                        L"Добавить FluxTop в меню «Пуск» и список установленных приложений?",
+                        L"FluxTop — завершение установки",MB_YESNO|MB_ICONQUESTION)!=IDYES) return 0;
+                    if (!installer_is_elevated()) {
+                        request_install_elevation(self);
+                        return 0;
+                    }
+                    fluxtop::install_application(self,directory,tag,true);
+                }
+            } else if (!fluxtop::installation_version_current(tag) && !autostart && !tray) {
+                // Refresh Installed Apps metadata with user-approved UAC.
+                if (!installer_is_elevated()) {
+                    request_install_elevation(self);
+                    return 0;
+                }
+                fluxtop::install_application(self,directory,tag,true);
+            }
+        }
+        if (!prepare && fluxtop::try_release_update(directory,self,tag,tray)) return 0;
         const auto resource=FindResourceW(module,MAKEINTRESOURCEW(201),RT_RCDATA);
         if (!resource) throw fluxtop::windows_error("Locate embedded monitor");
         const auto loaded=LoadResource(module,resource);
@@ -118,7 +236,7 @@ int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
         if (start.hProcess) CloseHandle(start.hProcess);
         return 0;
     } catch (const std::exception& error) {
-        if (!prepare) {
+        if (!prepare && !install_only) {
             const auto size=MultiByteToWideChar(CP_UTF8,0,error.what(),-1,nullptr,0);
             std::wstring message(static_cast<std::size_t>(std::max(1,size)),L'\0');
             MultiByteToWideChar(CP_UTF8,0,error.what(),-1,message.data(),size);
