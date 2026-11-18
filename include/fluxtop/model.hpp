@@ -42,7 +42,7 @@ struct Process : RawProcess {
 
 class CpuTracker {
 public:
-    std::vector<Process> update(const std::vector<RawProcess>& raw, unsigned processors);
+    std::vector<Process> update(std::vector<RawProcess> raw, unsigned processors);
 private:
     struct Baseline {
         std::uint64_t creation;
@@ -77,9 +77,12 @@ std::optional<double> auto_metric_load_percent(const Process& row, AutoMetric me
 // Original per-PID snapshots and history are never modified.
 std::vector<Process> aggregate_application_processes(const std::vector<Process>& rows);
 void sort_processes(std::vector<Process>& rows, Sort sort, unsigned visible_metrics = 31U);
+// Sort borrowed rows without copying their names, paths, or member PID buffers.
+void sort_process_refs(std::vector<const Process*>& rows, Sort sort, unsigned visible_metrics = 31U);
 // Move the focused process to row zero without changing the order of other rows.
 // Return false if pid is zero or not present in this snapshot.
 bool prioritize_focused_process(std::vector<Process>& rows, std::uint32_t pid);
+bool prioritize_focused_process(std::vector<const Process*>& rows, std::uint32_t pid);
 std::optional<std::uint32_t> gpu_instance_pid(const std::wstring& instance);
 
 struct Snapshot {

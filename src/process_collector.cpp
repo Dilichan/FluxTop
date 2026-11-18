@@ -5,6 +5,7 @@
 #include <psapi.h>
 #include <chrono>
 #include <algorithm>
+#include <utility>
 
 namespace fluxtop {
 Snapshot ProcessCollector::collect() {
@@ -89,7 +90,8 @@ Snapshot ProcessCollector::collect() {
     } while (Process32NextW(snapshot.get(), &entry));
     if (GetLastError() != ERROR_NO_MORE_FILES) throw windows_error("Process32NextW");
     paths_ = std::move(next_paths);
-    result.processes = tracker_.update(raw, result.logical_processors);
+    // Transfer process names and paths instead of copying every string again.
+    result.processes = tracker_.update(std::move(raw), result.logical_processors);
     for (const auto& row : result.processes) {
         if (row.pid == result.self_pid) result.self_cpu_percent = row.cpu_percent;
     }

@@ -20,6 +20,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <sstream>
+#include <unordered_map>
 
 namespace fluxtop {
 namespace {
@@ -182,6 +183,15 @@ private:
     std::string pending_error_, error_;
     bool posted_ = false, pending_finished_ = false;
     std::vector<Row> rows_;
+    // D2D bitmaps are render-target resources: reuse until the icon or target changes.
+    struct CachedBitmap {
+        std::optional<std::uint64_t> created;
+        std::shared_ptr<const AppIcon> source;
+        ComPtr<ID2D1Bitmap> bitmap;
+        std::uint64_t used{};
+    };
+    std::unordered_map<std::uint32_t,CachedBitmap> icon_bitmaps_;
+    std::uint64_t icon_bitmap_clock_{};
     ComPtr<ID2D1Factory> factory_;
     ComPtr<IDWriteFactory> write_factory_;
     ComPtr<IDWriteTextFormat> body_font_, number_font_;
@@ -528,8 +538,11 @@ void Overlay::receive() {
 void Overlay::update_view() {
     if (!snapshot_) return;
     const auto& s = *snapshot_;
-    auto display=grouped_processes_;
-    sort_processes(display, options_.sort, active_metrics());
+    // Foreground changes only reorder borrowed pointers, not full Process trees.
+    std::vector<const Process*> display;
+    display.reserve(grouped_processes_.size());
+    for (const auto& process : grouped_processes_) display.push_back(&process);
+    sort_process_refs(display, options_.sort, active_metrics());
     focused_pid_ = 0;
     if (options_.sort == Sort::automatic) {
         DWORD foreground_pid{};
@@ -537,11 +550,11 @@ void Overlay::update_view() {
             GetWindowThreadProcessId(foreground_window,&foreground_pid);
         // A missing or unsampled process must not displace the normal ranking.
         if (foreground_pid && prioritize_focused_process(display,foreground_pid))
-            focused_pid_ = display.front().pid; // May be a child PID inside a grouped family.
+            focused_pid_ = display.front()->pid; // May be a child PID inside a grouped family.
     }
     std::vector<Row> next;
     for (std::size_t i = 0; !summary_only() && i < std::min(display.size(), static_cast<std::size_t>(options_.top)); ++i) {
-        const auto& p = display[i];
+        const auto& p = *display[i];
         auto name = wide(p.name); if (name.ends_with(L".exe")) name.resize(name.size()-4);
         std::array<std::optional<double>,4> loads{};
         for (std::size_t j=0; j<loads.size(); ++j)
@@ -566,6 +579,7 @@ void Overlay::update_view() {
 }
 
 void Overlay::release_surface() {
+    icon_bitmaps_.clear(); // D2D bitmaps belong to this render target.
     brush_.Reset(); target_.Reset();
     if (dc_) { if (old_bitmap_) SelectObject(dc_, old_bitmap_); DeleteDC(dc_); }
     if (bitmap_) DeleteObject(bitmap_);
@@ -734,11 +748,26 @@ void Overlay::paint() {
         const float y = 1+static_cast<float>(i+1)*row_height();
         const auto cells = columns(y,row_height());
         if (show_icons_ && icons_) if (const auto icon = icons_->get(row.pid,row.created)) {
-            ComPtr<ID2D1Bitmap> image;
-            require_hr(target_->CreateBitmap(D2D1::SizeU(AppIcon::size,AppIcon::size),icon->pixels.data(),AppIcon::size*4,
-                D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED)),&image), "Application icon bitmap");
-            const float side = text_size()*1.3f, top = y+(row_height()-side)/2;
-            target_->DrawBitmap(image.Get(),D2D1::RectF(2,top,2+side,top+side));
+            auto found=icon_bitmaps_.find(row.pid);
+            if (found==icon_bitmaps_.end() || found->second.created!=row.created || found->second.source!=icon) {
+                // A bounded LRU protects memory when many short-lived processes appear.
+                constexpr std::size_t bitmap_capacity=128;
+                if (found==icon_bitmaps_.end() && icon_bitmaps_.size()>=bitmap_capacity) {
+                    const auto oldest=std::min_element(icon_bitmaps_.begin(),icon_bitmaps_.end(),
+                        [](const auto& a,const auto& b){return a.second.used<b.second.used;});
+                    icon_bitmaps_.erase(oldest);
+                }
+                CachedBitmap entry;
+                entry.created=row.created;
+                entry.source=icon;
+                require_hr(target_->CreateBitmap(D2D1::SizeU(AppIcon::size,AppIcon::size),icon->pixels.data(),AppIcon::size*4,
+                    D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED)),
+                    &entry.bitmap),"Application icon bitmap");
+                found=icon_bitmaps_.insert_or_assign(row.pid,std::move(entry)).first;
+            }
+            found->second.used=++icon_bitmap_clock_;
+            const float side=text_size()*1.3f, top=y+(row_height()-side)/2;
+            target_->DrawBitmap(found->second.bitmap.Get(),D2D1::RectF(2,top,2+side,top+side));
         }
         draw_text(row.name,cells[0],body_font_.Get());
         const std::array values{row.cpu,row.ram,row.gpu,row.vram,row.network};

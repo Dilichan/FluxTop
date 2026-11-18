@@ -38,6 +38,13 @@ void cpu_tests() {
     sample.sampled_ns += 1000000000;
     result = tracker.update({sample}, 4);
     check(result[0].cpu_percent && std::abs(*result[0].cpu_percent - 25.0) < 0.0001, "one core of four is 25%");
+    // The collector transfers ownership of name/path strings into Process rows.
+    sample.name="example.exe";
+    sample.exe_path="c:\\test\\example.exe";
+    std::vector<fluxtop::RawProcess> batch{sample};
+    result=tracker.update(std::move(batch),4);
+    check(result[0].name==sample.name && result[0].exe_path==sample.exe_path,
+        "moving RawProcess retains process identity");
     sample.creation_time = 2;
     sample.cpu_ticks = 1;
     sample.sampled_ns += 1000000000;
@@ -83,6 +90,24 @@ void sort_tests() {
     check(rows[0].pid==1 && rows[1].pid==3 && rows[2].pid==4,"Tx sorts transmit rate");
     fluxtop::sort_processes(rows,fluxtop::Sort::network);
     check(rows[0].pid==3 && rows[1].pid==4 && rows[2].pid==2 && rows[3].pid==1,"combined network sorts Rx+Tx, partial values unknown");
+    std::vector<const fluxtop::Process*> refs;
+    for (const auto& row:rows) refs.push_back(&row);
+    fluxtop::sort_process_refs(refs,fluxtop::Sort::network);
+    check(refs.size()==rows.size() && refs[0]->pid==3 && refs[1]->pid==4 &&
+        refs[2]->pid==2 && refs[3]->pid==1,"borrowed-row order matches owned-row order");
+    for (const auto mode:{fluxtop::Sort::cpu,fluxtop::Sort::ram,fluxtop::Sort::gpu,
+        fluxtop::Sort::vram,fluxtop::Sort::automatic,fluxtop::Sort::rx,fluxtop::Sort::tx}) {
+        auto owned=rows;
+        fluxtop::sort_processes(owned,mode);
+        auto borrowed=refs;
+        fluxtop::sort_process_refs(borrowed,mode);
+        const bool same=std::equal(owned.begin(),owned.end(),borrowed.begin(),
+            [](const auto& a,const auto* b){return a.pid==b->pid;});
+        check(same,"borrowed-row comparator remains consistent for each sort mode");
+    }
+    check(fluxtop::prioritize_focused_process(refs,2) && refs.front()->pid==2,
+        "borrowed-row foreground rotation");
+    check(!fluxtop::prioritize_focused_process(refs,9999),"missing foreground keeps row ordering");
 }
 void spike_tests() {
     constexpr std::uint64_t gib = 1073741824ULL;
@@ -335,6 +360,16 @@ void multiprocess_aggregation_tests() {
     });
     check(matched!=cautious.end() && matched->working_set
         && *matched->working_set==110*mib,"pathless parent-child memory is correct");
+    std::vector<Process> reversed_chain;
+    for (std::uint32_t i=64;i>0;--i) {
+        Process p;
+        p.pid=1000+i; p.parent_pid=999+i; p.creation_time=i;
+        p.name="same.exe"; p.working_set=1;
+        reversed_chain.push_back(std::move(p));
+    }
+    const auto compressed=fluxtop::aggregate_application_processes(reversed_chain);
+    check(compressed.size()==1 && compressed.front().member_pids.size()==64,
+        "long reversed pathless chain resolves to a single root");
 }
 
 void output_tests() {

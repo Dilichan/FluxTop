@@ -7,26 +7,26 @@
 
 namespace fluxtop {
 
-std::vector<Process> CpuTracker::update(const std::vector<RawProcess>& raw, unsigned processors) {
+std::vector<Process> CpuTracker::update(std::vector<RawProcess> raw, unsigned processors) {
     std::unordered_map<std::uint32_t, Baseline> next;
     next.reserve(raw.size());
     std::vector<Process> rows;
     rows.reserve(raw.size());
-    for (const auto& sample : raw) {
+    for (auto& sample : raw) {
         Process row;
-        static_cast<RawProcess&>(row) = sample;
-        if (sample.creation_time && sample.cpu_ticks) {
-            const auto found = previous_.find(sample.pid);
-            if (found != previous_.end() && found->second.creation == *sample.creation_time) {
+        static_cast<RawProcess&>(row) = std::move(sample);
+        if (row.creation_time && row.cpu_ticks) {
+            const auto found = previous_.find(row.pid);
+            if (found != previous_.end() && found->second.creation == *row.creation_time) {
                 const auto& before = found->second;
                 row.has_baseline = true;
-                if (processors && sample.sampled_ns > before.sampled_ns && *sample.cpu_ticks >= before.ticks) {
-                    const double elapsed = static_cast<double>(sample.sampled_ns - before.sampled_ns);
-                    const double ticks = static_cast<double>(*sample.cpu_ticks - before.ticks);
+                if (processors && row.sampled_ns > before.sampled_ns && *row.cpu_ticks >= before.ticks) {
+                    const double elapsed = static_cast<double>(row.sampled_ns - before.sampled_ns);
+                    const double ticks = static_cast<double>(*row.cpu_ticks - before.ticks);
                     row.cpu_percent = std::clamp(ticks * 100.0 * 100.0 / elapsed / processors, 0.0, 100.0);
                 }
             }
-            next.emplace(sample.pid, Baseline{*sample.creation_time, *sample.cpu_ticks, sample.sampled_ns});
+            next.emplace(row.pid, Baseline{*row.creation_time, *row.cpu_ticks, row.sampled_ns});
         }
         rows.push_back(std::move(row));
     }
@@ -222,25 +222,35 @@ std::vector<Process> aggregate_application_processes(const std::vector<Process>&
     std::unordered_map<std::uint32_t,std::size_t> positions;
     positions.reserve(rows.size());
     for (std::size_t i=0;i<rows.size();++i) positions.emplace(rows[i].pid,i);
-    std::vector<std::size_t> roots(rows.size());
+    // Memoize roots. Parent links are strictly older, therefore acyclic;
+    // each chain is resolved once rather than retraversed for every child.
+    const auto unresolved=rows.size();
+    std::vector<std::size_t> roots(rows.size(),unresolved);
     for (std::size_t i=0;i<rows.size();++i) {
         auto current=i;
-        // Every accepted hop has an earlier creation time, so cycles and reused
-        // parent PIDs cannot create an incorrect process family.
-        for (std::size_t hops=0;hops<rows.size();++hops) {
+        while (roots[current]==unresolved) {
             const auto found=positions.find(rows[current].parent_pid);
-            if (found==positions.end()) break;
-            const auto parent=found->second;
-            if (parent==current || !same_executable_family(rows[current],rows[parent])) break;
+            if (found==positions.end() || found->second==current ||
+                !same_executable_family(rows[current],rows[found->second])) {
+                roots[current]=current;
+                break;
+            }
+            current=found->second;
+        }
+        const auto root=roots[current];
+        current=i;
+        while (roots[current]==unresolved) {
+            const auto parent=positions.find(rows[current].parent_pid)->second;
+            roots[current]=root;
             current=parent;
         }
-        roots[i]=current;
     }
     // Same canonical full EXE path identifies an installed application, even
     // when its workers have disconnected parent chains. A PID/name alone is
     // never enough to merge unrelated processes. Paths were case-normalized
     // by ProcessCollector; private/unknown paths use verified parent lineage.
-    std::unordered_map<std::string,std::size_t> image_groups;
+    // Keys borrow the stable input paths for this call; no per-group path copies.
+    std::unordered_map<std::string_view,std::size_t> image_groups;
     std::unordered_map<std::size_t,std::size_t> lineage_groups;
     image_groups.reserve(rows.size());
     lineage_groups.reserve(rows.size());
@@ -281,7 +291,9 @@ std::vector<Process> aggregate_application_processes(const std::vector<Process>&
     return result;
 }
 
-void sort_processes(std::vector<Process>& rows, Sort sort, unsigned visible_metrics) {
+namespace {
+// Shared ordering ensures pointer sorting and owned-row sorting remain identical.
+bool process_before(const Process& a,const Process& b,Sort sort,unsigned visible_metrics) {
     const auto value = [sort,visible_metrics](const Process& row) -> std::optional<double> {
         switch (sort) {
         case Sort::cpu: return row.cpu_percent;
@@ -298,16 +310,26 @@ void sort_processes(std::vector<Process>& rows, Sort sort, unsigned visible_metr
         }
         return std::nullopt;
     };
-    std::sort(rows.begin(), rows.end(), [&](const Process& a, const Process& b) {
-        const auto av = value(a);
-        const auto bv = value(b);
-        if (av.has_value() != bv.has_value()) return av.has_value();
-        if (av && *av != *bv) return *av > *bv;
-        if (sort == Sort::automatic && a.cpu_percent != b.cpu_percent) {
-            if (a.cpu_percent.has_value() != b.cpu_percent.has_value()) return a.cpu_percent.has_value();
-            return *a.cpu_percent > *b.cpu_percent;
-        }
-        return a.pid < b.pid;
+    const auto av=value(a);
+    const auto bv=value(b);
+    if (av.has_value()!=bv.has_value()) return av.has_value();
+    if (av && *av!=*bv) return *av>*bv;
+    if (sort==Sort::automatic && a.cpu_percent!=b.cpu_percent) {
+        if (a.cpu_percent.has_value()!=b.cpu_percent.has_value()) return a.cpu_percent.has_value();
+        return *a.cpu_percent>*b.cpu_percent;
+    }
+    return a.pid<b.pid;
+}
+} // namespace
+
+void sort_processes(std::vector<Process>& rows,Sort sort,unsigned visible_metrics) {
+    std::sort(rows.begin(),rows.end(),[sort,visible_metrics](const Process& a,const Process& b) {
+        return process_before(a,b,sort,visible_metrics);
+    });
+}
+void sort_process_refs(std::vector<const Process*>& rows,Sort sort,unsigned visible_metrics) {
+    std::sort(rows.begin(),rows.end(),[sort,visible_metrics](const Process* a,const Process* b) {
+        return process_before(*a,*b,sort,visible_metrics);
     });
 }
 
@@ -321,6 +343,16 @@ bool prioritize_focused_process(std::vector<Process>& rows, std::uint32_t pid) {
     });
     if (position == rows.end()) return false;
     if (position != rows.begin()) std::rotate(rows.begin(),position,position+1);
+    return true;
+}
+// Pointer overload avoids copying Process objects when the foreground changes.
+bool prioritize_focused_process(std::vector<const Process*>& rows, std::uint32_t pid) {
+    if (!pid) return false;
+    const auto position=std::find_if(rows.begin(),rows.end(),[pid](const Process* p) {
+        return p->pid==pid || std::find(p->member_pids.begin(),p->member_pids.end(),pid)!=p->member_pids.end();
+    });
+    if (position==rows.end()) return false;
+    if (position!=rows.begin()) std::rotate(rows.begin(),position,position+1);
     return true;
 }
 

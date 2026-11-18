@@ -9,6 +9,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <string_view>
 
 namespace fluxtop {
 namespace {
@@ -145,9 +146,9 @@ bool GpuCollector::read(PDH_HCOUNTER counter,
             if (!pid) continue;
             valid = true;
             values[*pid] = std::max(values[*pid], std::clamp(value, 0.0, 100.0));
-            const std::wstring name(item.szName);
-            const auto identity = name.find(L"_luid_");
-            if (identity != std::wstring::npos) engines[name.substr(identity)] += value;
+            const std::wstring_view name(item.szName);
+            const auto identity=name.find(L"_luid_");
+            if(identity!=std::wstring_view::npos) engines[std::wstring(name.substr(identity))]+=value;
         }
         if (valid) {
             total = memory_sum;

@@ -72,7 +72,7 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
     // Hover uses the very same series and plotting scale as the detached graph.
     if(popup.cursor.x>=graph.left && popup.cursor.x<=graph.right
         && popup.cursor.y>=graph.top && popup.cursor.y<=graph.bottom && to>from) {
-        double best=144.0;std::size_t selected=0;double score=0;bool found=false;
+        double best=144.0;std::size_t selected=0;double score=0;std::int64_t sample_at=0;bool found=false;
         const double width=static_cast<double>(graph.right-graph.left);
         const double height=static_cast<double>(graph.bottom-graph.top);
         for(std::size_t i=0;i<apps.size();++i) {
@@ -83,7 +83,7 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
                 const double ypos=graph.bottom-std::clamp(pts[j].second*vertical_zoom,0.0,100.0)*height/100.0;
                 const double distance=(xpos-popup.cursor.x)*(xpos-popup.cursor.x)
                     +(ypos-popup.cursor.y)*(ypos-popup.cursor.y);
-                if(distance<best) {best=distance;selected=i;score=pts[j].second;found=true;}
+                if(distance<best) {best=distance;selected=i;score=pts[j].second;sample_at=pts[j].first;found=true;}
                 if(j==0) continue;
                 const auto old_x=graph.left+static_cast<double>(pts[j-1].first-from)*width/static_cast<double>(to-from);
                 if(xpos<=old_x || popup.cursor.x<old_x || popup.cursor.x>xpos) continue;
@@ -91,19 +91,19 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
                 const double value=pts[j-1].second+(pts[j].second-pts[j-1].second)*fraction;
                 const double line_y=graph.bottom-std::clamp(value*vertical_zoom,0.0,100.0)*height/100.0;
                 const double dx=line_y-popup.cursor.y;
-                if(dx*dx<best) {best=dx*dx;selected=i;score=value;found=true;}
+                if(dx*dx<best) {best=dx*dx;selected=i;score=value;sample_at=pts[j-1].first+static_cast<std::int64_t>(static_cast<double>(pts[j].first-pts[j-1].first)*fraction);found=true;}
             }
         }
         if(found && selected<apps.size()) {
             const auto& app=apps[selected];
             const int bubble_width=std::min(420,std::max(240,static_cast<int>(client.right)-36));
-            const int bubble_height=static_cast<int>(std::lround(bubble_width*170.0/420.0));
+            const int bubble_height=static_cast<int>(std::lround(bubble_width*198.0/420.0));
             const int left=std::clamp(static_cast<int>(popup.cursor.x)+16,12,
                 std::max(12,static_cast<int>(client.right)-bubble_width-12));
             const int top=std::clamp(static_cast<int>(popup.cursor.y)+16,76,
                 std::max(76,static_cast<int>(client.bottom)-bubble_height-12));
             const RECT bubble{left,top,left+bubble_width,top+bubble_height};
-            draw_metric_tooltip(dc,bubble,app,score);
+            draw_metric_tooltip(dc,bubble,app,score,sample_at);
         }
     }
     SelectObject(dc,old_font);DeleteObject(font);

@@ -119,10 +119,13 @@ bool statistics_is_system(std::wstring_view name,std::wstring_view path) {
          L"svchost.exe",L"csrss.exe",L"smss.exe",L"wininit.exe",L"winlogon.exe",
          L"services.exe",L"lsass.exe",L"dwm.exe",L"fontdrvhost.exe"})
         if (lower_name==known) return true;
-    wchar_t windows[MAX_PATH]{};
-    const UINT length=GetWindowsDirectoryW(windows,MAX_PATH);
-    if (length && length<MAX_PATH) {
-        const auto directory=lowercase(std::wstring(windows));
+    // A Windows directory query per running application per sample is wasteful.
+    static const std::wstring directory=[] {
+        wchar_t windows[MAX_PATH]{};
+        const UINT length=GetWindowsDirectoryW(windows,MAX_PATH);
+        return length && length<MAX_PATH ? lowercase(std::wstring(windows,length)) : std::wstring{};
+    }();
+    if (!directory.empty()) {
         const auto application=lowercase(std::wstring(path));
         return application.size()>directory.size() && application.starts_with(directory)
             && (application[directory.size()]==L'\\' || application[directory.size()]==L'/');

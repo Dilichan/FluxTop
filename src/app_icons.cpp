@@ -40,9 +40,14 @@ std::wstring executable(const Key& requested) {
     if (!process.valid()) return {};
     FILETIME created{}, exit{}, kernel{}, user{};
     if (!GetProcessTimes(process.get(), &created, &exit, &kernel, &user) || filetime_ticks(created) != requested.created) return {};
-    std::wstring path(32768, L'\0');
-    DWORD size = static_cast<DWORD>(path.size());
-    if (!QueryFullProcessImageNameW(process.get(), 0, path.data(), &size)) return {};
+    wchar_t short_path[512]{};
+    DWORD size=512;
+    if (QueryFullProcessImageNameW(process.get(),0,short_path,&size))
+        return std::wstring(short_path,size);
+    if (GetLastError()!=ERROR_INSUFFICIENT_BUFFER) return {};
+    std::wstring path(32768,L'\0');
+    size=static_cast<DWORD>(path.size());
+    if (!QueryFullProcessImageNameW(process.get(),0,path.data(),&size)) return {};
     path.resize(size);
     return path;
 }

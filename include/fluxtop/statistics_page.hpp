@@ -51,7 +51,7 @@ private:
     COLORREF series_color(const StatisticsApplication& app,std::size_t index) const;
     void mouse(int x,int y);
     void paint_tooltip(HDC dc);
-    void draw_metric_tooltip(HDC dc,const RECT& area,const StatisticsApplication& app,double score);
+    void draw_metric_tooltip(HDC dc,const RECT& area,const StatisticsApplication& app,double score,std::int64_t sample_at);
     bool advance_axes(double elapsed_ms);
     HICON application_icon(const std::wstring& path);
     double icon_hue(const std::wstring& key,const std::wstring& path);
@@ -115,6 +115,7 @@ private:
     std::size_t hover_index_{};
     POINT hover_at_{};
     double hover_value_{};
+    std::int64_t hover_timestamp_{};
     std::mutex mutex_;
     std::condition_variable_any wake_;
     std::stop_source cancel_query_;

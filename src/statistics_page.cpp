@@ -14,6 +14,7 @@
 #include <limits>
 #include <cstdint>
 #include <set>
+#include <unordered_map>
 
 namespace fluxtop {
 namespace {
@@ -46,6 +47,14 @@ std::wstring local_label(std::int64_t epoch_ms) {
     auto st=local_time(epoch_ms);
     wchar_t output[48]{};
     swprintf_s(output,L"%02u.%02u.%04u %02u:%02u",st.wDay,st.wMonth,st.wYear,st.wHour,st.wMinute);
+    return output;
+}
+std::wstring local_sample_label(std::int64_t epoch_ms) {
+    if(epoch_ms<=0) return L"—";
+    const auto time=local_time(epoch_ms);
+    wchar_t output[64]{};
+    swprintf_s(output,L"%02u.%02u.%04u %02u:%02u:%02u",
+        time.wDay,time.wMonth,time.wYear,time.wHour,time.wMinute,time.wSecond);
     return output;
 }
 std::wstring span_label(double seconds) {
@@ -515,54 +524,32 @@ void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Pro
     animation_duration_ms_=std::clamp(interval_ms,250U,10000U);
     last_live_timestamp_=timestamp_ms;
     if(active_ || popups_[0].window) SetTimer(hwnd_,animate_message,33,nullptr);
-    std::vector<const Process*> sorted;
+    struct Ranked { const Process* process; double score; };
+    std::vector<Ranked> sorted;
     sorted.reserve(grouped.size());
-    for(const auto& p:grouped) {
-        std::wstring name;
-        if(!p.name.empty()) {
-            const auto bytes=static_cast<int>(p.name.size());
-            const int count=MultiByteToWideChar(CP_UTF8,0,p.name.data(),bytes,nullptr,0);
-            if(count>0) {name.resize(static_cast<std::size_t>(count));MultiByteToWideChar(CP_UTF8,0,p.name.data(),bytes,name.data(),count);}
-        }
-        std::wstring path;
-        if(p.exe_path) {
-            const int count=MultiByteToWideChar(CP_UTF8,0,p.exe_path->data(),static_cast<int>(p.exe_path->size()),nullptr,0);
-            if(count>0) {path.resize(static_cast<std::size_t>(count));MultiByteToWideChar(CP_UTF8,0,p.exe_path->data(),static_cast<int>(p.exe_path->size()),path.data(),count);}
-        }
-        if(!system_ && statistics_is_system(name,path)) continue;
-        sorted.push_back(&p);
-    }
-    // Keep current readings distinct from the historical AutoScore point.
-    // Historical applications that are no longer running are shown as unknown.
+    // One UTF-8 conversion per metric row, and one AutoScore evaluation per app.
     current_readings_.clear();
-    for(const Process* process:sorted) {
+    for(const auto& p:grouped) {
         StatisticsApplication identity;
-        identity.name=stat_wide(process->name);
-        identity.path=process->exe_path?stat_wide(*process->exe_path):L"";
+        identity.name=stat_wide(p.name);
+        identity.path=p.exe_path?stat_wide(*p.exe_path):L"";
+        if(!system_ && statistics_is_system(identity.name,identity.path)) continue;
         CurrentReadings values;
-        values.cpu=stat_percent(process->cpu_percent);
-        values.ram=stat_memory(process->working_set);
-        values.gpu=stat_percent(process->gpu_percent);
-        values.vram=stat_memory(process->dedicated_gpu_bytes);
-        values.network=stat_network(process->rx_bytes_per_second,process->tx_bytes_per_second);
+        values.cpu=stat_percent(p.cpu_percent);
+        values.ram=stat_memory(p.working_set);
+        values.gpu=stat_percent(p.gpu_percent);
+        values.vram=stat_memory(p.dedicated_gpu_bytes);
+        values.network=stat_network(p.rx_bytes_per_second,p.tx_bytes_per_second);
         current_readings_.emplace(color_key(identity),std::move(values));
+        sorted.push_back({&p,auto_rank(p,31U).score});
     }
-    std::stable_sort(sorted.begin(),sorted.end(),[](const Process* a,const Process* b){
-        return auto_rank(*a,31U).score>auto_rank(*b,31U).score;
+    std::stable_sort(sorted.begin(),sorted.end(),[](const Ranked& a,const Ranked& b){
+        return a.score>b.score;
     });
     // Keep up to 100 live series so increasing stats_top does not need a new collection.
     for(std::size_t i=0;i<std::min<std::size_t>(sorted.size(),100U);++i) {
-        const auto* p=sorted[i];
-        auto convert=[](std::string_view s)->std::wstring {
-            const int n=MultiByteToWideChar(CP_UTF8,0,s.data(),static_cast<int>(s.size()),nullptr,0);
-            if(n<=0) return L"?";
-            std::wstring out(static_cast<std::size_t>(n),L'\0');
-            MultiByteToWideChar(CP_UTF8,0,s.data(),static_cast<int>(s.size()),out.data(),n);
-            return out;
-        };
-        auto name=convert(p->name);
-        auto path=p->exe_path?convert(*p->exe_path):L"";
-        live_.push_back({timestamp_ms,std::move(name),std::move(path),auto_rank(*p,31U).score});
+        const auto* p=sorted[i].process;
+        live_.push_back({timestamp_ms,stat_wide(p->name),p->exe_path?stat_wide(*p->exe_path):L"",sorted[i].score});
     }
     while(!live_.empty() && live_.front().time<timestamp_ms-60000) live_.pop_front();
     // Bounds a burst of very short sampling intervals or an unexpected clock rollback.
@@ -716,21 +703,28 @@ void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<Statis
 void StatisticsPage::rebuild_live_series() {
     const auto now=now_ms();
     std::vector<StatisticsApplication> minute=history_.recent;
+    // Index applications once. The old search walked every series for each
+    // in-memory event (up to 10,000 events in the bounded minute queue).
+    std::unordered_map<std::wstring,std::size_t> positions;
+    positions.reserve(minute.size()+128);
+    for(std::size_t i=0;i<minute.size();++i) positions.try_emplace(color_key(minute[i]),i);
     // Merge the last minute read from SQLite with fresh in-memory samples.
     for(const auto& event:live_) {
         if(event.time<now-60000) continue;
-        auto found=std::find_if(minute.begin(),minute.end(),[&](const auto& app){
-            return !event.path.empty()?app.path==event.path:app.path.empty()&&app.name==event.name;
-        });
-        if(found==minute.end()) {
+        const auto identity=event.path.empty()?L"name:"+event.name:L"path:"+event.path;
+        auto found=positions.find(identity);
+        if(found==positions.end()) {
             StatisticsApplication app;app.name=event.name;app.path=event.path;
-            minute.push_back(std::move(app));found=std::prev(minute.end());
+            minute.push_back(std::move(app));
+            found=positions.emplace(identity,minute.size()-1).first;
         }
-        // Writer may have already recorded the same timestamp; replace instead of double drawing.
-        auto& points=found->points;
-        auto prev=std::find_if(points.begin(),points.end(),[&](const auto& p){return p.first==event.time;});
-        if(prev!=points.end()) prev->second=event.score;
-        else points.emplace_back(event.time,event.score);
+        // The database query returns ordered points. Maintain that invariant
+        // while merging to avoid a linear search per event and per series.
+        auto& points=minute[found->second].points;
+        const auto prev=std::lower_bound(points.begin(),points.end(),event.time,
+            [](const auto& p,std::int64_t stamp){return p.first<stamp;});
+        if(prev!=points.end() && prev->first==event.time) prev->second=event.score;
+        else points.insert(prev,{event.time,event.score});
     }
     for(auto& app:minute) {
         auto& p=app.points;
@@ -799,14 +793,14 @@ void StatisticsPage::mouse(int x,int y) {
     const auto to=in_live?now:window_to_;
     const double zoom=auto_scale_[in_live?0:1]?cached_auto_zoom_[in_live?0:1]:1.0;
     double best=9.0*9.0;
-    int section=-1;std::size_t selected=0;double score=0;
+    int section=-1;std::size_t selected=0;double score=0;std::int64_t sample_at=0;
     if(to>from) for(std::size_t i=0;i<chart.size();++i) {
         const auto& pts=chart[i].points;
         for(std::size_t j=0;j<pts.size();++j) {
             const double xpos=area.left+std::clamp(static_cast<double>(pts[j].first-from)/static_cast<double>(to-from),0.0,1.0)*(area.right-area.left);
             const double ypos=area.bottom-std::clamp(pts[j].second*zoom,0.0,100.0)/100*(area.bottom-area.top);
             const double dist=(xpos-x)*(xpos-x)+(ypos-y)*(ypos-y);
-            if(dist<best) {best=dist;section=in_live?0:1;selected=i;score=pts[j].second;}
+            if(dist<best) {best=dist;section=in_live?0:1;selected=i;score=pts[j].second;sample_at=pts[j].first;}
             if(j==0) continue;
             const auto& prev=pts[j-1];
             const double old_x=area.left+std::clamp(static_cast<double>(prev.first-from)/static_cast<double>(to-from),0.0,1.0)*(area.right-area.left);
@@ -815,17 +809,17 @@ void StatisticsPage::mouse(int x,int y) {
             const double line_score=prev.second+(pts[j].second-prev.second)*t;
             const double line_y=area.bottom-std::clamp(line_score*zoom,0.0,100.0)/100*(area.bottom-area.top);
             const double d=(line_y-y)*(line_y-y);
-            if(d<best){best=d;section=in_live?0:1;selected=i;score=line_score;}
+            if(d<best){best=d;section=in_live?0:1;selected=i;score=line_score;sample_at=prev.first+static_cast<std::int64_t>(static_cast<double>(pts[j].first-prev.first)*t);}
         }
     }
-    if(hover_section_!=section || hover_index_!=selected || hover_at_.x!=x || hover_at_.y!=y) {
-        hover_section_=section;hover_index_=selected;hover_value_=score;hover_at_={x,y};
+    if(hover_section_!=section || hover_index_!=selected || hover_at_.x!=x || hover_at_.y!=y || hover_timestamp_!=sample_at) {
+        hover_section_=section;hover_index_=selected;hover_value_=score;hover_timestamp_=sample_at;hover_at_={x,y};
         if(section<0 && tooltip_) ShowWindow(tooltip_,SW_HIDE);
         else if(tooltip_) {
             POINT cursor{};GetCursorPos(&cursor);
             const UINT dpi=GetDpiForWindow(tooltip_);
             const int tip_width=MulDiv(420,static_cast<int>(dpi),96);
-            const int tip_height=MulDiv(170,static_cast<int>(dpi),96);
+            const int tip_height=MulDiv(198,static_cast<int>(dpi),96);
             int left=cursor.x+MulDiv(18,static_cast<int>(dpi),96);
             int top=cursor.y+MulDiv(20,static_cast<int>(dpi),96);
             MONITORINFO monitor{sizeof(monitor)};
@@ -855,7 +849,7 @@ bool StatisticsPage::advance_axes(double elapsed_ms) {
     }
     return animating;
 }
-void StatisticsPage::draw_metric_tooltip(HDC dc,const RECT& area,const StatisticsApplication& app,double score) {
+void StatisticsPage::draw_metric_tooltip(HDC dc,const RECT& area,const StatisticsApplication& app,double score,std::int64_t sample_at) {
     // FluxTop unified tooltip with current metrics v1; shared across graph windows.
     const int left=area.left, top=area.top;
     const double scale=std::max(0.6,static_cast<double>(area.right-area.left)/420.0);
@@ -891,15 +885,17 @@ void StatisticsPage::draw_metric_tooltip(HDC dc,const RECT& area,const Statistic
     const auto found=current_readings_.find(color_key(app));
     const CurrentReadings empty{};
     const auto& values=found==current_readings_.end()?empty:found->second;
-    RECT separator{left+unit(13),top+unit(70),area.right-unit(13),top+unit(71)};
+    RECT separator{left+unit(13),top+unit(101),area.right-unit(13),top+unit(102)};
     HBRUSH rule=CreateSolidBrush(RGB(221,215,199));FillRect(dc,&separator,rule);DeleteObject(rule);
     const auto line=[&](const std::wstring& content,int y){
         RECT cell{left+unit(16),top+unit(y),area.right-unit(12),top+unit(y+25)};
         DrawTextW(dc,content.c_str(),-1,&cell,DT_LEFT|DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
     };
-    line(L"Сейчас · CPU: "+values.cpu+L"    GPU: "+values.gpu,76);
-    line(L"RAM: "+values.ram+L"       VRAM: "+values.vram,102);
-    line(L"Rx/Tx: "+values.network,128);
+    // The timestamp belongs to the hovered chart point; resource readings are current.
+    line(L"Замер: "+local_sample_label(sample_at),73);
+    line(L"Сейчас · CPU: "+values.cpu+L"    GPU: "+values.gpu,106);
+    line(L"RAM: "+values.ram+L"       VRAM: "+values.vram,132);
+    line(L"Rx/Tx: "+values.network,158);
     SelectObject(dc,original);
     if(title_font) DeleteObject(title_font);
     if(score_font) DeleteObject(score_font);
@@ -910,7 +906,7 @@ void StatisticsPage::paint_tooltip(HDC dc) {
     const auto& source=hover_section_==0?live_apps_:history_.history;
     if(hover_index_>=source.size()) return;
     RECT bounds{};GetClientRect(tooltip_,&bounds);
-    draw_metric_tooltip(dc,bounds,source[hover_index_],hover_value_);
+    draw_metric_tooltip(dc,bounds,source[hover_index_],hover_value_,hover_timestamp_);
 }
 LRESULT CALLBACK StatisticsPage::hover_dispatch(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
     auto* page=reinterpret_cast<StatisticsPage*>(GetWindowLongPtrW(window,GWLP_USERDATA));
