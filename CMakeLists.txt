@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(FluxTop VERSION 0.2.2 LANGUAGES CXX RC)
+project(FluxTop VERSION 0.2.3 LANGUAGES CXX RC)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 set(FLUXTOP_RELEASE_TAG "v${PROJECT_VERSION}" CACHE STRING "GitHub release tag embedded in the downloadable launcher")
 
@@ -87,6 +87,8 @@ if(BUILD_TESTING)
         -File "${PROJECT_SOURCE_DIR}/tests/statistics_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
     add_test(NAME statistics_popout_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
         -File "${PROJECT_SOURCE_DIR}/tests/statistics_popout_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
+    add_test(NAME statistics_tooltip_axis_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+        -File "${PROJECT_SOURCE_DIR}/tests/statistics_tooltip_axis_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
     set_tests_properties(history PROPERTIES TIMEOUT 20)
     add_executable(fluxtop_temperature_tests tests/temperature_tests.cpp src/temperatures.cpp)
     target_include_directories(fluxtop_temperature_tests PRIVATE include)

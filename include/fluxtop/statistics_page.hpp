@@ -51,6 +51,8 @@ private:
     COLORREF series_color(const StatisticsApplication& app,std::size_t index) const;
     void mouse(int x,int y);
     void paint_tooltip(HDC dc);
+    void draw_metric_tooltip(HDC dc,const RECT& area,const StatisticsApplication& app,double score);
+    bool advance_axes(double elapsed_ms);
     HICON application_icon(const std::wstring& path);
     double icon_hue(const std::wstring& key,const std::wstring& path);
     static std::wstring color_key(const StatisticsApplication& app);
@@ -64,6 +66,8 @@ private:
         HWND auto_toggle{};
         bool auto_scale{true};
         double cached_auto_zoom{1.0};
+        double target_auto_zoom{1.0};
+        bool axis_initialized{false};
         bool axis_dirty{true};
         double zoom_x{1.0},zoom_y{1.0},pan_ms{};
         bool dragging{};
@@ -74,6 +78,9 @@ private:
     HWND auto_live_{},auto_history_{};
     std::array<bool,2> auto_scale_{{true,true}};
     std::array<double,2> cached_auto_zoom_{{1.0,1.0}};
+    std::array<double,2> target_auto_zoom_{{1.0,1.0}};
+    std::array<bool,2> axis_initialized_{{false,false}};
+    ULONGLONG axis_tick_{};
     HWND tooltip_{};
     HWND table_window_{},table_window_list_{},table_window_info_{};
     HIMAGELIST table_image_list_{};
@@ -95,6 +102,10 @@ private:
     std::int64_t last_history_refresh_{};
     std::int64_t window_from_{},window_to_{};
     StatisticsHistory history_;
+    struct CurrentReadings {
+        std::wstring cpu{L"—"},ram{L"—"},gpu{L"—"},vram{L"—"},network{L"—"};
+    };
+    std::map<std::wstring,CurrentReadings> current_readings_;
     std::vector<StatisticsApplication> live_apps_;
     std::deque<LiveEvent> live_;
     std::map<std::wstring,HICON> icon_cache_;

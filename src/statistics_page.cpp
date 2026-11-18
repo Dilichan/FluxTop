@@ -93,6 +93,43 @@ double auto_vertical_zoom(const std::vector<StatisticsApplication>& apps,
     const double ceiling=std::clamp(std::ceil(padded/step)*step,2.0,100.0);
     return 100.0/ceiling;
 }
+// Display the same units as the overlay; unavailable readings remain unknown.
+std::wstring stat_decimal(double value) {
+    wchar_t buffer[64]{};
+    swprintf_s(buffer,L"%.1f",value);
+    return buffer;
+}
+std::wstring stat_percent(std::optional<double> value) {
+    return value && std::isfinite(*value) ? stat_decimal(*value)+L"%" : L"—";
+}
+std::wstring stat_memory(std::optional<std::uint64_t> bytes) {
+    if(!bytes) return L"—";
+    const double mib=static_cast<double>(*bytes)/1048576.0;
+    return mib>=1024.0?stat_decimal(mib/1024.0)+L" GiB":stat_decimal(mib)+L" MiB";
+}
+std::wstring stat_network(std::optional<double> rx,std::optional<double> tx) {
+    const auto format=[](std::optional<double> bytes)->std::wstring {
+        return bytes && std::isfinite(*bytes)?stat_decimal(*bytes*8.0/1000000.0):L"—";
+    };
+    return format(rx)+L" / "+format(tx)+L" Mbps";
+}
+std::wstring stat_wide(std::string_view text) {
+    if(text.empty()) return {};
+    const int count=MultiByteToWideChar(CP_UTF8,0,text.data(),static_cast<int>(text.size()),nullptr,0);
+    if(count<=0) return L"?";
+    std::wstring result(static_cast<std::size_t>(count),L'\0');
+    MultiByteToWideChar(CP_UTF8,0,text.data(),static_cast<int>(text.size()),result.data(),count);
+    return result;
+}
+// Asymmetric easing: expand to fit new peaks quickly, contract slowly after they leave.
+double eased_axis(double current,double target,double elapsed_ms) {
+    if(!std::isfinite(target)) return current;
+    const double duration=target<current?750.0:4200.0;
+    const double fraction=1.0-std::exp(-std::clamp(elapsed_ms,0.0,250.0)/duration);
+    const double next=current+(target-current)*fraction;
+    return std::abs(next-target)<0.002?target:std::clamp(next,1.0,100.0);
+}
+
 void label(HDC dc,const wchar_t* text,int x,int y,COLORREF color=RGB(58,56,52)) {
     SetTextColor(dc,color); SetBkMode(dc,TRANSPARENT); TextOutW(dc,x,y,text,static_cast<int>(wcslen(text)));
 }
@@ -495,6 +532,21 @@ void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Pro
         if(!system_ && statistics_is_system(name,path)) continue;
         sorted.push_back(&p);
     }
+    // Keep current readings distinct from the historical AutoScore point.
+    // Historical applications that are no longer running are shown as unknown.
+    current_readings_.clear();
+    for(const Process* process:sorted) {
+        StatisticsApplication identity;
+        identity.name=stat_wide(process->name);
+        identity.path=process->exe_path?stat_wide(*process->exe_path):L"";
+        CurrentReadings values;
+        values.cpu=stat_percent(process->cpu_percent);
+        values.ram=stat_memory(process->working_set);
+        values.gpu=stat_percent(process->gpu_percent);
+        values.vram=stat_memory(process->dedicated_gpu_bytes);
+        values.network=stat_network(process->rx_bytes_per_second,process->tx_bytes_per_second);
+        current_readings_.emplace(color_key(identity),std::move(values));
+    }
     std::stable_sort(sorted.begin(),sorted.end(),[](const Process* a,const Process* b){
         return auto_rank(*a,31U).score>auto_rank(*b,31U).score;
     });
@@ -694,9 +746,18 @@ void StatisticsPage::rebuild_live_series() {
     prepare_colors(live_apps_);
     // Auto-axis limits only change with new data, not WM_MOUSEMOVE/WM_PAINT.
     const auto anchor=last_live_timestamp_>0?last_live_timestamp_:now_ms();
-    cached_auto_zoom_[0]=auto_vertical_zoom(live_apps_,anchor-60000,anchor);
-    cached_auto_zoom_[1]=auto_vertical_zoom(history_.history,window_from_,window_to_);
+    const std::array<double,2> desired{{auto_vertical_zoom(live_apps_,anchor-60000,anchor),
+        auto_vertical_zoom(history_.history,window_from_,window_to_)}};
+    for(std::size_t index=0;index<2;++index) {
+        target_auto_zoom_[index]=desired[index];
+        if(!axis_initialized_[index]) {
+            cached_auto_zoom_[index]=desired[index];
+            axis_initialized_[index]=true;
+        }
+    }
     for(auto& popup:popups_) popup.axis_dirty=true;
+    if(active_ || popups_[0].window || popups_[1].window)
+        SetTimer(hwnd_,animate_message,33,nullptr);
 }
 void StatisticsPage::draw(HDC dc) {
     RECT physical{};GetClientRect(hwnd_,&physical);
@@ -763,10 +824,10 @@ void StatisticsPage::mouse(int x,int y) {
         else if(tooltip_) {
             POINT cursor{};GetCursorPos(&cursor);
             const UINT dpi=GetDpiForWindow(tooltip_);
-            const int tip_width=MulDiv(344,static_cast<int>(dpi),96);
-            const int tip_height=MulDiv(104,static_cast<int>(dpi),96);
-            int left=static_cast<int>(cursor.x)+MulDiv(18,static_cast<int>(dpi),96);
-            int top=static_cast<int>(cursor.y)+MulDiv(20,static_cast<int>(dpi),96);
+            const int tip_width=MulDiv(420,static_cast<int>(dpi),96);
+            const int tip_height=MulDiv(170,static_cast<int>(dpi),96);
+            int left=cursor.x+MulDiv(18,static_cast<int>(dpi),96);
+            int top=cursor.y+MulDiv(20,static_cast<int>(dpi),96);
             MONITORINFO monitor{sizeof(monitor)};
             if(GetMonitorInfoW(MonitorFromPoint(cursor,MONITOR_DEFAULTTONEAREST),&monitor)) {
                 left=std::clamp(left,static_cast<int>(monitor.rcWork.left),
@@ -774,48 +835,82 @@ void StatisticsPage::mouse(int x,int y) {
                 top=std::clamp(top,static_cast<int>(monitor.rcWork.top),
                     std::max(static_cast<int>(monitor.rcWork.top),static_cast<int>(monitor.rcWork.bottom)-tip_height));
             }
-            SetWindowPos(tooltip_,HWND_TOPMOST,left,top,tip_width,tip_height,
-                SWP_NOACTIVATE|SWP_SHOWWINDOW);
+            SetWindowPos(tooltip_,HWND_TOPMOST,left,top,tip_width,tip_height,SWP_NOACTIVATE|SWP_SHOWWINDOW);
             InvalidateRect(tooltip_,nullptr,FALSE);
         }
     }
 }
+bool StatisticsPage::advance_axes(double elapsed_ms) {
+    bool animating=false;
+    for(std::size_t index=0;index<2;++index) {
+        if(!auto_scale_[index]) continue;
+        const double target=target_auto_zoom_[index];
+        cached_auto_zoom_[index]=eased_axis(cached_auto_zoom_[index],target,elapsed_ms);
+        if(std::abs(cached_auto_zoom_[index]-target)>0.002) animating=true;
+    }
+    for(auto& popup:popups_) {
+        if(!popup.window || !popup.auto_scale) continue;
+        popup.cached_auto_zoom=eased_axis(popup.cached_auto_zoom,popup.target_auto_zoom,elapsed_ms);
+        if(std::abs(popup.cached_auto_zoom-popup.target_auto_zoom)>0.002) animating=true;
+    }
+    return animating;
+}
+void StatisticsPage::draw_metric_tooltip(HDC dc,const RECT& area,const StatisticsApplication& app,double score) {
+    // FluxTop unified tooltip with current metrics v1; shared across graph windows.
+    const int left=area.left, top=area.top;
+    const double scale=std::max(0.6,static_cast<double>(area.right-area.left)/420.0);
+    const auto unit=[&](int n){return static_cast<int>(std::lround(n*scale));};
+    HBRUSH paper=CreateSolidBrush(RGB(250,248,239));
+    FillRect(dc,&area,paper);DeleteObject(paper);
+    HBRUSH edge=CreateSolidBrush(RGB(151,137,112));
+    FrameRect(dc,&area,edge);DeleteObject(edge);
+    RECT accent{left+unit(1),area.bottom-unit(5),area.right-unit(1),area.bottom-unit(1)};
+    HBRUSH color=CreateSolidBrush(chart_color(app));FillRect(dc,&accent,color);DeleteObject(color);
+    if(HICON icon=application_icon(app.path))
+        DrawIconEx(dc,left+unit(14),top+unit(24),icon,unit(34),unit(34),0,nullptr,DI_NORMAL);
+    const HFONT title_font=CreateFontW(-unit(19),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,
+        DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,
+        DEFAULT_PITCH,L"Segoe Print");
+    const HFONT score_font=CreateFontW(-unit(16),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,
+        DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,
+        DEFAULT_PITCH,L"Segoe Print");
+    const HFONT info_font=CreateFontW(-unit(14),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,
+        DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,
+        DEFAULT_PITCH,L"Segoe UI");
+    const HGDIOBJ original=SelectObject(dc,title_font?title_font:GetStockObject(DEFAULT_GUI_FONT));
+    SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(53,49,43));
+    RECT name{left+unit(59),top+unit(8),area.right-unit(12),top+unit(39)};
+    DrawTextW(dc,app.name.c_str(),-1,&name,DT_LEFT|DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
+    SelectObject(dc,score_font?score_font:GetStockObject(DEFAULT_GUI_FONT));
+    wchar_t reading[80]{};swprintf_s(reading,L"AutoScore: %.1f / 100",score);
+    SetTextColor(dc,chart_color(app));
+    RECT rating{left+unit(59),top+unit(38),area.right-unit(12),top+unit(66)};
+    DrawTextW(dc,reading,-1,&rating,DT_LEFT|DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
+    SelectObject(dc,info_font?info_font:GetStockObject(DEFAULT_GUI_FONT));
+    SetTextColor(dc,RGB(75,71,64));
+    const auto found=current_readings_.find(color_key(app));
+    const CurrentReadings empty{};
+    const auto& values=found==current_readings_.end()?empty:found->second;
+    RECT separator{left+unit(13),top+unit(70),area.right-unit(13),top+unit(71)};
+    HBRUSH rule=CreateSolidBrush(RGB(221,215,199));FillRect(dc,&separator,rule);DeleteObject(rule);
+    const auto line=[&](const std::wstring& content,int y){
+        RECT cell{left+unit(16),top+unit(y),area.right-unit(12),top+unit(y+25)};
+        DrawTextW(dc,content.c_str(),-1,&cell,DT_LEFT|DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
+    };
+    line(L"Сейчас · CPU: "+values.cpu+L"    GPU: "+values.gpu,76);
+    line(L"RAM: "+values.ram+L"       VRAM: "+values.vram,102);
+    line(L"Rx/Tx: "+values.network,128);
+    SelectObject(dc,original);
+    if(title_font) DeleteObject(title_font);
+    if(score_font) DeleteObject(score_font);
+    if(info_font) DeleteObject(info_font);
+}
 void StatisticsPage::paint_tooltip(HDC dc) {
-    // FluxTop graph-style hover tooltip restored: same ink/paper look as the charts.
     if(hover_section_<0) return;
     const auto& source=hover_section_==0?live_apps_:history_.history;
     if(hover_index_>=source.size()) return;
-    const auto& app=source[hover_index_];
     RECT bounds{};GetClientRect(tooltip_,&bounds);
-    const auto scale=[this](int n) {return MulDiv(n,static_cast<int>(GetDpiForWindow(tooltip_)),96);};
-    const HBRUSH paper=CreateSolidBrush(RGB(250,248,239));
-    FillRect(dc,&bounds,paper);DeleteObject(paper);
-    const HBRUSH edge=CreateSolidBrush(RGB(151,137,112));
-    FrameRect(dc,&bounds,edge);DeleteObject(edge);
-    RECT accent{scale(1),bounds.bottom-scale(5),bounds.right-scale(1),bounds.bottom-scale(1)};
-    const HBRUSH color=CreateSolidBrush(chart_color(app));
-    FillRect(dc,&accent,color);DeleteObject(color);
-    if(auto icon=application_icon(app.path))
-        DrawIconEx(dc,scale(15),scale(28),icon,scale(32),scale(32),0,nullptr,DI_NORMAL);
-    const HFONT heading=CreateFontW(-scale(20),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,
-        DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,
-        DEFAULT_PITCH,L"Segoe Print");
-    const HFONT score_font=CreateFontW(-scale(18),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,
-        DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,
-        DEFAULT_PITCH,L"Segoe Print");
-    const HGDIOBJ original=SelectObject(dc,heading?heading:GetStockObject(DEFAULT_GUI_FONT));
-    SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(53,49,43));
-    RECT name{scale(58),scale(13),bounds.right-scale(12),scale(51)};
-    DrawTextW(dc,app.name.c_str(),-1,&name,
-        DT_LEFT|DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
-    SelectObject(dc,score_font?score_font:GetStockObject(DEFAULT_GUI_FONT));
-    wchar_t value[80]{};swprintf_s(value,L"AutoScore: %.1f / 100",hover_value_);
-    SetTextColor(dc,chart_color(app));
-    RECT score{scale(58),scale(55),bounds.right-scale(12),scale(89)};
-    DrawTextW(dc,value,-1,&score,DT_LEFT|DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
-    SelectObject(dc,original);
-    if(heading) DeleteObject(heading);
-    if(score_font) DeleteObject(score_font);
+    draw_metric_tooltip(dc,bounds,source[hover_index_],hover_value_);
 }
 LRESULT CALLBACK StatisticsPage::hover_dispatch(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
     auto* page=reinterpret_cast<StatisticsPage*>(GetWindowLongPtrW(window,GWLP_USERDATA));
@@ -876,9 +971,16 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
         if(wp==animate_message) {
             const bool animating=animation_started_
                 && GetTickCount64()-animation_started_<animation_duration_ms_;
+            // The sampler controls the AutoScore cadence; this timer only animates the axis and line.
+            const auto tick=GetTickCount64();
+            const double elapsed=axis_tick_?std::clamp(static_cast<double>(tick-axis_tick_),1.0,100.0):33.0;
+            axis_tick_=tick;
+            const bool axis_animating=advance_axes(elapsed);
             if(active_) InvalidateRect(hwnd_,nullptr,FALSE);
-            if(popups_[0].window) InvalidateRect(popups_[0].window,nullptr,FALSE);
-            if(!animating || (!active_ && !popups_[0].window)) KillTimer(hwnd_,animate_message);
+            for(auto& popup:popups_) if(popup.window) InvalidateRect(popup.window,nullptr,FALSE);
+            if((!animating && !axis_animating) ||
+                (!active_ && !popups_[0].window && !popups_[1].window))
+                KillTimer(hwnd_,animate_message);
             return 0;
         }
         break;

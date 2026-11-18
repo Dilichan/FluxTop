@@ -14,7 +14,7 @@ $checks = [ordered]@{
     'Graph rendering in popout' = ($popup.Contains('draw_graph(') -and $popup.Contains('paint_popup('))
     'Detachable popout not owned by settings window' = ($popup.Contains('1050,590,nullptr,nullptr,GetModuleHandleW(nullptr),&popup)'))
     'Detachable table not owned by settings window' = ($page.Contains('nullptr,nullptr,GetModuleHandleW(nullptr),this);'))
-    'Axis zoom cached between samples' = ($page.Contains('cached_auto_zoom_[0]') -and $page.Contains('popup.axis_dirty=true') -and $header.Contains('cached_auto_zoom_'))
+    'Smooth axis target cached between samples' = ($page.Contains('target_auto_zoom_[index]') -and $page.Contains('axis_initialized_[index]') -and $page.Contains('popup.axis_dirty=true') -and $header.Contains('target_auto_zoom_'))
     'Stable time scale during mouse hover' = ($page.Contains('const auto now=last_live_timestamp_>0?last_live_timestamp_:now_ms();') -and $popup.Contains('last_live_timestamp_>0?last_live_timestamp_:now_ms()'))
     'Sampler interval forwarded to graphs' = $overlay.Contains('grouped_processes_,options_.interval_ms')
     'Minimizing client does not close it' = ($overlay.Contains('if (wp==SIZE_MINIMIZED) return 0;') -and -not $overlay.Contains('PostMessageW(window,WM_CLOSE,0,0)'))

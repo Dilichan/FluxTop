@@ -59,8 +59,13 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
     const RECT graph{68,83,client.right-30,client.bottom-35};
     const auto& apps=popup.kind==0?live_apps_:history_.history;
     if(popup.auto_scale && popup.axis_dirty) {
-        popup.cached_auto_zoom=auto_vertical_zoom(apps,from,to);
+        popup.target_auto_zoom=auto_vertical_zoom(apps,from,to);
+        if(!popup.axis_initialized) {
+            popup.cached_auto_zoom=popup.target_auto_zoom;
+            popup.axis_initialized=true;
+        }
         popup.axis_dirty=false;
+        SetTimer(hwnd_,animate_message,33,nullptr);
     }
     const double vertical_zoom=popup.auto_scale?popup.cached_auto_zoom:popup.zoom_y;
     draw_graph(dc,graph,apps,from,to,L"",popup.kind==0,vertical_zoom,true);
@@ -91,38 +96,14 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
         }
         if(found && selected<apps.size()) {
             const auto& app=apps[selected];
-            const int box_width=314,box_height=94;
-            const int left=std::clamp(static_cast<int>(popup.cursor.x)+14,
-                static_cast<int>(graph.left)+4,std::max(static_cast<int>(graph.left)+4,static_cast<int>(graph.right)-box_width-4));
-            const int top=std::clamp(static_cast<int>(popup.cursor.y)+14,
-                static_cast<int>(graph.top)+4,std::max(static_cast<int>(graph.top)+4,static_cast<int>(graph.bottom)-box_height-4));
-            const RECT bubble{left,top,left+box_width,top+box_height};
-            HBRUSH bg=CreateSolidBrush(RGB(250,248,239));FillRect(dc,&bubble,bg);DeleteObject(bg);
-            HBRUSH edge=CreateSolidBrush(RGB(151,137,112));FrameRect(dc,&bubble,edge);DeleteObject(edge);
-            const RECT accent{left+1,bubble.bottom-5,bubble.right-1,bubble.bottom-1};
-            HBRUSH line_color=CreateSolidBrush(series_color(app,selected));
-            FillRect(dc,&accent,line_color);DeleteObject(line_color);
-            if(auto icon=application_icon(app.path))
-                DrawIconEx(dc,left+13,top+28,icon,30,30,0,nullptr,DI_NORMAL);
-            HFONT name_font=CreateFontW(-19,0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,
-                DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,
-                DEFAULT_PITCH,L"Segoe Print");
-            HFONT score_font=CreateFontW(-17,0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,
-                DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,
-                DEFAULT_PITCH,L"Segoe Print");
-            const HGDIOBJ previous=SelectObject(dc,name_font?name_font:GetStockObject(DEFAULT_GUI_FONT));
-            RECT name{left+53,top+12,left+box_width-12,top+49};
-            SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(53,49,43));
-            DrawTextW(dc,app.name.c_str(),-1,&name,
-                DT_LEFT|DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
-            SelectObject(dc,score_font?score_font:GetStockObject(DEFAULT_GUI_FONT));
-            wchar_t value[80]{};swprintf_s(value,L"AutoScore: %.1f / 100",score);
-            SetTextColor(dc,series_color(app,selected));
-            RECT score_box{left+53,top+51,left+box_width-12,top+81};
-            DrawTextW(dc,value,-1,&score_box,DT_LEFT|DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
-            SelectObject(dc,previous);
-            if(name_font) DeleteObject(name_font);
-            if(score_font) DeleteObject(score_font);
+            const int bubble_width=std::min(420,std::max(240,static_cast<int>(client.right)-36));
+            const int bubble_height=static_cast<int>(std::lround(bubble_width*170.0/420.0));
+            const int left=std::clamp(static_cast<int>(popup.cursor.x)+16,12,
+                std::max(12,static_cast<int>(client.right)-bubble_width-12));
+            const int top=std::clamp(static_cast<int>(popup.cursor.y)+16,76,
+                std::max(76,static_cast<int>(client.bottom)-bubble_height-12));
+            const RECT bubble{left,top,left+bubble_width,top+bubble_height};
+            draw_metric_tooltip(dc,bubble,app,score);
         }
     }
     SelectObject(dc,old_font);DeleteObject(font);
