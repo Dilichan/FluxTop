@@ -143,6 +143,26 @@ void label(HDC dc,const wchar_t* text,int x,int y,COLORREF color=RGB(58,56,52)) 
     SetTextColor(dc,color); SetBkMode(dc,TRANSPARENT); TextOutW(dc,x,y,text,static_cast<int>(wcslen(text)));
 }
 } // namespace
+StatisticsPage::PaintBuffer::~PaintBuffer() { clear(); }
+void StatisticsPage::PaintBuffer::clear() noexcept {
+    if(dc && old_bitmap) SelectObject(dc,old_bitmap);
+    if(bitmap) DeleteObject(bitmap);
+    if(dc) DeleteDC(dc);
+    dc=nullptr;bitmap=nullptr;old_bitmap=nullptr;width=0;height=0;
+}
+HDC StatisticsPage::PaintBuffer::prepare(HDC reference,LONG w,LONG h) {
+    if(w<=0 || h<=0) return nullptr;
+    if(dc && bitmap && width==w && height==h) return dc;
+    clear();
+    dc=CreateCompatibleDC(reference);
+    if(!dc) return nullptr;
+    bitmap=CreateCompatibleBitmap(reference,w,h);
+    if(!bitmap) {clear();return nullptr;}
+    old_bitmap=SelectObject(dc,bitmap);
+    if(!old_bitmap || old_bitmap==HGDI_ERROR) {old_bitmap=nullptr;clear();return nullptr;}
+    width=w;height=h;
+    return dc;
+}
 StatisticsPage::StatisticsPage(HWND parent,std::filesystem::path database,
     std::wstring settings_path,unsigned limit)
     :database_(std::move(database)),settings_(std::move(settings_path)) {
@@ -207,6 +227,13 @@ StatisticsPage::~StatisticsPage() {
     if(hwnd_ && IsWindow(hwnd_)) DestroyWindow(hwnd_);
     if(image_list_) ImageList_Destroy(image_list_);
     for(const auto& [path,icon]:icon_cache_) { (void)path; if(icon) DestroyIcon(icon); }
+    page_buffer_.clear();
+    for(auto& popup:popups_) popup.paint_buffer.clear();
+    for(const auto& [color,pen]:stroke_pens_) { (void)color; DeleteObject(pen); }
+    for(const auto& [color,pen]:detail_pens_) { (void)color; DeleteObject(pen); }
+    for(const HFONT font:tooltip_fonts_) if(font) DeleteObject(font);
+    if(paint_font_) DeleteObject(paint_font_);
+    if(popup_font_) DeleteObject(popup_font_);
     if(font_) DeleteObject(font_);
 }
 void StatisticsPage::make_controls() {
@@ -281,16 +308,24 @@ void StatisticsPage::layout() {
     ListView_SetColumnWidth(table_,0,sx(307));
     ListView_SetColumnWidth(table_,1,sx(140));
     ListView_SetColumnWidth(table_,2,sx(255));
-    if(!font_) font_=CreateFontW(-MulDiv(14,GetDpiForWindow(hwnd_),96),0,0,0,FW_NORMAL,0,0,0,
-        DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+    // Child controls must receive a fresh font after the settings window changes DPI.
+    HFONT stale_font=nullptr;
+    const UINT current_dpi=GetDpiForWindow(hwnd_);
+    if(!font_ || controls_font_dpi_!=current_dpi) {
+        HFONT replacement=CreateFontW(-MulDiv(14,current_dpi,96),0,0,0,FW_NORMAL,0,0,0,
+            DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+        if(replacement) {stale_font=font_;font_=replacement;controls_font_dpi_=current_dpi;}
+    }
     for(auto child:{period_,from_,to_,first_label_,show_system_,limit_label_,limit_slider_,table_,popout_live_,popout_history_,popout_table_,auto_live_,auto_history_})
         SendMessageW(child,WM_SETFONT,reinterpret_cast<WPARAM>(font_),TRUE);
+    if(stale_font) DeleteObject(stale_font);
     ListView_SetBkColor(table_,GetSysColor(COLOR_WINDOW));
     ListView_SetTextBkColor(table_,GetSysColor(COLOR_WINDOW));
     ListView_SetTextColor(table_,GetSysColor(COLOR_WINDOWTEXT));
 }
 void StatisticsPage::activate(bool active) {
     active_=active;ShowWindow(hwnd_,active?SW_SHOW:SW_HIDE);
+    if(!active) page_buffer_.clear(); // Release offscreen memory in other settings tabs.
     if(!active && tooltip_) ShowWindow(tooltip_,SW_HIDE);
     if(!active && !popups_[0].window) KillTimer(hwnd_,animate_message);
     if(active) request();
@@ -520,6 +555,12 @@ HICON StatisticsPage::application_icon(const std::wstring& path) {
 }
 void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Process>& grouped,unsigned interval_ms) {
     if(!active_ && !popups_[0].window && !popups_[1].window && !table_window_) return;
+    // A standalone uptime table only needs periodic database refreshes, not
+    // rebuilding and repainting the one-minute graph for every sample.
+    if(!active_ && !popups_[0].window && !popups_[1].window) {
+        if(now_ms()-last_history_refresh_>30000) request();
+        return;
+    }
     animation_started_=GetTickCount64();
     animation_duration_ms_=std::clamp(interval_ms,250U,10000U);
     last_live_timestamp_=timestamp_ms;
@@ -632,13 +673,26 @@ COLORREF StatisticsPage::series_color(const StatisticsApplication& app,std::size
     (void)index;
     return chart_color(app);
 }
+HPEN StatisticsPage::graph_pen(COLORREF color,bool dotted) {
+    auto& cache=dotted?detail_pens_:stroke_pens_;
+    if(const auto found=cache.find(color);found!=cache.end()) return found->second;
+    // Bound GDI handles even across long sessions with changing graph palettes.
+    if(cache.size()>=256) {
+        for(const auto& [rgb,pen]:cache) { (void)rgb; DeleteObject(pen); }
+        cache.clear();
+    }
+    HPEN pen=CreatePen(dotted?PS_DOT:PS_SOLID,dotted?1:2,color);
+    if(pen) cache.emplace(color,pen);
+    return pen;
+}
 void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<StatisticsApplication>& apps,
     std::int64_t from,std::int64_t to,const wchar_t* caption,bool is_live,
     double vertical_zoom,bool detached) {
     const HBRUSH paper=CreateSolidBrush(RGB(250,250,250));
     FillRect(dc,&area,paper);DeleteObject(paper);
     const auto original=SelectObject(dc,GetStockObject(NULL_BRUSH));
-    HPEN grid=CreatePen(PS_DOT,1,RGB(210,217,221));auto old=SelectObject(dc,grid);
+    const HPEN grid=graph_pen(RGB(210,217,221),true);
+    auto old=grid?SelectObject(dc,grid):GetCurrentObject(dc,OBJ_PEN);
     for(int row=0;row<=4;++row) {
         const auto y=area.top+(area.bottom-area.top)*row/4;
         MoveToEx(dc,area.left,y,nullptr);LineTo(dc,area.right,y);
@@ -647,7 +701,7 @@ void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<Statis
         const auto x=area.left+(area.right-area.left)*col/6;
         MoveToEx(dc,x,area.top,nullptr);LineTo(dc,x,area.bottom);
     }
-    SelectObject(dc,old);DeleteObject(grid);
+    if(grid) SelectObject(dc,old);
     label(dc,caption,area.left,area.top-28,RGB(64,63,61));
     const auto top_value=std::to_wstring(static_cast<int>(std::lround(100.0/vertical_zoom)));
     label(dc,top_value.c_str(),area.left-33,area.top-3);
@@ -660,7 +714,16 @@ void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<Statis
         if(points.empty()) continue;
         std::vector<POINT> line;
         line.reserve(points.size());
-        for(const auto& [at,score]:points) {
+        // Plot only the visible time span plus a boundary point on each side.
+        // This matters when a detached chart is zoomed into a long history.
+        const auto lower=std::lower_bound(points.begin(),points.end(),from,
+            [](const auto& point,std::int64_t time){return point.first<time;});
+        const auto first=lower==points.begin()?lower:std::prev(lower);
+        const auto upper=std::upper_bound(lower,points.end(),to,
+            [](std::int64_t time,const auto& point){return time<point.first;});
+        const auto last=upper==points.end()?upper:std::next(upper);
+        for(auto point=first;point!=last;++point) {
+            const auto [at,score]=*point;
             const auto fraction=static_cast<double>(at-from)/static_cast<double>(to-from);
             const auto jitter=.9*std::sin(static_cast<double>(at%5003)*.019+i*2.3);
             const auto xx=static_cast<double>(area.left)+fraction*(area.right-area.left);
@@ -670,22 +733,26 @@ void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<Statis
         }
         // Only the newest sampled segment is revealed progressively. No fake samples
         // are generated and the underlying AutoScore history remains unchanged.
-        if(is_live && line.size()>1 && points.back().first==last_live_timestamp_ && animation_started_) {
+        if(is_live && line.size()>1 && std::prev(last)->first==last_live_timestamp_
+            && points.back().first==last_live_timestamp_ && animation_started_) {
             const auto elapsed=GetTickCount64()-animation_started_;
             const double t=std::clamp(static_cast<double>(elapsed)/animation_duration_ms_,0.0,1.0);
             const auto previous=line[line.size()-2],final=line.back();
             line.back().x=previous.x+static_cast<LONG>(std::lround((final.x-previous.x)*t));
             line.back().y=previous.y+static_cast<LONG>(std::lround((final.y-previous.y)*t));
         }
-        HPEN stroke=CreatePen(PS_SOLID,2,series_color(apps[i],i));old=SelectObject(dc,stroke);
+        const auto ink=series_color(apps[i],i);
+        const HPEN stroke=graph_pen(ink,false);
+        if(stroke) old=SelectObject(dc,stroke);
         if(line.size()>1) Polyline(dc,line.data(),static_cast<int>(line.size()));
         else Ellipse(dc,line[0].x-2,line[0].y-2,line[0].x+2,line[0].y+2);
-        SelectObject(dc,old);DeleteObject(stroke);
+        if(stroke) SelectObject(dc,old);
         // Small uneven ink marks evoke hand-drawn notebook charts without a graphics engine.
         if(line.size()>1) {
-            HPEN detail=CreatePen(PS_DOT,1,series_color(apps[i],i));old=SelectObject(dc,detail);
+            const HPEN detail=graph_pen(ink,true);
+            if(detail) old=SelectObject(dc,detail);
             Polyline(dc,line.data(),static_cast<int>(line.size()));
-            SelectObject(dc,old);DeleteObject(detail);
+            if(detail) SelectObject(dc,old);
         }
     }
     RestoreDC(dc,clip);
@@ -760,9 +827,9 @@ void StatisticsPage::draw(HDC dc) {
     // StatisticsPage native-theme refinement v2: only chart areas are custom-drawn.
     const RECT background{0,0,page_width,page_height};
     FillRect(dc,&background,GetSysColorBrush(COLOR_BTNFACE));
-    HFONT print=CreateFontW(-15,0,0,0,FW_SEMIBOLD,0,0,0,DEFAULT_CHARSET,0,0,
+    if(!paint_font_) paint_font_=CreateFontW(-15,0,0,0,FW_SEMIBOLD,0,0,0,DEFAULT_CHARSET,0,0,
         CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
-    const auto old_font=SelectObject(dc,print);
+    const auto old_font=SelectObject(dc,paint_font_?paint_font_:GetStockObject(DEFAULT_GUI_FONT));
     // FluxTop stable auto-axis / separate popout window v2:
     // The same sample timestamp is used by graph painting and hit-testing.
     // Mouse movement must not scroll the axis or change the auto-scale.
@@ -774,7 +841,7 @@ void StatisticsPage::draw(HDC dc) {
     if(!history_.error.empty()) label(dc,history_.error.c_str(),18,567,RGB(162,50,40));
     label(dc,L"НАБЛЮДАЕМЫЙ АПТАЙМ ПРИЛОЖЕНИЙ",18,634);
     // Tooltip is a topmost popup, never painted underneath native controls.
-    SelectObject(dc,old_font);DeleteObject(print);
+    SelectObject(dc,old_font);
 }
 void StatisticsPage::mouse(int x,int y) {
     RECT physical{};GetClientRect(hwnd_,&physical);
@@ -862,15 +929,20 @@ void StatisticsPage::draw_metric_tooltip(HDC dc,const RECT& area,const Statistic
     HBRUSH color=CreateSolidBrush(chart_color(app));FillRect(dc,&accent,color);DeleteObject(color);
     if(HICON icon=application_icon(app.path))
         DrawIconEx(dc,left+unit(14),top+unit(24),icon,unit(34),unit(34),0,nullptr,DI_NORMAL);
-    const HFONT title_font=CreateFontW(-unit(19),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,
-        DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,
-        DEFAULT_PITCH,L"Segoe Print");
-    const HFONT score_font=CreateFontW(-unit(16),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,
-        DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,
-        DEFAULT_PITCH,L"Segoe Print");
-    const HFONT info_font=CreateFontW(-unit(14),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,
-        DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,
-        DEFAULT_PITCH,L"Segoe UI");
+    const std::array<int,3> font_heights{unit(19),unit(16),unit(14)};
+    for(std::size_t i=0;i<font_heights.size();++i) {
+        if(tooltip_fonts_[i] && tooltip_font_heights_[i]==font_heights[i]) continue;
+        HFONT replacement=CreateFontW(-font_heights[i],0,0,0,i==2?FW_NORMAL:FW_SEMIBOLD,
+            FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,DEFAULT_PITCH,i==2?L"Segoe UI":L"Segoe Print");
+        if(replacement) {
+            if(tooltip_fonts_[i]) DeleteObject(tooltip_fonts_[i]);
+            tooltip_fonts_[i]=replacement;tooltip_font_heights_[i]=font_heights[i];
+        }
+    }
+    const HFONT title_font=tooltip_fonts_[0];
+    const HFONT score_font=tooltip_fonts_[1];
+    const HFONT info_font=tooltip_fonts_[2];
     const HGDIOBJ original=SelectObject(dc,title_font?title_font:GetStockObject(DEFAULT_GUI_FONT));
     SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(53,49,43));
     RECT name{left+unit(59),top+unit(8),area.right-unit(12),top+unit(39)};
@@ -897,9 +969,6 @@ void StatisticsPage::draw_metric_tooltip(HDC dc,const RECT& area,const Statistic
     line(L"RAM: "+values.ram+L"       VRAM: "+values.vram,132);
     line(L"Rx/Tx: "+values.network,158);
     SelectObject(dc,original);
-    if(title_font) DeleteObject(title_font);
-    if(score_font) DeleteObject(score_font);
-    if(info_font) DeleteObject(info_font);
 }
 void StatisticsPage::paint_tooltip(HDC dc) {
     if(hover_section_<0) return;
@@ -946,15 +1015,9 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
         // A back buffer avoids flicker at one-second updates.
         RECT r{};GetClientRect(hwnd_,&r);
         if(r.right>0 && r.bottom>0) {
-            HDC buffer=CreateCompatibleDC(dc);
-            HBITMAP bitmap=CreateCompatibleBitmap(dc,r.right,r.bottom);
-            if(buffer && bitmap) {
-                auto old=SelectObject(buffer,bitmap);
+            if(const HDC buffer=page_buffer_.prepare(dc,r.right,r.bottom)) {
                 draw(buffer);BitBlt(dc,0,0,r.right,r.bottom,buffer,0,0,SRCCOPY);
-                SelectObject(buffer,old);
-            } else draw(dc);
-            if(bitmap) DeleteObject(bitmap);
-            if(buffer) DeleteDC(buffer);
+            } else draw(dc); // No invisible page if a GDI allocation fails.
         }
         EndPaint(hwnd_,&ps);return 0;
     }

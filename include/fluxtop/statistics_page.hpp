@@ -43,6 +43,19 @@ private:
     void draw_graph(HDC dc,const RECT& area,const std::vector<StatisticsApplication>& apps,
         std::int64_t from,std::int64_t to,const wchar_t* caption,bool is_live,
         double vertical_zoom=1.0,bool detached=false);
+    // Cached double-buffer: owns its DC and selected bitmap, resizes on demand.
+    struct PaintBuffer {
+        HDC dc{};
+        HBITMAP bitmap{};
+        HGDIOBJ old_bitmap{};
+        LONG width{},height{};
+        PaintBuffer()=default;
+        PaintBuffer(const PaintBuffer&)=delete;
+        PaintBuffer& operator=(const PaintBuffer&)=delete;
+        ~PaintBuffer();
+        void clear() noexcept;
+        HDC prepare(HDC reference,LONG width,LONG height);
+    };
     struct PopupState;
     static LRESULT CALLBACK popup_dispatch(HWND window,UINT message,WPARAM wp,LPARAM lp);
     void open_popup(unsigned kind);
@@ -58,6 +71,7 @@ private:
     static std::wstring color_key(const StatisticsApplication& app);
     void prepare_colors(const std::vector<StatisticsApplication>& minute);
     COLORREF chart_color(const StatisticsApplication& app) const;
+    HPEN graph_pen(COLORREF color,bool dotted);
     std::int64_t custom_timestamp(HWND picker,bool until_end);
     struct PopupState {
         StatisticsPage* owner{};
@@ -71,8 +85,10 @@ private:
         bool axis_dirty{true};
         double zoom_x{1.0},zoom_y{1.0},pan_ms{};
         bool dragging{};
+        PaintBuffer paint_buffer;
         POINT last{},cursor{-1,-1};
     };
+    PaintBuffer page_buffer_;
     std::array<PopupState,2> popups_{};
     HWND popout_live_{},popout_history_{},popout_table_{};
     HWND auto_live_{},auto_history_{};
@@ -93,6 +109,12 @@ private:
     HWND hwnd_{},period_{},from_{},to_{},show_system_{},first_label_{},table_{},limit_label_{},limit_slider_{};
     HIMAGELIST image_list_{};
     HFONT font_{};
+    UINT controls_font_dpi_{};
+    // Fonts and pens are owned by the page and reused during 33-ms animation.
+    HFONT paint_font_{},popup_font_{};
+    std::array<HFONT,3> tooltip_fonts_{};
+    std::array<int,3> tooltip_font_heights_{};
+    std::map<COLORREF,HPEN> stroke_pens_,detail_pens_;
     std::filesystem::path database_;
     std::wstring settings_;
     unsigned limit_{};

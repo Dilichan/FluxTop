@@ -50,9 +50,9 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
     if(client.right<180 || client.bottom<180) return;
     // Native background and labels; the graph retains its hand-drawn look.
     FillRect(dc,&client,GetSysColorBrush(COLOR_BTNFACE));
-    HFONT font=CreateFontW(-17,0,0,0,FW_SEMIBOLD,0,0,0,DEFAULT_CHARSET,0,0,
+    if(!popup_font_) popup_font_=CreateFontW(-17,0,0,0,FW_SEMIBOLD,0,0,0,DEFAULT_CHARSET,0,0,
         CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
-    const auto old_font=SelectObject(dc,font);
+    const auto old_font=SelectObject(dc,popup_font_?popup_font_:GetStockObject(DEFAULT_GUI_FONT));
     label(dc,popup.kind==0?L"AutoScore · последняя минута":L"AutoScore · история",22,18);
     // Controls are native Win32; navigation instructions are intentionally absent.
     std::int64_t from{},to{};popup_range(popup,from,to);
@@ -106,7 +106,7 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
             draw_metric_tooltip(dc,bubble,app,score,sample_at);
         }
     }
-    SelectObject(dc,old_font);DeleteObject(font);
+    SelectObject(dc,old_font);
 }
 LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
     auto* popup=reinterpret_cast<PopupState*>(GetWindowLongPtrW(window,GWLP_USERDATA));
@@ -144,16 +144,12 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
     case WM_PAINT: {
         PAINTSTRUCT ps{};const HDC dc=BeginPaint(window,&ps);
         RECT r{};GetClientRect(window,&r);
-        HDC buffer=CreateCompatibleDC(dc);
-        HBITMAP bitmap=buffer?CreateCompatibleBitmap(dc,std::max(1L,r.right),std::max(1L,r.bottom)):nullptr;
-        if(bitmap) {
-            const auto old=SelectObject(buffer,bitmap);
-            page->paint_popup(*popup,buffer);
-            BitBlt(dc,0,0,r.right,r.bottom,buffer,0,0,SRCCOPY);
-            SelectObject(buffer,old);
-        } else page->paint_popup(*popup,dc);
-        if(bitmap) DeleteObject(bitmap);
-        if(buffer) DeleteDC(buffer);
+        if(r.right>0 && r.bottom>0) {
+            if(const HDC buffer=popup->paint_buffer.prepare(dc,r.right,r.bottom)) {
+                page->paint_popup(*popup,buffer);
+                BitBlt(dc,0,0,r.right,r.bottom,buffer,0,0,SRCCOPY);
+            } else page->paint_popup(*popup,dc);
+        }
         EndPaint(window,&ps);return 0;
     }
     case WM_MOUSEWHEEL: {
@@ -207,6 +203,10 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
     case WM_CAPTURECHANGED:popup->dragging=false;return 0;
     case WM_MOUSEMOVE: {
         const POINT current{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
+        if(!popup->dragging && popup->cursor.x==current.x && popup->cursor.y==current.y)
+            return 0; // Duplicate mouse messages must not redraw the whole graph.
+        TRACKMOUSEEVENT track{sizeof(track),TME_LEAVE,window,0};
+        TrackMouseEvent(&track);
         popup->cursor=current;
         if(popup->dragging) {
             std::int64_t from{},to{};page->popup_range(*popup,from,to);
@@ -223,15 +223,21 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
         }
         InvalidateRect(window,nullptr,FALSE);return 0;
     }
+    case WM_MOUSELEAVE:
+        popup->cursor={-1,-1};
+        InvalidateRect(window,nullptr,FALSE);return 0;
     case WM_GETMINMAXINFO: {
         auto* bounds=reinterpret_cast<MINMAXINFO*>(lp);
         bounds->ptMinTrackSize={460,340};
         return 0;
     }
-    case WM_SIZE:InvalidateRect(window,nullptr,FALSE);return 0;
+    case WM_SIZE:
+        if(wp==SIZE_MINIMIZED) {popup->paint_buffer.clear();return 0;}
+        InvalidateRect(window,nullptr,FALSE);return 0;
     case WM_CLOSE:DestroyWindow(window);return 0;
     case WM_DESTROY:
         if(GetCapture()==window) ReleaseCapture();
+        popup->paint_buffer.clear();
         popup->auto_toggle=nullptr;
         popup->window=nullptr;popup->dragging=false;return 0;
     }
