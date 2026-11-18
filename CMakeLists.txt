@@ -58,6 +58,8 @@ if(BUILD_TESTING)
     add_executable(fluxtop_tests tests/core_tests.cpp)
     target_link_libraries(fluxtop_tests PRIVATE fluxtop_core)
     add_test(NAME core COMMAND fluxtop_tests)
+    add_test(NAME update_consent_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+        -File "${PROJECT_SOURCE_DIR}/tests/update_consent_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
     add_executable(fluxtop_release_tests tests/release_tests.cpp)
     target_link_libraries(fluxtop_release_tests PRIVATE fluxtop_release_update)
     target_compile_definitions(fluxtop_release_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

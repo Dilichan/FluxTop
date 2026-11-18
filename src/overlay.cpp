@@ -1,4 +1,5 @@
 #include "fluxtop/overlay.hpp"
+#include "fluxtop/overlay_layout.hpp"
 #include "fluxtop/app_icons.hpp"
 #include "fluxtop/autostart.hpp"
 #include "fluxtop/sampler.hpp"
@@ -36,8 +37,6 @@ constexpr int temperature_band(double x) { return x < 65.0 ? 0 : x <= 80.0 ? 1 :
 static_assert(load_band(49.9) == 0 && load_band(50.0) == 1 && load_band(70.0) == 2);
 static_assert(temperature_band(64.9) == 0 && temperature_band(65.0) == 1
     && temperature_band(80.0) == 1 && temperature_band(80.1) == 2);
-constexpr std::array<const wchar_t*,5> metric_names{L"CPU",L"RAM",L"GPU",L"GPU RAM",L"Rx/Tx"};
-constexpr std::array<float,5> metric_widths{5.0f,5.8f,5.0f,1.8f,14.0f};
 constexpr UINT_PTR settings_timer = 1;
 
 // An out-of-context WinEvent hook delivers foreground changes on this UI thread.
@@ -67,18 +66,14 @@ std::wstring memory(std::optional<std::uint64_t> value) {
     const double mib = static_cast<double>(*value) / 1048576.0;
     return mib >= 1024 ? decimal(mib / 1024) + L" GiB" : decimal(mib) + L" MiB";
 }
-std::wstring rate(std::optional<double> value) {
-    if (!value) return L"—";
-    if (*value >= 1048576) return decimal(*value / 1048576) + L" MiB/s";
-    if (*value >= 1024) return decimal(*value / 1024) + L" KiB/s";
-    return decimal(*value, 0) + L" B/s";
-}
+// Network counters are bytes/second; display decimal megabits/second (1 Mbit = 1,000,000 bits).
+// Keep one fractional digit and a single unit label for predictable Rx/Tx column sizing.
 std::wstring network_rate(std::optional<double> rx, std::optional<double> tx) {
-    if (!rx || !tx) return rate(rx) + L" / " + rate(tx);
-    const auto maximum = std::max(*rx,*tx);
-    const double scale = maximum >= 1048576 ? 1048576 : maximum >= 1024 ? 1024 : 1;
-    const auto unit = scale == 1048576 ? L" MiB/s" : scale == 1024 ? L" KiB/s" : L" B/s";
-    return decimal(*rx/scale,scale==1 ? 0 : 1)+L" / "+decimal(*tx/scale,scale==1 ? 0 : 1)+unit;
+    const auto format = [](std::optional<double> bytes_per_second) -> std::wstring {
+        if (!bytes_per_second) return L"—";
+        return decimal(*bytes_per_second * 8.0 / 1'000'000.0, 1);
+    };
+    return format(rx) + L" / " + format(tx) + L" Mbps";
 }
 void require_hr(HRESULT result, const char* operation) {
     if (FAILED(result)) throw std::runtime_error(std::string(operation) + " failed (HRESULT " + std::to_string(static_cast<unsigned long>(result)) + ")");
@@ -146,12 +141,7 @@ private:
     bool summary_only() const { return summary_ || !metrics_; }
     unsigned active_metrics() const { return metrics_ ? metrics_ : all_metrics; }
     float table_width() const {
-        float width = summary_only() ? 0 : 12.0f + (show_icons_ ? 1.7f : 0);
-        for (unsigned i=0;i<metric_names.size();++i) if (active_metrics() & (1U<<i)) {
-            if (width) width += .45f;
-            width += (i == 0 || i == 2) ? std::max(metric_widths[i], 9.8f) : i == 3 ? std::max(metric_widths[i], 12.8f) : metric_widths[i];
-        }
-        return text_size()*width+4;
+        return calculate_overlay_columns(text_size(), active_metrics(), summary_only(), show_icons_).total_width;
     }
     float dip(int px) const { return static_cast<float>(px) * 96.0f / static_cast<float>(dpi_); }
     int pixels(float value) const { return static_cast<int>(value * static_cast<float>(dpi_) / 96.0f + .5f); }
@@ -304,7 +294,7 @@ void Overlay::add_tray() {
 void Overlay::tray_menu() {
     const auto popup = CreatePopupMenu(); if (!popup) return;
     AppendMenuW(popup, MF_STRING, open_client, L"Открыть клиент");
-    AppendMenuW(popup, MF_STRING, toggle_table, visible_ ? L"Скрыть таблицу" : L"Показать таблицу");
+    AppendMenuW(popup, MF_STRING, toggle_table, visible_ ? L"Скрыть оверлей" : L"Показать оверлей");
     AppendMenuW(popup, MF_SEPARATOR, 0, nullptr); AppendMenuW(popup, MF_STRING, quit_app, L"Выход");
     POINT point{}; GetCursorPos(&point); SetForegroundWindow(hwnd_);
     const auto selected = TrackPopupMenu(popup, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, hwnd_, nullptr);
@@ -326,10 +316,35 @@ void Overlay::show_client() {
     if (!client_) throw windows_error("Create client");
     client_dpi_ = GetDpiForWindow(client_); layout_client();
     ShowWindow(client_, SW_SHOW); SetForegroundWindow(client_); activity();
+    // Optional check on client opening only. The monitor UI never blocks on HTTP.
+    const auto appdata=env(L"LOCALAPPDATA");
+    if (!appdata.empty()) {
+        const auto launcher=std::filesystem::path(appdata)/L"FluxTop"/L"FluxTop.exe";
+        std::error_code error;
+        if (std::filesystem::is_regular_file(launcher,error)) {
+            // Older installed launchers do not understand --check-update.
+            const auto module=LoadLibraryExW(launcher.c_str(),nullptr,
+                LOAD_LIBRARY_AS_DATAFILE|LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+            if (module) {
+                wchar_t marker[64]{};
+                const auto supported=LoadStringW(module,204,marker,static_cast<int>(std::size(marker)))>0
+                    && std::wstring_view(marker)==L"FluxTop.update-consent.v1";
+                FreeLibrary(module);
+                if (supported) {
+                    SHELLEXECUTEINFOW check{};
+                    check.cbSize=sizeof(check);
+                    check.lpFile=launcher.c_str();
+                    check.lpParameters=L"--check-update";
+                    check.nShow=SW_SHOWNORMAL;
+                    (void)ShellExecuteExW(&check);
+                }
+            }
+        }
+    }
 }
 void Overlay::init_client() {
     initializing_client_ = true;
-    control(L"STATIC", L"Таблица поверх приложений", 0, 0, 22, 18, 540, 25);
+    control(L"STATIC", L"Оверлей поверх приложений", 0, 0, 22, 18, 540, 25);
     control(L"STATIC", (L"Версия " + wide(FLUXTOP_VERSION)).c_str(), SS_RIGHT, 0, 418, 18, 140, 25);
     control(L"STATIC", L"Количество приложений (1–100)", 0, 0, 22, 62, 260, 24);
     const auto top = control(L"EDIT", std::to_wstring(options_.top).c_str(), WS_BORDER | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, top_control, 290, 58, 268, 29);
@@ -347,9 +362,9 @@ void Overlay::init_client() {
     SendMessageW(alpha, TBM_SETPOS, TRUE, opacity_);
     const auto icons = control(L"BUTTON", L"Показывать иконки приложений", BS_AUTOCHECKBOX | WS_TABSTOP, icons_control, 22, 238, 380, 26);
     SendMessageW(icons, BM_SETCHECK, show_icons_ ? BST_CHECKED : BST_UNCHECKED, 0);
-    const auto visible = control(L"BUTTON", L"Показывать таблицу", BS_AUTOCHECKBOX | WS_TABSTOP, visible_control, 22, 271, 380, 26);
+    const auto visible = control(L"BUTTON", L"Показывать оверлей", BS_AUTOCHECKBOX | WS_TABSTOP, visible_control, 22, 271, 380, 26);
     SendMessageW(visible, BM_SETCHECK, visible_ ? BST_CHECKED : BST_UNCHECKED, 0);
-    const auto move = control(L"BUTTON", L"Перемещать таблицу мышью", BS_AUTOCHECKBOX | WS_TABSTOP, move_control, 22, 304, 380, 26);
+    const auto move = control(L"BUTTON", L"Перемещать оверлей мышью", BS_AUTOCHECKBOX | WS_TABSTOP, move_control, 22, 304, 380, 26);
     SendMessageW(move, BM_SETCHECK, moving_ ? BST_CHECKED : BST_UNCHECKED, 0);
     const auto startup = control(L"BUTTON", L"Автозапуск при входе в Windows (с запросом UAC)", BS_AUTOCHECKBOX | WS_TABSTOP, startup_control, 22, 337, 536, 26);
     SendMessageW(startup, BM_SETCHECK, autostart_enabled() ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -369,11 +384,11 @@ void Overlay::init_client() {
     const auto header_colors = control(L"BUTTON", L"Окрашивать общие показатели", BS_AUTOCHECKBOX | WS_TABSTOP,
         header_colors_control, 22, 520, 268, 26);
     SendMessageW(header_colors, BM_SETCHECK, header_colors_ ? BST_CHECKED : BST_UNCHECKED, 0);
-    const auto row_colors = control(L"BUTTON", L"Окрашивать таблицу процессов", BS_AUTOCHECKBOX | WS_TABSTOP,
+    const auto row_colors = control(L"BUTTON", L"Окрашивать строки оверлея", BS_AUTOCHECKBOX | WS_TABSTOP,
         row_colors_control, 290, 520, 280, 26);
     SendMessageW(row_colors, BM_SETCHECK, row_colors_ ? BST_CHECKED : BST_UNCHECKED, 0);
     control(L"STATIC", L"", 0, stats_control, 22, 567, 536, 136);
-    control(L"STATIC", L"Ctrl+Alt+F9 — клиент   ·   Ctrl+Alt+F10 — таблица", 0, 0, 22, 711, 540, 24);
+    control(L"STATIC", L"Ctrl+Alt+F9 — клиент   ·   Ctrl+Alt+F10 — оверлей", 0, 0, 22, 711, 540, 24);
     control(L"BUTTON", L"Завершить работу", WS_TABSTOP, quit_app, 373, 743, 185, 32);
     initializing_client_ = false; client_stats();
 }
@@ -632,21 +647,12 @@ void Overlay::draw_header_metric(unsigned column, const std::wstring& reading, s
     }
 }
 std::array<D2D1_RECT_F,6> Overlay::columns(float y, float height) const {
-    std::array<D2D1_RECT_F,6> result{};
-    const float fs = text_size(), gap = fs*.45f;
-    float start = 2;
-    if (!summary_only()) {
-        start += show_icons_ ? fs*1.7f : 0;
-        result[0] = D2D1::RectF(start,y,start+fs*12,y+height);
-        start = result[0].right+gap;
+    const auto layout = calculate_overlay_columns(text_size(), active_metrics(), summary_only(), show_icons_);
+    std::array<D2D1_RECT_F,6> rects{};
+    for (std::size_t index = 0; index < rects.size(); ++index) {
+        rects[index] = D2D1::RectF(layout.left[index], y, layout.right[index], y + height);
     }
-    for (unsigned i=0;i<metric_names.size();++i) if (active_metrics() & (1U<<i)) {
-        const auto factor = (i == 0 || i == 2) ? std::max(metric_widths[i], 9.8f)
-            : i == 3 ? std::max(metric_widths[i], 12.8f) : metric_widths[i];
-        result[i+1] = D2D1::RectF(start,y,start+fs*factor,y+height);
-        start = result[i+1].right+gap;
-    }
-    return result;
+    return rects;
 }
 void Overlay::paint() {
     if (!visible_ || !hwnd_) return;
@@ -729,7 +735,7 @@ int Overlay::run() {
     if (x_==CW_USEDEFAULT || y_==CW_USEDEFAULT) { RECT area{}; SystemParametersInfoW(SPI_GETWORKAREA,0,&area,0); x_=area.right-pixels(table_width())-pixels(20); y_=area.top+pixels(20); }
     const bool inspect = env(L"FLUXTOP_OVERLAY_INSPECT")==L"1";
     const DWORD style=WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | (inspect ? WS_EX_APPWINDOW : WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
-    hwnd_=CreateWindowExW(style,overlay_class,L"Таблица ресурсов",WS_POPUP,x_,y_,pixels(table_width()),pixels(row_height()*11+4),
+    hwnd_=CreateWindowExW(style,overlay_class,L"Оверлей ресурсов",WS_POPUP,x_,y_,pixels(table_width()),pixels(row_height()*11+4),
         nullptr,nullptr,GetModuleHandleW(nullptr),this);
     if (!hwnd_) throw windows_error("Create transparent table");
     dpi_=GetDpiForWindow(hwnd_); fit_table(); taskbar_created_=RegisterWindowMessageW(L"TaskbarCreated"); add_tray();

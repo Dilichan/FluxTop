@@ -5,6 +5,7 @@
 #include <shlobj.h>
 #include <array>
 #include <filesystem>
+#include <fstream>
 #include <cstring>
 #include <algorithm>
 
@@ -91,6 +92,19 @@ void request_install_elevation(const std::filesystem::path& path) {
         throw fluxtop::windows_error("Request administrator rights for installation");
     }
 }
+// The monitor handles WM_CLOSE by saving settings and shutting down its worker.
+// Wait for the process to exit before replacing the installed launcher.
+bool close_monitor_for_consented_update() {
+    const auto window=FindWindowW(L"FluxTop.Overlay.Window",nullptr);
+    if (!window) return true;
+    DWORD pid{};
+    GetWindowThreadProcessId(window,&pid);
+    if (!pid) return false;
+    fluxtop::Handle process(OpenProcess(SYNCHRONIZE,FALSE,pid));
+    if (!process.valid()) return false;
+    if (!PostMessageW(window,WM_CLOSE,0,0)) return !fluxtop::monitor_running();
+    return WaitForSingleObject(process.get(),20000)==WAIT_OBJECT_0;
+}
 }
 int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
     bool prepare=false,install_only=false;
@@ -102,7 +116,7 @@ int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
         int count{}; auto** argv=CommandLineToArgvW(GetCommandLineW(),&count);
         if (!argv) throw fluxtop::windows_error("Read launcher arguments");
         struct Arguments { wchar_t** value; ~Arguments(){ LocalFree(value); } } arguments{argv};
-        bool tray=false,autostart=false,uninstall=false,custom_directory=false,install_and_launch=false;
+        bool tray=false,autostart=false,uninstall=false,custom_directory=false,install_and_launch=false,check_update=false;
         std::filesystem::path directory;
         for (int i=1;i<count;++i) {
             const std::wstring_view arg(argv[i]);
@@ -111,12 +125,13 @@ int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
             else if (arg==L"--prepare-only") prepare=true;
             else if (arg==L"--install-only") install_only=true;
             else if (arg==L"--install-and-launch") install_and_launch=true;
+            else if (arg==L"--check-update") check_update=true;
             else if (arg==L"--uninstall") uninstall=true;
             else if (arg==L"--data-dir" && i+1<count) {
                 custom_directory=true;
                 directory=std::filesystem::absolute(argv[++i]);
             }
-            else throw std::runtime_error("Supported options: --tray, --prepare-only, --install-only, --uninstall, --data-dir PATH");
+            else throw std::runtime_error("Supported options: --tray, --prepare-only, --install-only, --uninstall, --check-update, --data-dir PATH");
         }
         if (directory.empty()) directory=data_directory();
         std::filesystem::create_directories(directory);
@@ -132,6 +147,56 @@ int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
         if (!LoadStringW(module,203,tag,static_cast<int>(std::size(tag)))) throw std::runtime_error("Release version missing");
         const auto self=executable();
         const auto installed=directory/L"FluxTop.exe";
+        if (check_update) {
+            // Only the installed launcher may run a check. No check on normal start,
+            // autostart, installation, or CI fixture preparation.
+            if (prepare || install_only || install_and_launch || uninstall || autostart
+                || custom_directory || !fluxtop::same_file(self,installed)) return 0;
+            bool approved=false;
+            try {
+                const auto candidate=fluxtop::find_release_update(tag);
+                if (!candidate) return 0; // No update: no prompt and no download.
+                const auto question=std::wstring(L"Доступно обновление FluxTop ") + candidate->tag
+                    + L".\n\nСкачать и установить его сейчас?";
+                if (MessageBoxW(nullptr,question.c_str(),L"FluxTop — обновление",
+                    MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2|MB_TOPMOST)!=IDYES) return 0;
+                approved=true;
+                // Download and verify BEFORE closing the running monitor.
+                const auto bytes=fluxtop::download_release_update(*candidate);
+                if (bytes.size()!=candidate->size || bytes.size()<1024
+                    || bytes[0]!='M' || bytes[1]!='Z'
+                    || fluxtop::release_sha256(bytes)!=candidate->digest)
+                    throw std::runtime_error("Downloaded update failed SHA-256, size or PE validation");
+                if (!close_monitor_for_consented_update() || fluxtop::monitor_running())
+                    throw std::runtime_error("Cannot close the current monitor for update");
+                const auto launch_new=[](const std::filesystem::path& path) {
+                    SHELLEXECUTEINFOW start{};
+                    start.cbSize=sizeof(start);
+                    start.lpFile=path.c_str();
+                    start.nShow=SW_SHOWNORMAL;
+                    return ShellExecuteExW(&start)!=FALSE;
+                };
+                (void)fluxtop::activate_release(directory,bytes,*candidate,launch_new);
+                return 0;
+            } catch (const std::exception& error) {
+                try { std::ofstream(directory/L"update.log",std::ios::trunc)<<error.what()<<'\n'; } catch (...) {}
+                if (approved) {
+                    // If activation failed after shutdown, restore the old app in tray mode.
+                    if (!fluxtop::monitor_running() && std::filesystem::exists(installed)) {
+                        SHELLEXECUTEINFOW restart{};
+                        restart.cbSize=sizeof(restart);
+                        restart.lpFile=installed.c_str();
+                        restart.lpParameters=L"--tray";
+                        restart.nShow=SW_SHOWNORMAL;
+                        (void)ShellExecuteExW(&restart);
+                    }
+                    MessageBoxW(nullptr,
+                        L"Не удалось применить обновление FluxTop. Подробности: %LOCALAPPDATA%\\FluxTop\\update.log.",
+                        L"FluxTop — обновление",MB_OK|MB_ICONERROR);
+                }
+                return 1;
+            }
+        }
         if (uninstall) {
             if (custom_directory || !fluxtop::same_file(self,installed))
                 throw std::runtime_error("Run --uninstall from the installed FluxTop.exe");
@@ -210,7 +275,7 @@ int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
                 fluxtop::install_application(self,directory,tag,true);
             }
         }
-        if (!prepare && fluxtop::try_release_update(directory,self,tag,tray)) return 0;
+        // Online updates are never downloaded or installed during regular launch.
         const auto resource=FindResourceW(module,MAKEINTRESOURCEW(201),RT_RCDATA);
         if (!resource) throw fluxtop::windows_error("Locate embedded monitor");
         const auto loaded=LoadResource(module,resource);

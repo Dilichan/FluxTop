@@ -5,6 +5,7 @@ STRINGTABLE
 BEGIN
 202 L"@payload_hash@"
 203 L"@RELEASE_TAG@"
+204 L"FluxTop.update-consent.v1"
 END
 1 VERSIONINFO
 FILEVERSION @version_numbers@,0

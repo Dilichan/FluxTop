@@ -172,19 +172,28 @@ bool activate_release(const std::filesystem::path& directory,const std::vector<u
     }
     return true;
 }
+std::optional<Release> find_release_update(std::wstring_view current) {
+    const auto json_bytes=get(L"api.github.com",L"/repos/Dilichan/FluxTop/releases?per_page=20",1024*1024);
+    const auto length=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,
+        reinterpret_cast<const char*>(json_bytes.data()),static_cast<int>(json_bytes.size()),nullptr,0);
+    if (length<=0) throw std::runtime_error("Invalid GitHub response encoding");
+    std::wstring json(static_cast<std::size_t>(length),L'\0');
+    MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,
+        reinterpret_cast<const char*>(json_bytes.data()),static_cast<int>(json_bytes.size()),json.data(),length);
+    return release_from_json(json,current);
+}
+std::vector<unsigned char> download_release_update(const Release& release) {
+    if (!version(release.tag)) throw std::runtime_error("Invalid release version");
+    return get(L"github.com",L"/Dilichan/FluxTop/releases/download/"+release.tag+L"/FluxTop.exe",64*1024*1024);
+}
 bool try_release_update(const std::filesystem::path& directory,const std::filesystem::path& self,std::wstring_view current,bool tray) noexcept {
     try {
         const auto stable=directory/L"FluxTop.exe";
         std::error_code error;
         if (!std::filesystem::equivalent(self,stable,error) && newer_release(cached_tag(stable),current)) return launch(stable,tray);
-        const auto json_bytes=get(L"api.github.com",L"/repos/Dilichan/FluxTop/releases?per_page=20",1024*1024);
-        const auto length=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,reinterpret_cast<const char*>(json_bytes.data()),static_cast<int>(json_bytes.size()),nullptr,0);
-        if (length<=0) throw std::runtime_error("Invalid GitHub response encoding");
-        std::wstring json(static_cast<std::size_t>(length),L'\0');
-        MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,reinterpret_cast<const char*>(json_bytes.data()),static_cast<int>(json_bytes.size()),json.data(),length);
-        const auto release=release_from_json(json,current);
+        const auto release=find_release_update(current);
         if (!release) return false;
-        const auto bytes=get(L"github.com",L"/Dilichan/FluxTop/releases/download/"+release->tag+L"/FluxTop.exe",64*1024*1024);
+        const auto bytes=download_release_update(*release);
         return activate_release(directory,bytes,*release,[tray](const auto& path){ return launch(path,tray); });
     } catch(const std::exception& error) {
         try { std::ofstream(directory/L"update.log",std::ios::trunc)<<error.what()<<'\n'; } catch(...) {}
