@@ -9,12 +9,43 @@ FluxTop разрабатывается открыто. Изменения дол
 
 ## Код и проверки
 
+Нужны Windows 10/11 x64, Visual Studio Build Tools с C++20 и Windows SDK,
+CMake 3.24+. В x64 Developer PowerShell:
+
+```powershell
+cmake --preset windows
+cmake --build --preset release
+ctest --preset release
+powershell.exe -NoProfile -File tests/update_tests.ps1
+powershell.exe -NoProfile -File tests/launcher_tests.ps1
+powershell.exe -NoProfile -File tests/elevation_tests.ps1
+```
+
+Без Visual Studio generator можно использовать Ninja:
+
+```powershell
+cmake -S . -B build/ninja -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build/ninja
+ctest --test-dir build/ninja --output-on-failure
+```
+
+Сборщик/CLI: build/Release/fluxtop.exe (у Ninja — build/ninja/fluxtop.exe).
+Скачиваемый launcher: build/package/Release/FluxTop.exe. Смотрите
+[публикацию релизов](docs/PUBLISHING.md), прежде чем ставить тег.
+Для диагностики: fluxtop.exe --help, --jsonl, --samples N, --no-network.
+FLUXTOP_HISTORY_DB / FLUXTOP_ICON_DB / FLUXTOP_OVERLAY_SETTINGS задают
+изолированные файлы тестов. Network-test пропускается без административного
+токена; отдельно проверьте его под администратором. Автоматизация не подтверждает UAC.
+
 - C++20, Unicode Win32 API, RAII для системных ресурсов.
 - Избегайте неограниченных кешей, очередей, частого polling и постоянных UI-анимаций.
 - Проверяйте расчёты CPU, смену идентичности процесса и отсутствующие данные тестами.
 - Ошибки доступа не превращайте в нули или выдуманные показатели.
 - PR должен включать описание поведения, способ проверки и ограничения.
 - Для оптимизаций приложите сравнимые замеры Release до и после.
+- При локализованной MSVC/Ninja проверяйте отслеживание заголовков. Если `/showIncludes`
+  неправильно распознаётся из-за кодировки, после изменения заголовков выполняйте
+  `cmake --build build/ninja --clean-first`, чтобы не смешать несовместимые объекты.
 - Не добавляйте бинарники, логи, EXE-пути своей машины, базы истории и секреты.
 
 ## Сторонний код

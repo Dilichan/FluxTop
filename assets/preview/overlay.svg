@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1450" height="245" viewBox="0 0 1450 245">
+  <rect width="1450" height="245" fill="#111820"/>
+  <g fill="#fff" font-family="Consolas,monospace" font-size="20" font-weight="600">
+    <text x="22" y="43" font-family="Segoe UI,sans-serif">Приложение</text>
+    <text x="330" y="43">CPU 18.4%</text><text x="500" y="43">RAM 42.1%</text>
+    <text x="675" y="43">GPU 35.0%</text><text x="850" y="43">GPU RAM 3.2 GiB</text>
+    <text x="1080" y="43">Rx/Tx 2.1 / 0.4 MiB/s</text>
+    <text x="65" y="95" font-family="Segoe UI,sans-serif">Browser</text>
+    <text x="410" y="95">4.2%</text><text x="505" y="95">820.0 MiB</text><text x="750" y="95">1.5%</text><text x="950" y="95">180.0 MiB</text><text x="1100" y="95">2.0 / 0.3 MiB/s</text>
+    <text x="65" y="147" font-family="Segoe UI,sans-serif">Editor</text>
+    <text x="410" y="147">1.8%</text><text x="505" y="147">310.0 MiB</text><text x="750" y="147">0.2%</text><text x="960" y="147">42.0 MiB</text><text x="1100" y="147">0.0 / 0.1 MiB/s</text>
+    <text x="65" y="199" font-family="Segoe UI,sans-serif">Game</text>
+    <text x="398" y="199">12.4%</text><text x="530" y="199">1.6 GiB</text><text x="738" y="199">33.3%</text><text x="975" y="199">2.9 GiB</text><text x="1100" y="199">0.1 / 0.0 MiB/s</text>
+  </g>
+  <circle cx="35" cy="87" r="13" fill="#14b8d4"/><circle cx="35" cy="87" r="6" fill="#111820"/>
+  <rect x="22" y="125" width="26" height="26" rx="4" fill="#4c8df5"/><path d="m31 132-6 6 6 6m8-12 6 6-6 6" fill="none" stroke="white" stroke-width="2"/>
+  <rect x="21" y="178" width="28" height="22" rx="8" fill="#8b72e9"/><path d="M30 184v10m-5-5h10" stroke="white" stroke-width="2"/><circle cx="41" cy="186" r="2" fill="white"/><circle cx="44" cy="192" r="2" fill="white"/>
+</svg>
