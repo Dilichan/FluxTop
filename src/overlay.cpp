@@ -32,7 +32,7 @@ constexpr UINT foreground_update_message = WM_APP + 13;
 constexpr int toggle_hotkey = 1, client_hotkey = 2;
 enum Control : UINT { open_client = 100, toggle_table, quit_app, top_label, top_control, sort_control, font_control,
     alpha_control, visible_control, move_control, icons_control, stats_control, startup_control,
-    alpha_label, interval_control, summary_control, header_colors_control, row_colors_control, metric_control = 200, tab_control = 450 };
+    alpha_label, interval_control, summary_control, header_colors_control, row_colors_control, animation_control, metric_control = 200, tab_control = 450 };
 constexpr unsigned all_metrics = 31;
 constexpr int load_band(double x) { return x < 50.0 ? 0 : x < 70.0 ? 1 : 2; }
 constexpr int temperature_band(double x) { return x < 65.0 ? 0 : x <= 80.0 ? 1 : 2; }
@@ -40,6 +40,13 @@ static_assert(load_band(49.9) == 0 && load_band(50.0) == 1 && load_band(70.0) ==
 static_assert(temperature_band(64.9) == 0 && temperature_band(65.0) == 1
     && temperature_band(80.0) == 1 && temperature_band(80.1) == 2);
 constexpr UINT_PTR settings_timer = 1;
+constexpr UINT_PTR overlay_animation_timer = 2;
+// Animated display only: sampling cadence and AutoScore are unchanged.
+constexpr float overlay_smoothstep(float value) noexcept {
+    const float t=std::clamp(value,0.0f,1.0f);
+    return t*t*(3.0f-2.0f*t);
+}
+static_assert(overlay_smoothstep(0.0f)==0.0f && overlay_smoothstep(1.0f)==1.0f);
 
 // An out-of-context WinEvent hook delivers foreground changes on this UI thread.
 // The callback only posts a message: resource collection is never done in the hook.
@@ -134,10 +141,12 @@ private:
     void release_surface();
     void surface();
     void paint();
-    void draw_text(std::wstring_view value, D2D1_RECT_F rect, IDWriteTextFormat* font, bool highlight = false, bool burst = false, std::optional<double> load = std::nullopt);
+    void draw_text(std::wstring_view value, D2D1_RECT_F rect, IDWriteTextFormat* font,
+        bool highlight = false, bool burst = false, std::optional<double> load = std::nullopt,
+        float opacity = 1.0f);
     void draw_header_metric(unsigned column, const std::wstring& reading, std::optional<double> load,
         std::optional<double> temperature, D2D1_RECT_F rect, bool cpu_board = false);
-    void draw_network_text(const Row& row, D2D1_RECT_F rect);
+    void draw_network_text(const Row& row, D2D1_RECT_F rect, float opacity = 1.0f);
     std::array<D2D1_RECT_F,6> columns(float y, float height) const;
     float text_size() const { return static_cast<float>(options_.font_size); }
     float row_height() const { return text_size() * 1.6f; }
@@ -167,6 +176,7 @@ private:
     unsigned metrics_ = all_metrics;
     bool summary_ = false;
     bool header_colors_ = true, row_colors_ = true;
+    bool animation_enabled_ = true;
     int x_ = CW_USEDEFAULT, y_ = CW_USEDEFAULT;
     std::wstring settings_;
     std::size_t scroll_{};
@@ -183,6 +193,13 @@ private:
     std::string pending_error_, error_;
     bool posted_ = false, pending_finished_ = false;
     std::vector<Row> rows_;
+    struct RowMotion { float start_slot{}; int previous_index{-1}; };
+    // Only the previous visible-ranking snapshot is retained for one transition.
+    std::vector<Row> previous_rows_;
+    std::vector<RowMotion> row_motion_;
+    ULONGLONG row_animation_started_{};
+    unsigned row_animation_duration_ms_{650};
+    bool row_animation_active_{};
     // D2D bitmaps are render-target resources: reuse until the icon or target changes.
     struct CachedBitmap {
         std::optional<std::uint64_t> created;
@@ -227,6 +244,7 @@ void Overlay::load_settings() {
     summary_ = read(L"summary_only", 0) != 0;
     header_colors_ = read(L"header_colors", 1) != 0;
     row_colors_ = read(L"row_colors", 1) != 0;
+    animation_enabled_ = read(L"overlay_animation", 1) != 0;
     if (!options_.interval_explicit) options_.interval_ms = static_cast<unsigned>(std::clamp(read(L"interval_ms", 1000), 1000, 10000));
     show_icons_ = read(L"icons", 1) != 0;
     if (!options_.font_explicit) options_.font_size = static_cast<unsigned>(std::clamp(read(L"font_size", 16), 5, 42));
@@ -248,6 +266,7 @@ void Overlay::save_settings() noexcept {
         save(L"sort", static_cast<int>(options_.sort)); save(L"opacity", static_cast<int>(opacity_)); save(L"icons", show_icons_ ? 1 : 0);
         save(L"metrics", static_cast<int>(metrics_)); save(L"summary_only", summary_ ? 1 : 0);
         save(L"header_colors", header_colors_ ? 1 : 0); save(L"row_colors", row_colors_ ? 1 : 0);
+        save(L"overlay_animation", animation_enabled_ ? 1 : 0);
         save(L"interval_ms", static_cast<int>(options_.interval_ms));
     } catch (...) {}
 }
@@ -415,7 +434,10 @@ void Overlay::init_client() {
     const auto row_colors = control(L"BUTTON", L"Окрашивать строки оверлея", BS_AUTOCHECKBOX | WS_TABSTOP,
         row_colors_control, 290, 520, 280, 26);
     SendMessageW(row_colors, BM_SETCHECK, row_colors_ ? BST_CHECKED : BST_UNCHECKED, 0);
-    control(L"STATIC", L"", 0, stats_control, 22, 567, 536, 136);
+    const auto animation = control(L"BUTTON", L"Анимация строк оверлея", BS_AUTOCHECKBOX | WS_TABSTOP,
+        animation_control, 22, 556, 536, 26);
+    SendMessageW(animation, BM_SETCHECK, animation_enabled_ ? BST_CHECKED : BST_UNCHECKED, 0);
+    control(L"STATIC", L"", 0, stats_control, 22, 599, 536, 104);
     control(L"STATIC", L"Ctrl+Alt+F9 — клиент   ·   Ctrl+Alt+F10 — оверлей", 0, 0, 22, 711, 540, 24);
     control(L"BUTTON", L"Завершить работу", WS_TABSTOP, quit_app, 373, 743, 185, 32);
     statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,10U);
@@ -471,6 +493,12 @@ void Overlay::apply_client() {
     summary_ = SendDlgItemMessageW(client_,summary_control,BM_GETCHECK,0,0)==BST_CHECKED;
     header_colors_ = SendDlgItemMessageW(client_,header_colors_control,BM_GETCHECK,0,0)==BST_CHECKED;
     row_colors_ = SendDlgItemMessageW(client_,row_colors_control,BM_GETCHECK,0,0)==BST_CHECKED;
+    animation_enabled_ = SendDlgItemMessageW(client_,animation_control,BM_GETCHECK,0,0)==BST_CHECKED;
+    if (!animation_enabled_) {
+        KillTimer(hwnd_,overlay_animation_timer);
+        row_animation_active_=false;
+        previous_rows_.clear();row_motion_.clear();
+    }
     scroll_ = 0; if (old_font_size != options_.font_size) fonts();
     fit_table(); update_view(); save_settings(); client_stats();
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -504,7 +532,12 @@ void Overlay::set_visible(bool visible) {
     if (visible == visible_) return;
     if (!visible && !tray_ && !toggle_key_ && !client_) return;
     visible_ = visible;
-    if (!visible) { ShowWindow(hwnd_, SW_HIDE); release_surface(); icons_.reset(); }
+    if (!visible) {
+        KillTimer(hwnd_,overlay_animation_timer);
+        row_animation_active_=false;
+        previous_rows_.clear();row_motion_.clear();
+        ShowWindow(hwnd_, SW_HIDE); release_surface(); icons_.reset();
+    }
     else { ShowWindow(hwnd_, SW_SHOWNOACTIVATE); update_view(); InvalidateRect(hwnd_, nullptr, FALSE); }
     if (client_) SendDlgItemMessageW(client_, visible_control, BM_SETCHECK, visible ? BST_CHECKED : BST_UNCHECKED, 0);
     activity();
@@ -560,11 +593,8 @@ void Overlay::update_view() {
         for (std::size_t j=0; j<loads.size(); ++j)
             loads[j] = auto_metric_load_percent(p,static_cast<AutoMetric>(j+1),
                 s.total_ram_capacity,s.total_gpu_memory_capacity);
+        // No blink/flash effects in the overlay. AutoScore still uses burst data for ranking.
         std::array<bool,6> bursts{};
-        if (options_.sort == Sort::automatic) {
-            for (std::size_t j=0; j<bursts.size(); ++j)
-                bursts[j] = auto_metric_has_burst(p,static_cast<AutoMetric>(j+1));
-        }
         next.push_back({p.pid,p.creation_time,std::move(name),percent(p.cpu_percent),
             memory(p.working_set),percent(p.gpu_percent),memory(p.dedicated_gpu_bytes),
             network_rate(p.rx_bytes_per_second,p.tx_bytes_per_second),loads,bursts});    }
@@ -575,7 +605,61 @@ void Overlay::update_view() {
         icons_->set_capacity(std::clamp<std::size_t>(static_cast<std::size_t>(options_.top)+16,32,128));
         for (const auto& row : next) icons_->request(row.pid,row.created);
     } else if (!show_icons_ || summary_only()) icons_.reset();
-    if (next != rows_) { rows_ = std::move(next); if (visible_) InvalidateRect(hwnd_, nullptr, FALSE); }
+    if (next != rows_) {
+        // Numeric-only updates never restart the animation timer.
+        bool order_changed=next.size()!=rows_.size();
+        if(!order_changed) for(std::size_t i=0;i<next.size();++i) {
+            if(next[i].pid!=rows_[i].pid || next[i].created!=rows_[i].created) {
+                order_changed=true;break;
+            }
+        }
+        if(!order_changed) {
+            rows_=std::move(next);
+        } else if (visible_ && animation_enabled_ && !summary_only() && !next.empty()) {
+            const ULONGLONG tick=GetTickCount64();
+            // Retarget from the current *visual* positions if the foreground changes mid-flight.
+            const float previous_progress=row_animation_active_ && row_animation_duration_ms_
+                ? overlay_smoothstep(static_cast<float>(tick-row_animation_started_)
+                    /static_cast<float>(row_animation_duration_ms_)) : 1.0f;
+            std::vector<float> previous_positions(rows_.size());
+            for(std::size_t i=0;i<rows_.size();++i) {
+                const float from=row_animation_active_ && i<row_motion_.size()
+                    ?row_motion_[i].start_slot:static_cast<float>(i);
+                previous_positions[i]=from+(static_cast<float>(i)-from)*previous_progress;
+            }
+            previous_rows_=std::move(rows_);
+            rows_=std::move(next);
+            row_motion_.clear();row_motion_.reserve(rows_.size());
+            const bool pinned=options_.sort==Sort::automatic && focused_pid_
+                && rows_.front().pid==focused_pid_;
+            for(std::size_t i=0;i<rows_.size();++i) {
+                int old=-1;
+                for(std::size_t j=0;j<previous_rows_.size();++j) {
+                    if(rows_[i].pid==previous_rows_[j].pid &&
+                        rows_[i].created==previous_rows_[j].created) {
+                        old=static_cast<int>(j);break;
+                    }
+                }
+                float from=old>=0?previous_positions[static_cast<std::size_t>(old)]
+                    :static_cast<float>(i);
+                // In Auto, the focused application occupies a reserved first row.
+                if(pinned) from=i==0?0.0f:std::max(1.0f,from);
+                row_motion_.push_back({from,old});
+            }
+            row_animation_started_=tick;
+            // 1s sampling -> 650ms; 10s sampling -> 1600ms (bounded UI redraw cost).
+            row_animation_duration_ms_=std::clamp(
+                static_cast<unsigned>(options_.interval_ms*0.65),350U,1600U);
+            row_animation_active_=true;
+            SetTimer(hwnd_,overlay_animation_timer,40,nullptr); // 25 FPS while active only.
+        } else {
+            rows_=std::move(next);
+            KillTimer(hwnd_,overlay_animation_timer);
+            row_animation_active_=false;
+            previous_rows_.clear();row_motion_.clear();
+        }
+        if (visible_) InvalidateRect(hwnd_,nullptr,FALSE);
+    }
 }
 
 void Overlay::release_surface() {
@@ -602,25 +686,28 @@ void Overlay::surface() {
     require_hr(target_->CreateSolidColorBrush(D2D1::ColorF(1,1,1,1),&brush_), "Text brush");
     target_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 }
-void Overlay::draw_text(std::wstring_view value, D2D1_RECT_F rect, IDWriteTextFormat* font, bool highlight, bool burst, std::optional<double> load) {
-    auto shadow = rect; shadow.left += 1; shadow.right += 1; shadow.top += 1; shadow.bottom += 1;
-    brush_->SetColor(D2D1::ColorF(0,0,0,.8f));
+void Overlay::draw_text(std::wstring_view value, D2D1_RECT_F rect, IDWriteTextFormat* font,
+    bool highlight, bool burst, std::optional<double> load, float opacity) {
+    if(opacity<=0.005f) return;
+    opacity=std::clamp(opacity,0.0f,1.0f);
+    auto shadow=rect;shadow.left+=1;shadow.right+=1;shadow.top+=1;shadow.bottom+=1;
+    brush_->SetColor(D2D1::ColorF(0,0,0,.8f*opacity));
     target_->DrawText(value.data(),static_cast<UINT32>(value.size()),font,shadow,brush_.Get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    D2D1_COLOR_F color = D2D1::ColorF(1,1,1,1);
-    if (row_colors_ && highlight) {
-        if (burst) color = D2D1::ColorF(1.0f,0.53f,0.12f,1.0f); // Orange overrides all bands.
-        else if (load && std::isfinite(*load) && *load >= 0.0) {
-            color = load_band(*load) == 0 ? D2D1::ColorF(0.25f,0.92f,0.35f,1.0f)
-                : load_band(*load) == 1 ? D2D1::ColorF(1.0f,0.80f,0.13f,1.0f)
-                : D2D1::ColorF(1.0f,0.22f,0.22f,1.0f);
+    D2D1_COLOR_F color=D2D1::ColorF(1,1,1,opacity);
+    if(row_colors_ && highlight) {
+        if(burst) color=D2D1::ColorF(1.0f,0.53f,0.12f,opacity);
+        else if(load && std::isfinite(*load) && *load>=0.0) {
+            color=load_band(*load)==0?D2D1::ColorF(0.25f,0.92f,0.35f,opacity)
+                :load_band(*load)==1?D2D1::ColorF(1.0f,0.80f,0.13f,opacity)
+                :D2D1::ColorF(1.0f,0.22f,0.22f,opacity);
         }
     }
     brush_->SetColor(color);
     target_->DrawText(value.data(),static_cast<UINT32>(value.size()),font,rect,brush_.Get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
-void Overlay::draw_network_text(const Row& row, D2D1_RECT_F rect) {
-    draw_text(row.network,rect,number_font_.Get());
+void Overlay::draw_network_text(const Row& row, D2D1_RECT_F rect, float opacity) {
+    draw_text(row.network,rect,number_font_.Get(),false,false,std::nullopt,opacity);
     // No defined link-capacity percentage for Rx/Tx. They stay white unless
     // the individual direction has a significant positive-rate burst.
     if (!row_colors_ || (!row.bursts[4] && !row.bursts[5])) return;
@@ -641,7 +728,7 @@ void Overlay::draw_network_text(const Row& row, D2D1_RECT_F rect) {
             0,0,&hit,1,&count)) || count != 1 || hit.width <= 0) continue;
         target_->PushAxisAlignedClip(D2D1::RectF(rect.left+hit.left,rect.top+hit.top,
             rect.left+hit.left+hit.width,rect.top+hit.top+hit.height),D2D1_ANTIALIAS_MODE_ALIASED);
-        draw_text(row.network,rect,number_font_.Get(),true,true);
+        draw_text(row.network,rect,number_font_.Get(),true,true,std::nullopt,opacity);
         target_->PopAxisAlignedClip();
     }
 }
@@ -738,15 +825,31 @@ void Overlay::paint() {
         draw_header_metric(static_cast<unsigned>(i-1),totals[i-1],load[i-1],
             i==1 ? cpu_temperature : i==3 ? gpu_temperature : std::optional<double>{},header[i],
             i==1 && snapshot_ && snapshot_->cpu_temperature_board);
-    const auto count = visible_rows(dip(bitmap_size_.cy));
-    scroll_ = std::min(scroll_, rows_.size()>count ? rows_.size()-count : 0);
+    const auto count=visible_rows(dip(bitmap_size_.cy));
+    scroll_=std::min(scroll_,rows_.size()>count?rows_.size()-count:0);
+    const float progress=row_animation_active_ && row_animation_duration_ms_
+        ?overlay_smoothstep(static_cast<float>(GetTickCount64()-row_animation_started_)
+            /static_cast<float>(row_animation_duration_ms_)):1.0f;
+    // The header never moves or gets covered by transitioning rows.
+    target_->PushAxisAlignedClip(D2D1::RectF(0,row_height()+1,table_width(),
+        dip(bitmap_size_.cy)),D2D1_ANTIALIAS_MODE_ALIASED);
     for (std::size_t i=0;i<count && i+scroll_<rows_.size();++i) {
         // Row zero remains visible while the remaining auto-ranked rows scroll.
         const bool fixed_focus = options_.sort == Sort::automatic && focused_pid_
             && !rows_.empty() && rows_.front().pid == focused_pid_;
-        const auto& row = rows_[(fixed_focus && i==0) ? 0 : i+scroll_];
-        const float y = 1+static_cast<float>(i+1)*row_height();
-        const auto cells = columns(y,row_height());
+        const std::size_t row_index=(fixed_focus && i==0)?0:i+scroll_;
+        const auto& row=rows_[row_index];
+        const RowMotion* motion=row_animation_active_ && row_index<row_motion_.size()
+            ?&row_motion_[row_index]:nullptr;
+        float slot=static_cast<float>(i);
+        if(motion && !(fixed_focus && i==0)) {
+            const float from=motion->start_slot-static_cast<float>(scroll_);
+            slot=from+(slot-from)*progress;
+            if(fixed_focus) slot=std::max(1.0f,slot);
+        }
+        const float opacity=1.0f; // Never fade newly appearing rows or their icons.
+        const float y=1+(slot+1.0f)*row_height();
+        const auto cells=columns(y,row_height());
         if (show_icons_ && icons_) if (const auto icon = icons_->get(row.pid,row.created)) {
             auto found=icon_bitmaps_.find(row.pid);
             if (found==icon_bitmaps_.end() || found->second.created!=row.created || found->second.source!=icon) {
@@ -767,17 +870,25 @@ void Overlay::paint() {
             }
             found->second.used=++icon_bitmap_clock_;
             const float side=text_size()*1.3f, top=y+(row_height()-side)/2;
-            target_->DrawBitmap(found->second.bitmap.Get(),D2D1::RectF(2,top,2+side,top+side));
+            target_->DrawBitmap(found->second.bitmap.Get(),D2D1::RectF(2,top,2+side,top+side),opacity);
         }
-        draw_text(row.name,cells[0],body_font_.Get());
-        const std::array values{row.cpu,row.ram,row.gpu,row.vram,row.network};
-        for (std::size_t column=0;column<metric_names.size();++column) if (active_metrics() & (1U<<column)) {
-            if (column == 4) draw_network_text(row,cells[column+1]);
-            else draw_text(values[column],cells[column+1],number_font_.Get(),
-                true,row.bursts[column],row.loads[column]);
-        }
+        draw_text(row.name,cells[0],body_font_.Get(),false,false,std::nullopt,opacity);
+        const auto paint_values=[&](const Row& displayed,float alpha) {
+            const std::array<std::wstring_view,5> values{
+                displayed.cpu,displayed.ram,displayed.gpu,displayed.vram,displayed.network};
+            for(std::size_t column=0;column<metric_names.size();++column) {
+                if(!(active_metrics() & (1U<<column))) continue;
+                if(column==4) draw_text(values[column],cells[column+1],number_font_.Get(),
+                    false,false,std::nullopt,alpha);
+                else draw_text(values[column],cells[column+1],number_font_.Get(),
+                    true,false,displayed.loads[column],alpha);
+            }
+        };
+        // Resource readings update immediately; only vertical row position moves.
+        paint_values(row,1.0f);
     }
-    const auto result = target_->EndDraw();
+    target_->PopAxisAlignedClip();
+    const auto result=target_->EndDraw();
     if (result == D2DERR_RECREATE_TARGET) { release_surface(); return; }
     require_hr(result,"Transparent table paint");
     RECT rect{}; GetWindowRect(hwnd_,&rect); POINT destination{rect.left,rect.top}, source{};
@@ -905,6 +1016,7 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         case summary_control: if (HIWORD(wp)==BN_CLICKED) apply_client(); return 0;
         case header_colors_control: if (HIWORD(wp)==BN_CLICKED) apply_client(); return 0;
         case row_colors_control: if (HIWORD(wp)==BN_CLICKED) apply_client(); return 0;
+        case animation_control: if (HIWORD(wp)==BN_CLICKED) apply_client(); return 0;
         case move_control: moving_=SendDlgItemMessageW(window,move_control,BM_GETCHECK,0,0)==BST_CHECKED; movement(); return 0;
         case visible_control: set_visible(SendDlgItemMessageW(window,visible_control,BM_GETCHECK,0,0)==BST_CHECKED); return 0;
         case quit_app: DestroyWindow(hwnd_); return 0;
@@ -924,6 +1036,18 @@ LRESULT Overlay::message(UINT msg,WPARAM wp,LPARAM lp) {
     switch (msg) {
     case WM_ERASEBKGND: return 1;
     case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+    case WM_TIMER:
+        if(wp==overlay_animation_timer) {
+            if(!row_animation_active_ ||
+                GetTickCount64()-row_animation_started_>=row_animation_duration_ms_) {
+                KillTimer(hwnd_,overlay_animation_timer);
+                row_animation_active_=false;
+                previous_rows_.clear();row_motion_.clear();
+            }
+            if(visible_) InvalidateRect(hwnd_,nullptr,FALSE);
+            return 0;
+        }
+        break;
     case WM_PAINT: { PAINTSTRUCT data{}; BeginPaint(hwnd_,&data); EndPaint(hwnd_,&data); paint(); return 0; }
     case WM_SIZE: if (visible_) InvalidateRect(hwnd_,nullptr,FALSE); return 0;
     case WM_DPICHANGED: {
@@ -954,6 +1078,9 @@ LRESULT Overlay::message(UINT msg,WPARAM wp,LPARAM lp) {
     case WM_DESTROY: {
         if (foreground_hook_) { UnhookWinEvent(foreground_hook_); foreground_hook_ = nullptr; }
         foreground_update_target = nullptr;
+        KillTimer(hwnd_,overlay_animation_timer);
+        row_animation_active_=false;
+        previous_rows_.clear();row_motion_.clear();
         stopping_=true; save_settings(); worker_.stop(); icons_.reset();
         if (client_) DestroyWindow(client_);
         NOTIFYICONDATAW data{}; data.cbSize=sizeof(data); data.hWnd=hwnd_; data.uID=1;
