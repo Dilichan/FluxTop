@@ -41,7 +41,7 @@ Options parse_options(std::span<const std::string_view> args) {
                     options.interval_ms = number;
                     options.interval_explicit = true;
                 } else if (arg == "--font-size") {
-                    if (number < 10 || number > 36) throw std::invalid_argument("Font size must be 10..36 px");
+                    if (number < 5 || number > 42) throw std::invalid_argument("Font size must be 5..42 px");
                     options.font_size = number; options.font_explicit = true;
                 } else if (arg == "--samples") options.samples = number;
                 else { options.top = number; options.top_explicit = true; }
@@ -70,7 +70,7 @@ std::string_view usage() {
            "  --jsonl          UTF-8 JSON Lines, diagnostics on stderr\n"
            "  --overlay        Native overlay and tray (1..100 rows)\n"
            "  --tray           Start overlay without opening the client\n"
-           "  --font-size N    Overlay text size, 10..36 px (default: 16)\n"
+           "  --font-size N    Overlay text size, 5..42 px (default: 16)\n"
            "  --help, -h       Show help\n"
            "  --version        Show version\n"
            "Unknown metrics: '-' in text, null in JSON. CPU: whole-machine percent.\n";

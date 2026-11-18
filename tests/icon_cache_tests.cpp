@@ -38,6 +38,16 @@ int wmain(int argc, wchar_t** argv) {
             const auto count = cache.stats().extractions;
             cache.request(1000000+3*20+19,0);
             check(cache.stats().extractions==count,"Negative result was not cached");
+            cache.set_capacity(116); // 100 visible applications + 16 slots for churn.
+            check(cache.stats().capacity==116,"Adaptive icon capacity is wrong");
+            for (unsigned i=0;i<100;++i) cache.request(2000000+i,0);
+            check(ready.wait_for(lock,std::chrono::seconds(20),[&] { return cache.stats().pending==0; }),
+                "Adaptive icon queue timed out");
+            check(cache.stats().entries>=100 && cache.stats().entries<=116,
+                "Adaptive cache could not keep 100 applications");
+            cache.set_capacity(32);
+            check(cache.stats().capacity==32 && cache.stats().entries<=32,
+                "Shrinking the icon cache did not release old entries");
         }
         {
             fluxtop::AppIconCache cache(path,notify);

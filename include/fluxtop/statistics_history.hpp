@@ -1,0 +1,38 @@
+#pragma once
+#include <cstdint>
+#include <filesystem>
+#include <optional>
+#include <stop_token>
+#include <string>
+#include <utility>
+#include <string_view>
+#include <vector>
+
+namespace fluxtop {
+// A score is the existing AutoRank heuristic, evaluated with all six resource inputs.
+// Historic scores begin when schema 2 starts recording them; older raw metrics remain intact.
+struct StatisticsApplication {
+    std::int64_t id{};
+    std::wstring name;
+    std::wstring path;
+    double observed_seconds{};
+    std::int64_t last_seen_ms{};
+    std::vector<std::pair<std::int64_t,double>> points;
+};
+struct StatisticsHistory {
+    std::int64_t first_record_ms{};
+    std::int64_t last_record_ms{};
+    bool scores_available{};
+    std::vector<StatisticsApplication> uptime;
+    std::vector<StatisticsApplication> history;
+    std::vector<StatisticsApplication> recent;
+    std::wstring error;
+};
+// UTC epoch milliseconds; start is inclusive, end is exclusive. All DB reads
+// are read-only and cancellable; the UI must call this on a worker thread.
+StatisticsHistory read_statistics(const std::filesystem::path& file,
+    std::int64_t from_ms,std::int64_t to_ms,unsigned limit,bool include_system,
+    std::stop_token stop);
+// Use the real Windows directory, not a hard-coded system-drive assumption.
+bool statistics_is_system(std::wstring_view name,std::wstring_view path);
+}

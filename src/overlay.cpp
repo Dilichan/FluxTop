@@ -1,5 +1,6 @@
 #include "fluxtop/overlay.hpp"
 #include "fluxtop/overlay_layout.hpp"
+#include "fluxtop/statistics_page.hpp"
 #include "fluxtop/app_icons.hpp"
 #include "fluxtop/autostart.hpp"
 #include "fluxtop/sampler.hpp"
@@ -28,9 +29,9 @@ constexpr wchar_t client_class[] = L"FluxTop.Client.Window";
 constexpr UINT sample_message = WM_APP + 10, tray_message = WM_APP + 11, icon_message = WM_APP + 12;
 constexpr UINT foreground_update_message = WM_APP + 13;
 constexpr int toggle_hotkey = 1, client_hotkey = 2;
-enum Control : UINT { open_client = 100, toggle_table, quit_app, top_control, sort_control, font_control,
+enum Control : UINT { open_client = 100, toggle_table, quit_app, top_label, top_control, sort_control, font_control,
     alpha_control, visible_control, move_control, icons_control, stats_control, startup_control,
-    alpha_label, interval_control, summary_control, header_colors_control, row_colors_control, metric_control = 200 };
+    alpha_label, interval_control, summary_control, header_colors_control, row_colors_control, metric_control = 200, tab_control = 450 };
 constexpr unsigned all_metrics = 31;
 constexpr int load_band(double x) { return x < 50.0 ? 0 : x < 70.0 ? 1 : 2; }
 constexpr int temperature_band(double x) { return x < 65.0 ? 0 : x <= 80.0 ? 1 : 2; }
@@ -117,6 +118,7 @@ private:
     void add_tray();
     void tray_menu();
     void show_client();
+    void switch_page(unsigned page);
     void init_client();
     void layout_client();
     void apply_client();
@@ -150,7 +152,9 @@ private:
     }
 
     Options options_;
-    HWND hwnd_{}, client_{};
+    HWND hwnd_{}, client_{}, tabs_{};
+    unsigned client_page_{};
+    std::unique_ptr<StatisticsPage> statistics_;
     HICON icon_{}, large_icon_{};
     HWINEVENTHOOK foreground_hook_{};
     DWORD focused_pid_{};
@@ -215,7 +219,7 @@ void Overlay::load_settings() {
     row_colors_ = read(L"row_colors", 1) != 0;
     if (!options_.interval_explicit) options_.interval_ms = static_cast<unsigned>(std::clamp(read(L"interval_ms", 1000), 1000, 10000));
     show_icons_ = read(L"icons", 1) != 0;
-    if (!options_.font_explicit) options_.font_size = static_cast<unsigned>(std::clamp(read(L"font_size", 16), 10, 36));
+    if (!options_.font_explicit) options_.font_size = static_cast<unsigned>(std::clamp(read(L"font_size", 16), 5, 42));
     if (!options_.top_explicit) {
         options_.top = static_cast<unsigned>(std::clamp(read(L"top", 10), 1, 100));
     }
@@ -344,18 +348,32 @@ void Overlay::show_client() {
 }
 void Overlay::init_client() {
     initializing_client_ = true;
+    tabs_=CreateWindowExW(0,WC_TABCONTROLW,L"",WS_CHILD|WS_VISIBLE|WS_CLIPSIBLINGS|WS_TABSTOP,
+        0,0,580,840,client_,reinterpret_cast<HMENU>(static_cast<INT_PTR>(tab_control)),GetModuleHandleW(nullptr),nullptr);
+    if(!tabs_) throw windows_error("Create client tabs");
+    TCITEMW item{};item.mask=TCIF_TEXT;
+    item.pszText=const_cast<LPWSTR>(L"Настройки");TabCtrl_InsertItem(tabs_,0,&item);
+    item.pszText=const_cast<LPWSTR>(L"Статистика");TabCtrl_InsertItem(tabs_,1,&item);
     control(L"STATIC", L"Оверлей поверх приложений", 0, 0, 22, 18, 540, 25);
     control(L"STATIC", (L"Версия " + wide(FLUXTOP_VERSION)).c_str(), SS_RIGHT, 0, 418, 18, 140, 25);
-    control(L"STATIC", L"Количество приложений (1–100)", 0, 0, 22, 62, 260, 24);
-    const auto top = control(L"EDIT", std::to_wstring(options_.top).c_str(), WS_BORDER | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, top_control, 290, 58, 268, 29);
-    SendMessageW(top, EM_SETLIMITTEXT, 3, 0);
+    control(L"STATIC", (L"Количество приложений: " + std::to_wstring(options_.top) + L" / 100").c_str(),
+        0, top_label, 22, 62, 268, 24);
+    const auto top = control(TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP,
+        top_control, 290, 58, 268, 32);
+    SendMessageW(top, TBM_SETRANGE, TRUE, MAKELPARAM(1,100));
+    SendMessageW(top, TBM_SETPOS, TRUE, static_cast<LPARAM>(options_.top));
     control(L"STATIC", L"Сортировка", 0, 0, 22, 106, 230, 24);
     const auto sort = control(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, sort_control, 290, 102, 268, 160);
     for (const auto label : {L"CPU", L"RAM", L"GPU", L"Память GPU", L"Авто — рейтинг и всплески", L"Rx — приём", L"Tx — передача", L"Rx/Tx — суммарный трафик"}) SendMessageW(sort, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
     SendMessageW(sort, CB_SETCURSEL, static_cast<WPARAM>(options_.sort), 0);
-    control(L"STATIC", L"Размер текста, px (10–36)", 0, 0, 22, 150, 250, 24);
-    const auto edit = control(L"EDIT", std::to_wstring(options_.font_size).c_str(), WS_BORDER | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, font_control, 290, 146, 268, 29);
-    SendMessageW(edit, EM_SETLIMITTEXT, 2, 0);
+    control(L"STATIC", L"Размер текста, px (5–42)", 0, 0, 22, 150, 250, 24);
+    const auto font = control(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL,
+        font_control, 290, 146, 268, 360);
+    for (unsigned size=5; size<=42; ++size) {
+        const auto label=std::to_wstring(size);
+        SendMessageW(font, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+    }
+    SendMessageW(font, CB_SETCURSEL, static_cast<WPARAM>(options_.font_size-5), 0);
     control(L"STATIC", (L"Непрозрачность: " + std::to_wstring(opacity_) + L"%").c_str(), 0, alpha_label, 22, 194, 260, 24);
     const auto alpha = control(TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, alpha_control, 290, 190, 268, 32);
     SendMessageW(alpha, TBM_SETRANGE, TRUE, MAKELPARAM(1,100));
@@ -390,7 +408,14 @@ void Overlay::init_client() {
     control(L"STATIC", L"", 0, stats_control, 22, 567, 536, 136);
     control(L"STATIC", L"Ctrl+Alt+F9 — клиент   ·   Ctrl+Alt+F10 — оверлей", 0, 0, 22, 711, 540, 24);
     control(L"BUTTON", L"Завершить работу", WS_TABSTOP, quit_app, 373, 743, 185, 32);
+    statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,options_.top);
+    statistics_->activate(false);
     initializing_client_ = false; client_stats();
+}
+void Overlay::switch_page(unsigned page) {
+    client_page_=page==1?1:0;
+    for(const auto& child:controls_) ShowWindow(child.window,client_page_==0?SW_SHOW:SW_HIDE);
+    if(statistics_) statistics_->activate(client_page_==1);
 }
 void Overlay::layout_client() {
     if (!client_) return;
@@ -399,24 +424,26 @@ void Overlay::layout_client() {
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     for (const auto& child : controls_) {
         SendMessageW(child.window, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-        MoveWindow(child.window, px(child.bounds.left), px(child.bounds.top), px(child.bounds.right-child.bounds.left), px(child.bounds.bottom-child.bounds.top), TRUE);
+        MoveWindow(child.window, px(child.bounds.left), px(child.bounds.top+40), px(child.bounds.right-child.bounds.left), px(child.bounds.bottom-child.bounds.top), TRUE);
     }
+    if(tabs_) MoveWindow(tabs_,0,0,px(580),px(840),TRUE);
+    if(statistics_) statistics_->resize(px(12),px(40),px(556),px(785));
     if (client_font_) DeleteObject(client_font_); client_font_ = font;
-    RECT rect{0,0,px(580),px(800)};
+    RECT rect{0,0,px(580),px(840)};
     AdjustWindowRectExForDpi(&rect, static_cast<DWORD>(GetWindowLongPtrW(client_, GWL_STYLE)), FALSE, 0, client_dpi_);
     SetWindowPos(client_, nullptr, 0, 0, rect.right-rect.left, rect.bottom-rect.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 void Overlay::apply_client() {
     const auto old_font_size = options_.font_size;
-    BOOL valid_size{}, valid_top{}, valid_interval{};
-    const auto size = GetDlgItemInt(client_, font_control, &valid_size, FALSE);
-    const auto top = GetDlgItemInt(client_, top_control, &valid_top, FALSE);
+    BOOL valid_interval{};
+    const auto selected_font = SendDlgItemMessageW(client_,font_control,CB_GETCURSEL,0,0);
+    const auto top = SendDlgItemMessageW(client_,top_control,TBM_GETPOS,0,0);
     const auto selected_sort = SendDlgItemMessageW(client_, sort_control, CB_GETCURSEL, 0, 0);
     const auto seconds = GetDlgItemInt(client_, interval_control, &valid_interval, FALSE);
     const auto alpha = SendDlgItemMessageW(client_, alpha_control, TBM_GETPOS, 0, 0);
     if (alpha < 1 || alpha > 100 || selected_sort < 0 || selected_sort > 7) return;
-    if (valid_top && top >= 1 && top <= 100) options_.top = top;
-    if (valid_size && size >= 10 && size <= 36) options_.font_size = size;
+    if (top >= 1 && top <= 100) options_.top = static_cast<unsigned>(top);
+    if (selected_font >= 0 && selected_font <= 37) options_.font_size = static_cast<unsigned>(selected_font + 5);
     if (options_.gpu || (selected_sort != 2 && selected_sort != 3)) options_.sort = static_cast<Sort>(selected_sort);
     else SendDlgItemMessageW(client_, sort_control, CB_SETCURSEL, static_cast<WPARAM>(options_.sort), 0);
     if (valid_interval && seconds >= 1 && seconds <= 10 && seconds*1000 != options_.interval_ms) {
@@ -424,6 +451,7 @@ void Overlay::apply_client() {
     }
     opacity_ = static_cast<unsigned>(alpha); show_icons_ = SendDlgItemMessageW(client_, icons_control, BM_GETCHECK, 0, 0) == BST_CHECKED;
     SetDlgItemTextW(client_, alpha_label, (L"Непрозрачность: " + std::to_wstring(opacity_) + L"%").c_str());
+    SetDlgItemTextW(client_, top_label, (L"Количество приложений: " + std::to_wstring(options_.top) + L" / 100").c_str());
     metrics_ = 0;
     for (unsigned i=0;i<metric_names.size();++i) if (SendDlgItemMessageW(client_,metric_control+i,BM_GETCHECK,0,0)==BST_CHECKED) metrics_ |= 1U<<i;
     summary_ = SendDlgItemMessageW(client_,summary_control,BM_GETCHECK,0,0)==BST_CHECKED;
@@ -431,6 +459,7 @@ void Overlay::apply_client() {
     row_colors_ = SendDlgItemMessageW(client_,row_colors_control,BM_GETCHECK,0,0)==BST_CHECKED;
     scroll_ = 0; if (old_font_size != options_.font_size) fonts();
     fit_table(); update_view(); save_settings(); client_stats();
+    if(statistics_) statistics_->set_limit(options_.top);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 void Overlay::client_stats() {
@@ -443,7 +472,7 @@ void Overlay::client_stats() {
             + L"\r\nМонитор: CPU " + percent(s.self_cpu_percent) + L"   ·   RAM " + memory(s.self_working_set)
             + L"\r\nДоступ: " + (s.elevated.value_or(false) ? std::wstring(L"администратор") : std::wstring(L"обычный"))
             + L"   ·   GPU: " + wide(s.gpu_status) + L"   ·   Время сбора: " + decimal(s.collection_ms) + L" мс";
-        info += L"\r\nИконок в памяти: " + std::to_wstring(icons_ ? icons_->stats().entries : 0) + L" / 64";
+        info += L"\r\nИконок в памяти: " + std::to_wstring(icons_ ? icons_->stats().entries : 0) + L" / " + std::to_wstring(icons_ ? icons_->stats().capacity : std::clamp<std::size_t>(static_cast<std::size_t>(options_.top)+16,32,128));
         info += L"   ·   Сеть: " + wide(s.network_status);
         info += L"\r\nЗаписей показателей в БД: " + (s.history_records ? std::to_wstring(*s.history_records) : L"—");
         if (!s.history_error.empty()) info += L"\r\nОшибка записи истории: " + wide(s.history_error);
@@ -480,6 +509,7 @@ void Overlay::receive() {
         grouped_processes_=aggregate_application_processes(snapshot_->processes);
         grouped_spikes_.update(grouped_processes_,snapshot_->total_ram_capacity,
             snapshot_->total_gpu_memory_capacity);
+        if(statistics_) statistics_->on_snapshot(snapshot_->timestamp_ms,grouped_processes_);
     }
     update_view(); client_stats();
     if (visible_) InvalidateRect(hwnd_, nullptr, FALSE);
@@ -526,6 +556,7 @@ void Overlay::update_view() {
         if (!icons_) icons_ = std::make_unique<AppIconCache>(local_file(L"FLUXTOP_ICON_DB", L"icons.db"), [this] {
             if (!icon_posted_.exchange(true)) PostMessageW(hwnd_, icon_message, 0, 0);
         });
+        icons_->set_capacity(std::clamp<std::size_t>(static_cast<std::size_t>(options_.top)+16,32,128));
         for (const auto& row : next) icons_->request(row.pid,row.created);
     } else if (!show_icons_ || summary_only()) icons_.reset();
     if (next != rows_) { rows_ = std::move(next); if (visible_) InvalidateRect(hwnd_, nullptr, FALSE); }
@@ -787,22 +818,41 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         break;
     case WM_DPICHANGED: { client_dpi_=HIWORD(wp); const auto* r=reinterpret_cast<RECT*>(lp); SetWindowPos(window,nullptr,r->left,r->top,0,0,SWP_NOSIZE|SWP_NOZORDER); layout_client(); return 0; }
     case WM_HSCROLL:
+        if (reinterpret_cast<HWND>(lp)==GetDlgItem(window,top_control)) {
+            const auto selected=static_cast<unsigned>(SendDlgItemMessageW(window,top_control,TBM_GETPOS,0,0));
+            SetDlgItemTextW(window,top_label,(L"Количество приложений: " + std::to_wstring(selected) + L" / 100").c_str());
+            if (LOWORD(wp)==TB_ENDTRACK || LOWORD(wp)==TB_THUMBPOSITION) {
+                KillTimer(window,settings_timer);
+                apply_client();
+            } else SetTimer(window,settings_timer,150,nullptr);
+            return 0;
+        }
         if (reinterpret_cast<HWND>(lp)==GetDlgItem(window,alpha_control)) {
             opacity_=static_cast<unsigned>(SendDlgItemMessageW(window,alpha_control,TBM_GETPOS,0,0));
             SetDlgItemTextW(window,alpha_label,(L"Непрозрачность: "+std::to_wstring(opacity_)+L"%").c_str());
             InvalidateRect(hwnd_,nullptr,FALSE); SetTimer(window,settings_timer,300,nullptr); return 0;
         }
         break;
+    case WM_NOTIFY:
+        if(tabs_ && reinterpret_cast<NMHDR*>(lp)->hwndFrom==tabs_
+            && reinterpret_cast<NMHDR*>(lp)->code==TCN_SELCHANGE) {
+            switch_page(static_cast<unsigned>(TabCtrl_GetCurSel(tabs_)));
+            return 0;
+        }
+        break;
     case WM_COMMAND:
         if (initializing_client_) return 0;
-        if ((LOWORD(wp)==top_control || LOWORD(wp)==font_control || LOWORD(wp)==interval_control) && HIWORD(wp)==EN_CHANGE) {
+        if (LOWORD(wp)==interval_control && HIWORD(wp)==EN_CHANGE) {
             SetTimer(window,settings_timer,300,nullptr); return 0;
         }
-        if ((LOWORD(wp)==top_control || LOWORD(wp)==font_control || LOWORD(wp)==interval_control) && HIWORD(wp)==EN_KILLFOCUS) {
+        if (LOWORD(wp)==interval_control && HIWORD(wp)==EN_KILLFOCUS) {
             KillTimer(window,settings_timer); apply_client();
             initializing_client_=true;
-            SetDlgItemInt(window,LOWORD(wp),LOWORD(wp)==top_control ? options_.top : LOWORD(wp)==font_control ? options_.font_size : std::clamp(options_.interval_ms/1000,1U,10U),FALSE);
+            SetDlgItemInt(window,interval_control,std::clamp(options_.interval_ms/1000,1U,10U),FALSE);
             initializing_client_=false; return 0;
+        }
+        if (LOWORD(wp)==font_control && HIWORD(wp)==CBN_SELCHANGE) {
+            apply_client(); return 0;
         }
         if (LOWORD(wp)==sort_control && HIWORD(wp)==CBN_SELCHANGE) {
             apply_client(); return 0;
@@ -832,7 +882,7 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         break;
     case WM_CLOSE: KillTimer(window,settings_timer); apply_client(); DestroyWindow(window); return 0;
     case WM_DESTROY:
-        client_=nullptr; controls_.clear(); if (client_font_) { DeleteObject(client_font_); client_font_=nullptr; } activity(); return 0;
+        statistics_.reset(); tabs_=nullptr; client_=nullptr; controls_.clear(); if (client_font_) { DeleteObject(client_font_); client_font_=nullptr; } activity(); return 0;
     }
     return DefWindowProcW(window,msg,wp,lp);
 }
@@ -891,7 +941,7 @@ int run_overlay(const Options& options) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     const auto com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
     struct Scope { bool active; ~Scope() { if (active) CoUninitialize(); } } scope{SUCCEEDED(com)};
-    INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_STANDARD_CLASSES|ICC_BAR_CLASSES}; InitCommonControlsEx(&controls);
+    INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_STANDARD_CLASSES|ICC_BAR_CLASSES|ICC_TAB_CLASSES|ICC_LISTVIEW_CLASSES|ICC_DATE_CLASSES}; InitCommonControlsEx(&controls);
     FreeConsole();
     try { Overlay app(options); return app.run(); }
     catch (const std::exception& error) {

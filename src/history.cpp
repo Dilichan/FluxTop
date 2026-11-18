@@ -59,14 +59,15 @@ struct HistoryWriter::Impl {
     std::string session;
     struct ProcessId { std::optional<std::uint64_t> creation; sqlite3_int64 id; };
     std::unordered_map<std::uint32_t, ProcessId> live;
-    std::unique_ptr<Statement> app_insert, app_select, process_insert, process_select, sample_insert, measurement_insert, counter;
+    std::unique_ptr<Statement> app_insert, app_select, process_insert, process_select, sample_insert, measurement_insert, counter, score_insert;
+    SpikeTracker score_tracker;
     explicit Impl(std::filesystem::path file) : path(std::move(file)) {
         LARGE_INTEGER ticks{}; QueryPerformanceCounter(&ticks);
         session = std::to_string(GetCurrentProcessId()) + ":" + std::to_string(ticks.QuadPart);
     }
     void close() noexcept {
         app_insert.reset(); app_select.reset(); process_insert.reset(); process_select.reset();
-        sample_insert.reset(); measurement_insert.reset(); counter.reset();
+        sample_insert.reset(); measurement_insert.reset(); counter.reset(); score_insert.reset();
         live.clear(); if (db) sqlite3_close(db); db = nullptr;
     }
     ~Impl() { close(); }
@@ -99,6 +100,16 @@ struct HistoryWriter::Impl {
             "CREATE INDEX measurements_process_time ON measurements(process_instance_id,sample_id);"
             "CREATE TABLE history_state(id INTEGER PRIMARY KEY CHECK(id=1), measurement_count INTEGER NOT NULL);"
             "INSERT INTO history_state VALUES(1,0); PRAGMA user_version=1; COMMIT;");
+        // Add an optional score table while keeping user_version=1 for rollback
+        // compatibility with published 0.2.2 clients (they ignore this table).
+        execute(db,
+            "BEGIN IMMEDIATE;"
+            "CREATE TABLE IF NOT EXISTS application_scores("
+            "sample_id INTEGER NOT NULL REFERENCES snapshots(id),"
+            "application_id INTEGER NOT NULL REFERENCES applications(id),"
+            "score REAL NOT NULL, PRIMARY KEY(sample_id,application_id)) WITHOUT ROWID;"
+            "CREATE INDEX IF NOT EXISTS application_scores_app ON application_scores(application_id,sample_id);"
+            "COMMIT;");
         Statement state(db, "SELECT measurement_count FROM history_state WHERE id=1");
         if (state.step() != SQLITE_ROW) throw std::runtime_error("History record counter missing");
         count = static_cast<std::uint64_t>(sqlite3_column_int64(state.value, 0));
@@ -109,6 +120,8 @@ struct HistoryWriter::Impl {
         sample_insert = std::make_unique<Statement>(db, "INSERT INTO snapshots(timestamp_ms,interval_ms,cpu_percent,ram_used_bytes,ram_capacity_bytes,gpu_percent,gpu_memory_bytes,rx_bytes_per_second,tx_bytes_per_second,network_status,gpu_status) VALUES(?,?,?,?,?,?,?,?,?,?,?)");
         measurement_insert = std::make_unique<Statement>(db, "INSERT INTO measurements VALUES(?,?,?,?,?,?,?,?,?)");
         counter = std::make_unique<Statement>(db, "UPDATE history_state SET measurement_count=measurement_count+? WHERE id=1");
+        score_insert = std::make_unique<Statement>(db,
+            "INSERT OR REPLACE INTO application_scores(sample_id,application_id,score) VALUES(?,?,?)");
     }
     sqlite3_int64 process(const Process& row, std::int64_t timestamp) {
         if (const auto found = live.find(row.pid); found != live.end() && found->second.creation == row.creation_time)
@@ -130,6 +143,9 @@ struct HistoryWriter::Impl {
     }
     void append(const Snapshot& snapshot) {
         execute(db, "BEGIN IMMEDIATE");
+        // Identical aggregate + AutoRank heuristic as the live Auto overlay.
+        auto groups=aggregate_application_processes(snapshot.processes);
+        score_tracker.update(groups,snapshot.total_ram_capacity,snapshot.total_gpu_memory_capacity);
         auto& sample = *sample_insert; sample.reset();
         sample.integer(1, static_cast<std::uint64_t>(snapshot.timestamp_ms)); sample.optional(2, std::optional(snapshot.interval_ms));
         sample.optional(3, snapshot.total_cpu_percent); sample.optional(4, snapshot.total_ram_used); sample.optional(5, snapshot.total_ram_capacity);
@@ -147,6 +163,18 @@ struct HistoryWriter::Impl {
             insert.optional(6, row.gpu_percent); insert.optional(7, row.dedicated_gpu_bytes);
             insert.optional(8, row.rx_bytes_per_second); insert.optional(9, row.tx_bytes_per_second); insert.step();
             next.emplace(row.pid, ProcessId{row.creation_time, instance});
+        }
+        for (const auto& group: groups) {
+            const auto identity=group.exe_path ? "path:"+*group.exe_path : "name:"+group.name;
+            auto& lookup=*app_select;lookup.reset();lookup.text(1,identity);
+            if (lookup.step()!=SQLITE_ROW) throw std::runtime_error("AutoScore application missing");
+            const auto app_id=sqlite3_column_int64(lookup.value,0);
+            auto& score=*score_insert;score.reset();
+            score.integer(1,static_cast<std::uint64_t>(sample_id));
+            score.integer(2,static_cast<std::uint64_t>(app_id));
+            if(sqlite3_bind_double(score.value,3,auto_rank(group,31U).score)!=SQLITE_OK)
+                throw std::runtime_error("Cannot bind AutoScore");
+            score.step();
         }
         counter->reset(); counter->integer(1, snapshot.processes.size()); counter->step();
         // Read the transactional counter so simultaneous collectors cannot lose increments.

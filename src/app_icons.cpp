@@ -18,7 +18,7 @@
 namespace fluxtop {
 namespace {
 using Microsoft::WRL::ComPtr;
-constexpr std::size_t memory_limit = 64, queue_limit = 32;
+constexpr std::size_t default_memory_limit = 64;
 struct Key {
     std::uint32_t pid{};
     std::uint64_t created{};
@@ -168,8 +168,21 @@ struct AppIconCache::Impl {
     std::unordered_map<Key, Entry, Hash> entries;
     std::deque<Key> queue;
     std::uint64_t clock{};
+    std::size_t capacity = default_memory_limit;
     IconCacheStats counters;
     std::jthread thread;
+
+    // Called only with mutex held. Never evict in-flight icon requests.
+    void trim(std::size_t maximum) {
+        while (entries.size() > maximum) {
+            auto oldest = entries.end();
+            for (auto it = entries.begin(); it != entries.end(); ++it)
+                if (!it->second.pending && (oldest == entries.end() || it->second.used < oldest->second.used))
+                    oldest = it;
+            if (oldest == entries.end()) return;
+            entries.erase(oldest);
+        }
+    }
 
     Impl(std::filesystem::path database, std::function<void()> ready) {
         thread = std::jthread([this, database = std::move(database), ready = std::move(ready)](std::stop_token stop) {
@@ -202,6 +215,7 @@ struct AppIconCache::Impl {
                     {
                         std::lock_guard lock(mutex);
                         if (const auto found = entries.find(requested); found != entries.end()) { found->second.image = std::move(image); found->second.pending = false; }
+                        trim(capacity);
                         if (hit) ++counters.disk_hits; else ++counters.extractions;
                     }
                     ready();
@@ -215,18 +229,19 @@ struct AppIconCache::Impl {
 AppIconCache::AppIconCache(std::filesystem::path path, std::function<void()> ready)
     : impl_(std::make_unique<Impl>(std::move(path), std::move(ready))) {}
 AppIconCache::~AppIconCache() = default;
+void AppIconCache::set_capacity(std::size_t capacity) {
+    std::lock_guard lock(impl_->mutex);
+    impl_->capacity = std::clamp<std::size_t>(capacity,16,128);
+    impl_->trim(impl_->capacity);
+}
 void AppIconCache::request(std::uint32_t pid, std::optional<std::uint64_t> created) {
     std::lock_guard lock(impl_->mutex);
     const auto requested = key(pid, created);
     if (const auto found = impl_->entries.find(requested); found != impl_->entries.end()) { found->second.used = ++impl_->clock; return; }
-    if (impl_->queue.size() >= queue_limit) return;
-    if (impl_->entries.size() >= memory_limit) {
-        auto oldest = impl_->entries.end();
-        for (auto it = impl_->entries.begin(); it != impl_->entries.end(); ++it)
-            if (!it->second.pending && (oldest == impl_->entries.end() || it->second.used < oldest->second.used)) oldest = it;
-        if (oldest == impl_->entries.end()) return;
-        impl_->entries.erase(oldest);
-    }
+    // The request queue and memory budget scale together with the visible row count.
+    if (impl_->queue.size() >= impl_->capacity) return;
+    impl_->trim(impl_->capacity - 1);
+    if (impl_->entries.size() >= impl_->capacity) return;
     impl_->entries.emplace(requested, Impl::Entry{{}, ++impl_->clock, true});
     impl_->queue.push_back(requested); impl_->wake.notify_all();
 }
@@ -237,7 +252,7 @@ std::shared_ptr<const AppIcon> AppIconCache::get(std::uint32_t pid, std::optiona
 }
 IconCacheStats AppIconCache::stats() const {
     std::lock_guard lock(impl_->mutex);
-    auto stats = impl_->counters; stats.entries = impl_->entries.size();
+    auto stats = impl_->counters; stats.entries = impl_->entries.size(); stats.capacity = impl_->capacity;
     for (const auto& [id, entry] : impl_->entries) { (void)id; if (entry.pending) ++stats.pending; }
     return stats;
 }

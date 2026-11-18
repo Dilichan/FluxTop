@@ -45,6 +45,8 @@ int main(int argc, char** argv) {
             check(s.history_error.empty() && s.history_records==5,"counter survives restart");
             Database db(path);
             check(db.scalar("SELECT COUNT(*) FROM applications")==2,"equal EXE names at different paths are distinct apps");
+            check(db.scalar("PRAGMA user_version")==1,"history format must remain compatible with v0.2.2");
+            check(db.scalar("SELECT COUNT(*) FROM application_scores")==5,"AutoScore must be written per application per snapshot");
             check(db.scalar("SELECT COUNT(*) FROM process_instances")==3,"stable process identities survive reopen and PID reuse");
             check(db.scalar("SELECT COUNT(*) FROM measurements WHERE cpu_percent IS NULL AND working_set_bytes=0")==2,"unknown is NULL, zero remains zero");
             check(db.scalar("SELECT COUNT(*) FROM measurements WHERE rx_bytes_per_second=12.5")==3,"network values persisted");

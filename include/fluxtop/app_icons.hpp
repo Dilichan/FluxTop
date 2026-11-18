@@ -14,7 +14,7 @@ struct AppIcon {
     std::array<std::byte, size * size * 4> pixels{}; // Premultiplied BGRA.
 };
 struct IconCacheStats {
-    std::size_t entries{}, pending{};
+    std::size_t entries{}, pending{}, capacity{};
     std::uint64_t disk_hits{}, extractions{};
     bool persistent{};
 };
@@ -26,6 +26,8 @@ public:
     ~AppIconCache();
     AppIconCache(const AppIconCache&) = delete;
     AppIconCache& operator=(const AppIconCache&) = delete;
+    // Configures the bounded working set to accommodate visible rows and churn.
+    void set_capacity(std::size_t capacity);
     void request(std::uint32_t pid, std::optional<std::uint64_t> created);
     std::shared_ptr<const AppIcon> get(std::uint32_t pid, std::optional<std::uint64_t> created);
     IconCacheStats stats() const;
