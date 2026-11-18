@@ -131,6 +131,105 @@ void spike_tests() {
     check(cpuRow != rows.end() && !fluxtop::auto_rank(*cpuRow).burst,
         "PID reuse must not generate a false change event");
 }
+void color_load_tests() {
+    constexpr std::uint64_t gib = 1073741824ULL;
+    fluxtop::Process p;
+    p.cpu_percent = 4.0;
+    p.gpu_percent = 73.0;
+    p.working_set = 4*gib;
+    p.dedicated_gpu_bytes = 4*gib + gib/2;
+    const auto near = [](std::optional<double> v, double target) {
+        return v && std::abs(*v-target) < 0.001;
+    };
+    check(near(fluxtop::auto_metric_load_percent(p,fluxtop::AutoMetric::cpu,128*gib,8*gib),4.0),
+        "CPU color is based on raw machine utilization, not weighted score");
+    check(near(fluxtop::auto_metric_load_percent(p,fluxtop::AutoMetric::gpu,128*gib,8*gib),73.0),
+        "GPU color is based on raw engine utilization");
+    check(near(fluxtop::auto_metric_load_percent(p,fluxtop::AutoMetric::ram,128*gib,8*gib),3.125),
+        "RAM color uses installed physical memory capacity");
+    check(near(fluxtop::auto_metric_load_percent(p,fluxtop::AutoMetric::vram,128*gib,8*gib),56.25),
+        "VRAM color uses GPU memory capacity, not AutoScore weight");
+    check(!fluxtop::auto_metric_load_percent(p,fluxtop::AutoMetric::ram,std::nullopt,8*gib),
+        "unknown RAM capacity gives unknown color, not a fabricated percentage");
+    check(!fluxtop::auto_metric_load_percent(p,fluxtop::AutoMetric::vram,128*gib,0),
+        "zero GPU memory capacity yields unknown color");
+    check(!fluxtop::auto_metric_load_percent(p,fluxtop::AutoMetric::rx,128*gib,8*gib),
+        "network rates have no percentage denominator; orange bursts remain separate");
+    p.dedicated_gpu_bytes = 12*gib;
+    check(near(fluxtop::auto_metric_load_percent(p,fluxtop::AutoMetric::vram,128*gib,8*gib),100.0),
+        "per-process GPU usage over reported capacity is capped for color purposes");
+}
+void orange_burst_visibility_tests() {
+    constexpr std::uint64_t gib = 1073741824ULL;
+    fluxtop::SpikeTracker tracker;
+    fluxtop::Process p;
+    p.pid = 801; p.creation_time = 42; p.gpu_percent = 40.0;
+    std::vector<fluxtop::Process> rows{p};
+    tracker.update(rows, 128*gib, 8*gib);
+    check(!fluxtop::auto_rank(rows[0]).burst, "first reading has no orange alert");
+    rows[0].gpu_percent = 43.0;
+    tracker.update(rows, 128*gib, 8*gib);
+    const auto small = fluxtop::auto_rank(rows[0]);
+    check(small.burst && small.metric == fluxtop::AutoMetric::gpu,
+        "GPU rise of 3 percentage points is orange, below old 20-point limit");
+    check(small.score < 50.0, "small visual alert does not inflate ranking with a large bonus");
+    tracker.update(rows, 128*gib, 8*gib);
+    check(!fluxtop::auto_rank(rows[0]).burst, "small burst fades on the next unchanged reading");
+    rows[0].gpu_percent = 43.5;
+    tracker.update(rows, 128*gib, 8*gib);
+    check(!fluxtop::auto_rank(rows[0]).burst, "tiny GPU jitter does not flash orange");
+    rows[0].gpu_percent = 53.5;
+    tracker.update(rows, 128*gib, 8*gib);
+    check(fluxtop::auto_rank(rows[0]).burst, "large GPU burst is orange");
+    tracker.update(rows, 128*gib, 8*gib);
+    check(fluxtop::auto_rank(rows[0]).burst, "large burst remains visible for another sample");
+    rows[0].creation_time = 43;
+    rows[0].gpu_percent = 85.0;
+    tracker.update(rows, 128*gib, 8*gib);
+    check(!fluxtop::auto_rank(rows[0]).burst, "PID reuse cannot create false orange alerts");
+    check(!fluxtop::auto_rank(rows[0], 3U).burst, "hidden GPU cannot trigger orange alerts");
+
+    fluxtop::SpikeTracker movement;
+    fluxtop::Process gpu, cpu;
+    gpu.pid=802; gpu.creation_time=1; gpu.gpu_percent=40.0;
+    cpu.pid=803; cpu.creation_time=1; cpu.cpu_percent=20.0;
+    std::vector<fluxtop::Process> ranking{gpu,cpu};
+    movement.update(ranking, 128*gib, 8*gib);
+    fluxtop::sort_processes(ranking, fluxtop::Sort::automatic);
+    check(ranking[0].pid==803, "CPU initially outranks GPU");
+    for (auto& row : ranking) if (row.pid==803) row.cpu_percent=5.0;
+    movement.update(ranking, 128*gib, 8*gib);
+    fluxtop::sort_processes(ranking, fluxtop::Sort::automatic);
+    check(ranking[0].pid==802 && !fluxtop::auto_rank(ranking[0]).burst,
+        "rank improvement caused by another process slowing down is not orange");
+}
+void per_metric_colors_and_bursts_tests() {
+    constexpr std::uint64_t gib = 1073741824ULL;
+    fluxtop::Process p;
+    p.gpu_percent=15.0;
+    p.dedicated_gpu_bytes=6*gib;
+    p.working_set=64*gib;
+    const auto gpu = fluxtop::auto_metric_load_percent(p,fluxtop::AutoMetric::gpu,128*gib,8*gib);
+    const auto vram = fluxtop::auto_metric_load_percent(p,fluxtop::AutoMetric::vram,128*gib,8*gib);
+    const auto ram = fluxtop::auto_metric_load_percent(p,fluxtop::AutoMetric::ram,128*gib,8*gib);
+    check(gpu && *gpu==15.0 && vram && *vram==75.0 && ram && *ram==50.0,
+        "independent cell percentages are raw loads, not AutoScore weights");
+    p.burst_scores = {0.0,6.0,4.9,5.0,0.0,7.0};
+    check(fluxtop::auto_metric_has_burst(p,fluxtop::AutoMetric::ram),
+        "RAM burst highlights RAM even when GPU dominates ranking");
+    check(!fluxtop::auto_metric_has_burst(p,fluxtop::AutoMetric::gpu),
+        "GPU without a significant burst is not orange");
+    check(fluxtop::auto_metric_has_burst(p,fluxtop::AutoMetric::vram),
+        "GPU RAM burst highlights independently of RAM and GPU");
+    check(!fluxtop::auto_metric_has_burst(p,fluxtop::AutoMetric::rx)
+        && fluxtop::auto_metric_has_burst(p,fluxtop::AutoMetric::tx),
+        "Rx/Tx burst tinting distinguishes reception from transmission");
+    check(!fluxtop::auto_metric_has_burst(p,fluxtop::AutoMetric::none),
+        "invalid metric has no burst");
+    p.burst_scores[2] = std::numeric_limits<double>::quiet_NaN();
+    check(!fluxtop::auto_metric_has_burst(p,fluxtop::AutoMetric::gpu),
+        "nonfinite burst cannot trigger coloring");
+}
 void output_tests() {
     check(fluxtop::json_escape("a\"\\\n\t\x01") == "\"a\\\"\\\\\\n\\t\\u0001\"", "JSON control escaping");
     check(fluxtop::json_escape("приложение") == "\"приложение\"", "UTF-8 preserved");
@@ -171,6 +270,9 @@ int main() {
     cpu_tests();
     sort_tests();
     spike_tests();
+    orange_burst_visibility_tests();
+    per_metric_colors_and_bursts_tests();
+    color_load_tests();
     output_tests();
     check(fluxtop::gpu_instance_pid(L"pid_123_luid_0x000_0_phys_0_eng_1") == 123U, "parse GPU PID");
     check(!fluxtop::gpu_instance_pid(L"pid_42949672960_luid_0"), "overflow rejected");

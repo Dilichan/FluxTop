@@ -58,6 +58,11 @@ private:
     std::unordered_map<std::uint32_t, Process> previous_;
 };
 AutoRank auto_rank(const Process& row, unsigned visible_metrics = 31U);
+// Independent per-cell orange flag, using the same threshold as AutoRank.
+bool auto_metric_has_burst(const Process& row, AutoMetric metric);
+// Actual utilization for colors, independent of weighted AutoScore. Network has no absolute capacity.
+std::optional<double> auto_metric_load_percent(const Process& row, AutoMetric metric,
+    std::optional<std::uint64_t> ram_capacity, std::optional<std::uint64_t> gpu_capacity);
 void sort_processes(std::vector<Process>& rows, Sort sort, unsigned visible_metrics = 31U);
 std::optional<std::uint32_t> gpu_instance_pid(const std::wstring& instance);
 

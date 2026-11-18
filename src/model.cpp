@@ -41,6 +41,8 @@ namespace {
 // These weights are engineering choices to be calibrated, not research constants.
 constexpr double mib = 1048576.0;
 constexpr double gib = 1073741824.0;
+// Visual alert threshold; distinct from the large ranking-bonus threshold (20).
+constexpr double orange_burst_threshold = 5.0;
 constexpr std::array<unsigned,6> visible_bits{1U,2U,4U,8U,16U,16U};
 std::array<std::optional<double>,6> metric_values(const Process& row) {
     return {row.cpu_percent,
@@ -107,7 +109,7 @@ void SpikeTracker::update(std::vector<Process>& rows,
             row.spike_score = std::max(row.spike_score,sudden);
             // Brief orange hold at 1-second sampling; a burst is not permanent.
             row.burst_scores[i] = std::max(sudden,
-                same ? found->second.burst_scores[i]*0.45 : 0.0);
+                same ? found->second.burst_scores[i]*0.35 : 0.0);
         }
         next.emplace(row.pid,row);
     }
@@ -141,10 +143,13 @@ AutoRank auto_rank(const Process& row, unsigned visible_metrics) {
     }
     // Scores are in 0..100 points. Complementary demand is bounded to 25%.
     result.score = std::clamp(top + 0.25*second,0.0,100.0);
-    // An important fresh change gets temporary priority and an orange label.
-    if (best_burst >= 20.0) {
-        result.score = std::clamp(std::max(result.score,0.85*best_burst)
-            + 0.20*best_burst,0.0,100.0);
+    // Positive changes are highlighted even below the separate 20-point ranking bonus.
+    // Moving up because another process slowed down is not a burst.
+    if (best_burst >= orange_burst_threshold) {
+        if (best_burst >= 20.0) {
+            result.score = std::clamp(std::max(result.score,0.85*best_burst)
+                + 0.20*best_burst,0.0,100.0);
+        }
         result.metric = burst_metric;
         result.burst = true;
     } else if (result.score >= 10.0) {
@@ -152,6 +157,39 @@ AutoRank auto_rank(const Process& row, unsigned visible_metrics) {
     }
     return result;
 }
+bool auto_metric_has_burst(const Process& row, AutoMetric metric) {
+    const auto ordinal = static_cast<std::size_t>(metric);
+    if (ordinal == 0 || ordinal > row.burst_scores.size()) return false;
+    const auto burst = row.burst_scores[ordinal-1];
+    return std::isfinite(burst) && burst >= orange_burst_threshold;
+}
+
+std::optional<double> auto_metric_load_percent(const Process& row, AutoMetric metric,
+    std::optional<std::uint64_t> ram_capacity, std::optional<std::uint64_t> gpu_capacity) {
+    const auto share = [](std::uint64_t used, std::optional<std::uint64_t> capacity) -> std::optional<double> {
+        if (!capacity || *capacity == 0) return std::nullopt;
+        return std::clamp(100.0 * static_cast<double>(used) / static_cast<double>(*capacity), 0.0, 100.0);
+    };
+    switch (metric) {
+    case AutoMetric::cpu:
+        if (row.cpu_percent && std::isfinite(*row.cpu_percent) && *row.cpu_percent >= 0.0)
+            return std::clamp(*row.cpu_percent, 0.0, 100.0);
+        break;
+    case AutoMetric::ram:
+        if (row.working_set) return share(*row.working_set, ram_capacity);
+        break;
+    case AutoMetric::gpu:
+        if (row.gpu_percent && std::isfinite(*row.gpu_percent) && *row.gpu_percent >= 0.0)
+            return std::clamp(*row.gpu_percent, 0.0, 100.0);
+        break;
+    case AutoMetric::vram:
+        if (row.dedicated_gpu_bytes) return share(*row.dedicated_gpu_bytes, gpu_capacity);
+        break;
+    default: break; // Rx/Tx have no capacity denominator; no steady-state percentage color.
+    }
+    return std::nullopt;
+}
+
 void sort_processes(std::vector<Process>& rows, Sort sort, unsigned visible_metrics) {
     const auto value = [sort,visible_metrics](const Process& row) -> std::optional<double> {
         switch (sort) {

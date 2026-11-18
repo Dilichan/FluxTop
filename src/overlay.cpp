@@ -28,7 +28,7 @@ constexpr UINT sample_message = WM_APP + 10, tray_message = WM_APP + 11, icon_me
 constexpr int toggle_hotkey = 1, client_hotkey = 2;
 enum Control : UINT { open_client = 100, toggle_table, quit_app, top_control, sort_control, font_control,
     alpha_control, visible_control, move_control, icons_control, stats_control, startup_control,
-    alpha_label, interval_control, summary_control, metric_control = 200 };
+    alpha_label, interval_control, summary_control, header_colors_control, row_colors_control, metric_control = 200 };
 constexpr unsigned all_metrics = 31;
 constexpr int load_band(double x) { return x < 50.0 ? 0 : x < 70.0 ? 1 : 2; }
 constexpr int temperature_band(double x) { return x < 65.0 ? 0 : x <= 80.0 ? 1 : 2; }
@@ -90,8 +90,9 @@ struct Row {
     std::uint32_t pid{};
     std::optional<std::uint64_t> created;
     std::wstring name, cpu, ram, gpu, vram, network;
-    AutoMetric highlight{AutoMetric::none};
-    bool burst{};
+    // Each visible numeric cell has its own utilization and burst color.
+    std::array<std::optional<double>,4> loads{}; // CPU / RAM / GPU / GPU RAM
+    std::array<bool,6> bursts{};                 // CPU / RAM / GPU / GPU RAM / Rx / Tx
     bool operator==(const Row&) const = default;
 };
 
@@ -126,7 +127,7 @@ private:
     void release_surface();
     void surface();
     void paint();
-    void draw_text(std::wstring_view value, D2D1_RECT_F rect, IDWriteTextFormat* font, bool highlight = false, bool burst = false);
+    void draw_text(std::wstring_view value, D2D1_RECT_F rect, IDWriteTextFormat* font, bool highlight = false, bool burst = false, std::optional<double> load = std::nullopt);
     void draw_header_metric(unsigned column, const std::wstring& reading, std::optional<double> load,
         std::optional<double> temperature, D2D1_RECT_F rect);
     void draw_network_text(const Row& row, D2D1_RECT_F rect);
@@ -159,6 +160,7 @@ private:
     unsigned opacity_ = 100;
     unsigned metrics_ = all_metrics;
     bool summary_ = false;
+    bool header_colors_ = true, row_colors_ = true;
     int x_ = CW_USEDEFAULT, y_ = CW_USEDEFAULT;
     std::wstring settings_;
     std::size_t scroll_{};
@@ -204,6 +206,8 @@ void Overlay::load_settings() {
     metrics_ = read(L"layout_version", 0) >= 3 ? saved_metrics & all_metrics
         : (saved_metrics & 15U) | ((saved_metrics & 48U) ? 16U : 0U);
     summary_ = read(L"summary_only", 0) != 0;
+    header_colors_ = read(L"header_colors", 1) != 0;
+    row_colors_ = read(L"row_colors", 1) != 0;
     if (!options_.interval_explicit) options_.interval_ms = static_cast<unsigned>(std::clamp(read(L"interval_ms", 1000), 1000, 10000));
     show_icons_ = read(L"icons", 1) != 0;
     if (!options_.font_explicit) options_.font_size = static_cast<unsigned>(std::clamp(read(L"font_size", 16), 10, 36));
@@ -224,6 +228,7 @@ void Overlay::save_settings() noexcept {
         save(L"font_size", static_cast<int>(options_.font_size)); save(L"top", static_cast<int>(options_.top));
         save(L"sort", static_cast<int>(options_.sort)); save(L"opacity", static_cast<int>(opacity_)); save(L"icons", show_icons_ ? 1 : 0);
         save(L"metrics", static_cast<int>(metrics_)); save(L"summary_only", summary_ ? 1 : 0);
+        save(L"header_colors", header_colors_ ? 1 : 0); save(L"row_colors", row_colors_ ? 1 : 0);
         save(L"interval_ms", static_cast<int>(options_.interval_ms));
     } catch (...) {}
 }
@@ -300,7 +305,8 @@ HWND Overlay::control(const wchar_t* kind, const wchar_t* label, DWORD style, UI
 }
 void Overlay::show_client() {
     if (client_) { ShowWindow(client_, SW_RESTORE); SetForegroundWindow(client_); return; }
-    client_ = CreateWindowExW(0, client_class, L"FluxTop", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+    const std::wstring client_title = L"FluxTop v" + wide(FLUXTOP_VERSION);
+    client_ = CreateWindowExW(0, client_class, client_title.c_str(), WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT, CW_USEDEFAULT, 640, 560, nullptr, nullptr, GetModuleHandleW(nullptr), this);
     if (!client_) throw windows_error("Create client");
     client_dpi_ = GetDpiForWindow(client_); layout_client();
@@ -309,6 +315,7 @@ void Overlay::show_client() {
 void Overlay::init_client() {
     initializing_client_ = true;
     control(L"STATIC", L"Таблица поверх приложений", 0, 0, 22, 18, 540, 25);
+    control(L"STATIC", (L"Версия " + wide(FLUXTOP_VERSION)).c_str(), SS_RIGHT, 0, 418, 18, 140, 25);
     control(L"STATIC", L"Количество приложений (1–100)", 0, 0, 22, 62, 260, 24);
     const auto top = control(L"EDIT", std::to_wstring(options_.top).c_str(), WS_BORDER | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, top_control, 290, 58, 268, 29);
     SendMessageW(top, EM_SETLIMITTEXT, 3, 0);
@@ -344,9 +351,15 @@ void Overlay::init_client() {
     const auto summary = control(L"BUTTON", L"Только общие показатели (без списка приложений)", BS_AUTOCHECKBOX | WS_TABSTOP,
         summary_control, 22, 487, 536, 26);
     SendMessageW(summary, BM_SETCHECK, summary_ ? BST_CHECKED : BST_UNCHECKED, 0);
-    control(L"STATIC", L"", 0, stats_control, 22, 531, 536, 140);
-    control(L"STATIC", L"Ctrl+Alt+F9 — клиент   ·   Ctrl+Alt+F10 — таблица", 0, 0, 22, 681, 540, 24);
-    control(L"BUTTON", L"Завершить работу", WS_TABSTOP, quit_app, 373, 715, 185, 32);
+    const auto header_colors = control(L"BUTTON", L"Окрашивать общие показатели", BS_AUTOCHECKBOX | WS_TABSTOP,
+        header_colors_control, 22, 520, 268, 26);
+    SendMessageW(header_colors, BM_SETCHECK, header_colors_ ? BST_CHECKED : BST_UNCHECKED, 0);
+    const auto row_colors = control(L"BUTTON", L"Окрашивать таблицу процессов", BS_AUTOCHECKBOX | WS_TABSTOP,
+        row_colors_control, 290, 520, 280, 26);
+    SendMessageW(row_colors, BM_SETCHECK, row_colors_ ? BST_CHECKED : BST_UNCHECKED, 0);
+    control(L"STATIC", L"", 0, stats_control, 22, 567, 536, 136);
+    control(L"STATIC", L"Ctrl+Alt+F9 — клиент   ·   Ctrl+Alt+F10 — таблица", 0, 0, 22, 711, 540, 24);
+    control(L"BUTTON", L"Завершить работу", WS_TABSTOP, quit_app, 373, 743, 185, 32);
     initializing_client_ = false; client_stats();
 }
 void Overlay::layout_client() {
@@ -359,7 +372,7 @@ void Overlay::layout_client() {
         MoveWindow(child.window, px(child.bounds.left), px(child.bounds.top), px(child.bounds.right-child.bounds.left), px(child.bounds.bottom-child.bounds.top), TRUE);
     }
     if (client_font_) DeleteObject(client_font_); client_font_ = font;
-    RECT rect{0,0,px(580),px(770)};
+    RECT rect{0,0,px(580),px(800)};
     AdjustWindowRectExForDpi(&rect, static_cast<DWORD>(GetWindowLongPtrW(client_, GWL_STYLE)), FALSE, 0, client_dpi_);
     SetWindowPos(client_, nullptr, 0, 0, rect.right-rect.left, rect.bottom-rect.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
@@ -384,6 +397,8 @@ void Overlay::apply_client() {
     metrics_ = 0;
     for (unsigned i=0;i<metric_names.size();++i) if (SendDlgItemMessageW(client_,metric_control+i,BM_GETCHECK,0,0)==BST_CHECKED) metrics_ |= 1U<<i;
     summary_ = SendDlgItemMessageW(client_,summary_control,BM_GETCHECK,0,0)==BST_CHECKED;
+    header_colors_ = SendDlgItemMessageW(client_,header_colors_control,BM_GETCHECK,0,0)==BST_CHECKED;
+    row_colors_ = SendDlgItemMessageW(client_,row_colors_control,BM_GETCHECK,0,0)==BST_CHECKED;
     scroll_ = 0; if (old_font_size != options_.font_size) fonts();
     fit_table(); update_view(); save_settings(); client_stats();
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -448,11 +463,18 @@ void Overlay::update_view() {
     for (std::size_t i = 0; !summary_only() && i < std::min(s.processes.size(), static_cast<std::size_t>(options_.top)); ++i) {
         const auto& p = s.processes[i];
         auto name = wide(p.name); if (name.ends_with(L".exe")) name.resize(name.size()-4);
-                const auto rank = options_.sort == Sort::automatic ? auto_rank(p,active_metrics()) : AutoRank{};
-        const auto highlight = options_.sort == Sort::automatic
-            ? rank.metric : AutoMetric::none;
-        next.push_back({p.pid,p.creation_time,std::move(name),percent(p.cpu_percent),memory(p.working_set),percent(p.gpu_percent),memory(p.dedicated_gpu_bytes),network_rate(p.rx_bytes_per_second,p.tx_bytes_per_second),highlight,rank.burst});
-    }
+        std::array<std::optional<double>,4> loads{};
+        for (std::size_t j=0; j<loads.size(); ++j)
+            loads[j] = auto_metric_load_percent(p,static_cast<AutoMetric>(j+1),
+                s.total_ram_capacity,s.total_gpu_memory_capacity);
+        std::array<bool,6> bursts{};
+        if (options_.sort == Sort::automatic) {
+            for (std::size_t j=0; j<bursts.size(); ++j)
+                bursts[j] = auto_metric_has_burst(p,static_cast<AutoMetric>(j+1));
+        }
+        next.push_back({p.pid,p.creation_time,std::move(name),percent(p.cpu_percent),
+            memory(p.working_set),percent(p.gpu_percent),memory(p.dedicated_gpu_bytes),
+            network_rate(p.rx_bytes_per_second,p.tx_bytes_per_second),loads,bursts});    }
     if (visible_ && show_icons_ && !summary_only()) {
         if (!icons_) icons_ = std::make_unique<AppIconCache>(local_file(L"FLUXTOP_ICON_DB", L"icons.db"), [this] {
             if (!icon_posted_.exchange(true)) PostMessageW(hwnd_, icon_message, 0, 0);
@@ -485,37 +507,49 @@ void Overlay::surface() {
     require_hr(target_->CreateSolidColorBrush(D2D1::ColorF(1,1,1,1),&brush_), "Text brush");
     target_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 }
-void Overlay::draw_text(std::wstring_view value, D2D1_RECT_F rect, IDWriteTextFormat* font, bool highlight, bool burst) {
+void Overlay::draw_text(std::wstring_view value, D2D1_RECT_F rect, IDWriteTextFormat* font, bool highlight, bool burst, std::optional<double> load) {
     auto shadow = rect; shadow.left += 1; shadow.right += 1; shadow.top += 1; shadow.bottom += 1;
     brush_->SetColor(D2D1::ColorF(0,0,0,.8f));
     target_->DrawText(value.data(),static_cast<UINT32>(value.size()),font,shadow,brush_.Get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    brush_->SetColor(highlight ? (burst ? D2D1::ColorF(1.0f,0.53f,0.12f,1.0f)
-        : D2D1::ColorF(1.0f,0.22f,0.22f,1.0f)) : D2D1::ColorF(1,1,1,1));
+    D2D1_COLOR_F color = D2D1::ColorF(1,1,1,1);
+    if (row_colors_ && highlight) {
+        if (burst) color = D2D1::ColorF(1.0f,0.53f,0.12f,1.0f); // Orange overrides all bands.
+        else if (load && std::isfinite(*load) && *load >= 0.0) {
+            color = load_band(*load) == 0 ? D2D1::ColorF(0.25f,0.92f,0.35f,1.0f)
+                : load_band(*load) == 1 ? D2D1::ColorF(1.0f,0.80f,0.13f,1.0f)
+                : D2D1::ColorF(1.0f,0.22f,0.22f,1.0f);
+        }
+    }
+    brush_->SetColor(color);
     target_->DrawText(value.data(),static_cast<UINT32>(value.size()),font,rect,brush_.Get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
 void Overlay::draw_network_text(const Row& row, D2D1_RECT_F rect) {
     draw_text(row.network,rect,number_font_.Get());
-    if (options_.sort != Sort::automatic || (row.highlight != AutoMetric::rx && row.highlight != AutoMetric::tx)) return;
+    // No defined link-capacity percentage for Rx/Tx. They stay white unless
+    // the individual direction has a significant positive-rate burst.
+    if (!row_colors_ || (!row.bursts[4] && !row.bursts[5])) return;
     const auto separator = row.network.find(L" / ");
     if (separator == std::wstring::npos) return;
-    const std::size_t first = row.highlight == AutoMetric::rx ? 0 : separator + 3;
-    const std::size_t last = row.highlight == AutoMetric::rx ? separator : row.network.find(L' ',first);
-    const std::size_t limit = last == std::wstring::npos ? row.network.size() : last;
-    if (limit <= first) return;
     ComPtr<IDWriteTextLayout> layout;
     if (FAILED(write_factory_->CreateTextLayout(row.network.c_str(),static_cast<UINT32>(row.network.size()),
         number_font_.Get(),rect.right-rect.left,rect.bottom-rect.top,&layout))) return;
-    DWRITE_HIT_TEST_METRICS hit{};
-    UINT32 count{};
-    if (FAILED(layout->HitTestTextRange(static_cast<UINT32>(first),static_cast<UINT32>(limit-first),
-        0,0,&hit,1,&count)) || count != 1 || hit.width <= 0) return;
-    target_->PushAxisAlignedClip(D2D1::RectF(rect.left+hit.left,rect.top+hit.top,
-        rect.left+hit.left+hit.width,rect.top+hit.top+hit.height),D2D1_ANTIALIAS_MODE_ALIASED);
-    draw_text(row.network,rect,number_font_.Get(),true,row.burst);
-    target_->PopAxisAlignedClip();
+    for (std::size_t direction=0;direction<2;++direction) {
+        if (!row.bursts[4+direction]) continue;
+        const std::size_t first = direction == 0 ? 0 : separator + 3;
+        const std::size_t end = direction == 0 ? separator : row.network.find(L' ',first);
+        const std::size_t limit = end == std::wstring::npos ? row.network.size() : end;
+        if (limit <= first) continue;
+        DWRITE_HIT_TEST_METRICS hit{};
+        UINT32 count{};
+        if (FAILED(layout->HitTestTextRange(static_cast<UINT32>(first),static_cast<UINT32>(limit-first),
+            0,0,&hit,1,&count)) || count != 1 || hit.width <= 0) continue;
+        target_->PushAxisAlignedClip(D2D1::RectF(rect.left+hit.left,rect.top+hit.top,
+            rect.left+hit.left+hit.width,rect.top+hit.top+hit.height),D2D1_ANTIALIAS_MODE_ALIASED);
+        draw_text(row.network,rect,number_font_.Get(),true,true);
+        target_->PopAxisAlignedClip();
+    }
 }
-
 void Overlay::draw_header_metric(unsigned column, const std::wstring& reading, std::optional<double> load,
     std::optional<double> temperature, D2D1_RECT_F rect) {
     std::wstring line = metric_names[column];
@@ -531,6 +565,7 @@ void Overlay::draw_header_metric(unsigned column, const std::wstring& reading, s
         if (temperature) temp_length = line.size() - temp_from;
     }
     draw_text(line,rect,number_font_.Get());
+    if (!header_colors_) return;
     auto tint = [&](std::size_t offset, std::size_t length, D2D1_COLOR_F color) {
         ComPtr<IDWriteTextLayout> layout;
         if (FAILED(write_factory_->CreateTextLayout(line.c_str(),static_cast<UINT32>(line.size()),
@@ -632,7 +667,7 @@ void Overlay::paint() {
         for (std::size_t column=0;column<metric_names.size();++column) if (active_metrics() & (1U<<column)) {
             if (column == 4) draw_network_text(row,cells[column+1]);
             else draw_text(values[column],cells[column+1],number_font_.Get(),
-                options_.sort == Sort::automatic && static_cast<unsigned>(row.highlight) == column+1,row.burst);
+                true,row.bursts[column],row.loads[column]);
         }
     }
     const auto result = target_->EndDraw();
@@ -737,6 +772,8 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
             return 0;
         case icons_control: if (HIWORD(wp)==BN_CLICKED) apply_client(); return 0;
         case summary_control: if (HIWORD(wp)==BN_CLICKED) apply_client(); return 0;
+        case header_colors_control: if (HIWORD(wp)==BN_CLICKED) apply_client(); return 0;
+        case row_colors_control: if (HIWORD(wp)==BN_CLICKED) apply_client(); return 0;
         case move_control: moving_=SendDlgItemMessageW(window,move_control,BM_GETCHECK,0,0)==BST_CHECKED; movement(); return 0;
         case visible_control: set_visible(SendDlgItemMessageW(window,visible_control,BM_GETCHECK,0,0)==BST_CHECKED); return 0;
         case quit_app: DestroyWindow(hwnd_); return 0;
