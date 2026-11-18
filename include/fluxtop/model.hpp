@@ -57,7 +57,15 @@ class SpikeTracker {
 public:
     void update(std::vector<Process>& rows, std::optional<std::uint64_t> ram_capacity = std::nullopt, std::optional<std::uint64_t> gpu_capacity = std::nullopt);
 private:
-    std::unordered_map<std::uint32_t, Process> previous_;
+    // Preserve only data needed by the next AutoScore interval, not the full
+    // Process (names, paths, member PIDs and other non-scoring fields).
+    struct Baseline {
+        std::optional<std::uint64_t> creation_time;
+        std::array<std::optional<double>, 6> metrics;
+        std::array<double, 6> auto_scores{};
+        std::array<double, 6> burst_scores{};
+    };
+    std::unordered_map<std::uint32_t, Baseline> previous_;
 };
 AutoRank auto_rank(const Process& row, unsigned visible_metrics = 31U);
 // Independent per-cell orange flag, using the same threshold as AutoRank.

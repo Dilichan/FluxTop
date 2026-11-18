@@ -16,6 +16,7 @@ Snapshot ProcessCollector::collect() {
     std::vector<RawProcess> raw;
     std::unordered_map<std::uint32_t, Path> next_paths;
     raw.reserve(512);
+    next_paths.reserve(paths_.size());
     Snapshot result;
     FILETIME system_idle{}, system_kernel{}, system_user{};
     if (GetSystemTimes(&system_idle, &system_kernel, &system_user)) {
@@ -52,9 +53,21 @@ Snapshot ProcessCollector::collect() {
                 if (const auto found = paths_.find(row.pid); found != paths_.end() && found->second.creation == *row.creation_time)
                     row.exe_path = found->second.value;
                 else {
-                    std::wstring path(32768, L'\0'); DWORD length = static_cast<DWORD>(path.size());
-                    if (QueryFullProcessImageNameW(process.get(), 0, path.data(), &length)) {
-                        path.resize(length);
+                    // A typical executable path fits in 512 wchar_t. Only allocate
+                    // a large buffer for the exceptional long-path process.
+                    wchar_t short_path[512]{};
+                    DWORD length = static_cast<DWORD>(512U);
+                    std::wstring path;
+                    if (QueryFullProcessImageNameW(process.get(), 0, short_path, &length)) {
+                        path.assign(short_path, length);
+                    } else if (GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+                        path.resize(32768);
+                        length = static_cast<DWORD>(path.size());
+                        if (QueryFullProcessImageNameW(process.get(), 0, path.data(), &length))
+                            path.resize(length);
+                        else path.clear();
+                    }
+                    if (!path.empty()) {
                         // Invariant case folding makes Windows paths stable application keys.
                         std::wstring folded(length, L'\0');
                         if (LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, path.data(), static_cast<int>(length),

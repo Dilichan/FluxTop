@@ -85,7 +85,7 @@ double change_score(std::size_t metric, double increase,
 
 void SpikeTracker::update(std::vector<Process>& rows,
     std::optional<std::uint64_t> ram_capacity, std::optional<std::uint64_t> gpu_capacity) {
-    std::unordered_map<std::uint32_t, Process> next;
+    std::unordered_map<std::uint32_t, Baseline> next;
     next.reserve(rows.size());
     for (auto& row : rows) {
         row.spike_score = 0.0;
@@ -95,7 +95,7 @@ void SpikeTracker::update(std::vector<Process>& rows,
         const bool same = row.creation_time && found != previous_.end()
             && found->second.creation_time == row.creation_time;
         const auto measurements = metric_values(row);
-        const auto old = same ? metric_values(found->second)
+        const auto old = same ? found->second.metrics
             : std::array<std::optional<double>,6>{};
         for (std::size_t i=0; i<measurements.size(); ++i) {
             if (!measurements[i] || !std::isfinite(*measurements[i]) || *measurements[i] < 0) continue;
@@ -111,7 +111,8 @@ void SpikeTracker::update(std::vector<Process>& rows,
             row.burst_scores[i] = std::max(sudden,
                 same ? found->second.burst_scores[i]*0.35 : 0.0);
         }
-        next.emplace(row.pid,row);
+        next.emplace(row.pid, Baseline{row.creation_time, measurements,
+            row.auto_scores, row.burst_scores});
     }
     previous_ = std::move(next);
 }
