@@ -138,7 +138,7 @@ private:
     void paint();
     void draw_text(std::wstring_view value, D2D1_RECT_F rect, IDWriteTextFormat* font, bool highlight = false, bool burst = false, std::optional<double> load = std::nullopt);
     void draw_header_metric(unsigned column, const std::wstring& reading, std::optional<double> load,
-        std::optional<double> temperature, D2D1_RECT_F rect);
+        std::optional<double> temperature, D2D1_RECT_F rect, bool cpu_board = false);
     void draw_network_text(const Row& row, D2D1_RECT_F rect);
     std::array<D2D1_RECT_F,6> columns(float y, float height) const;
     float text_size() const { return static_cast<float>(options_.font_size); }
@@ -179,6 +179,8 @@ private:
     struct Child { HWND window; RECT bounds; };
     std::vector<Child> controls_;
     SamplingWorker worker_;
+    SpikeTracker grouped_spikes_; // Updated once per new system snapshot, never per foreground event.
+    std::vector<Process> grouped_processes_;
     std::unique_ptr<AppIconCache> icons_;
     std::atomic<bool> icon_posted_{false};
     std::mutex mailbox_mutex_;
@@ -451,12 +453,18 @@ void Overlay::set_visible(bool visible) {
     activity();
 }
 void Overlay::receive() {
-    bool finished{};
+    bool finished{}, received_snapshot{};
     {
         std::lock_guard lock(mailbox_mutex_);
-        if (pending_) snapshot_ = std::move(pending_);
+        if (pending_) { snapshot_ = std::move(pending_); received_snapshot = true; }
         error_ = std::move(pending_error_); finished = pending_finished_;
         pending_.reset(); pending_finished_ = false; posted_ = false;
+    }
+    if (received_snapshot && snapshot_) {
+        // Keep process-level history untouched. Aggregate only the displayed family rows.
+        grouped_processes_=aggregate_application_processes(snapshot_->processes);
+        grouped_spikes_.update(grouped_processes_,snapshot_->total_ram_capacity,
+            snapshot_->total_gpu_memory_capacity);
     }
     update_view(); client_stats();
     if (visible_) InvalidateRect(hwnd_, nullptr, FALSE);
@@ -471,19 +479,21 @@ void Overlay::receive() {
 }
 void Overlay::update_view() {
     if (!snapshot_) return;
-    auto& s = *snapshot_; sort_processes(s.processes, options_.sort, active_metrics());
+    const auto& s = *snapshot_;
+    auto display=grouped_processes_;
+    sort_processes(display, options_.sort, active_metrics());
     focused_pid_ = 0;
     if (options_.sort == Sort::automatic) {
         DWORD foreground_pid{};
         if (const HWND foreground_window = GetForegroundWindow())
             GetWindowThreadProcessId(foreground_window,&foreground_pid);
         // A missing or unsampled process must not displace the normal ranking.
-        if (foreground_pid && prioritize_focused_process(s.processes,foreground_pid))
-            focused_pid_ = foreground_pid;
+        if (foreground_pid && prioritize_focused_process(display,foreground_pid))
+            focused_pid_ = display.front().pid; // May be a child PID inside a grouped family.
     }
     std::vector<Row> next;
-    for (std::size_t i = 0; !summary_only() && i < std::min(s.processes.size(), static_cast<std::size_t>(options_.top)); ++i) {
-        const auto& p = s.processes[i];
+    for (std::size_t i = 0; !summary_only() && i < std::min(display.size(), static_cast<std::size_t>(options_.top)); ++i) {
+        const auto& p = display[i];
         auto name = wide(p.name); if (name.ends_with(L".exe")) name.resize(name.size()-4);
         std::array<std::optional<double>,4> loads{};
         for (std::size_t j=0; j<loads.size(); ++j)
@@ -573,7 +583,7 @@ void Overlay::draw_network_text(const Row& row, D2D1_RECT_F rect) {
     }
 }
 void Overlay::draw_header_metric(unsigned column, const std::wstring& reading, std::optional<double> load,
-    std::optional<double> temperature, D2D1_RECT_F rect) {
+    std::optional<double> temperature, D2D1_RECT_F rect, bool cpu_board) {
     std::wstring line = metric_names[column];
     line += L" ";
     const auto from = line.size();
@@ -585,6 +595,7 @@ void Overlay::draw_header_metric(unsigned column, const std::wstring& reading, s
         temp_from = line.size();
         line += (temperature ? decimal(*temperature,0) + L"°C" : L"—°C");
         if (temperature) temp_length = line.size() - temp_from;
+        if (temperature && cpu_board && column==0) line += L" MB";
     }
     draw_text(line,rect,number_font_.Get());
     if (!header_colors_) return;
@@ -671,7 +682,8 @@ void Overlay::paint() {
     }
     for (std::size_t i=1;i<header.size();++i) if (active_metrics() & (1U<<(i-1)))
         draw_header_metric(static_cast<unsigned>(i-1),totals[i-1],load[i-1],
-            i==1 ? cpu_temperature : i==3 ? gpu_temperature : std::optional<double>{},header[i]);
+            i==1 ? cpu_temperature : i==3 ? gpu_temperature : std::optional<double>{},header[i],
+            i==1 && snapshot_ && snapshot_->cpu_temperature_board);
     const auto count = visible_rows(dip(bitmap_size_.cy));
     scroll_ = std::min(scroll_, rows_.size()>count ? rows_.size()-count : 0);
     for (std::size_t i=0;i<count && i+scroll_<rows_.size();++i) {

@@ -39,6 +39,7 @@ Snapshot ProcessCollector::collect() {
         if (entry.th32ProcessID == 0) continue; // Idle is not an application.
         RawProcess row;
         row.pid = entry.th32ProcessID;
+        row.parent_pid = entry.th32ParentProcessID;
         row.name = utf8(entry.szExeFile);
         Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, row.pid));
         if (process.valid()) {

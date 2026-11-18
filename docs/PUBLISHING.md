@@ -32,7 +32,7 @@ Updater использует поле `digest: sha256:...`, вычисленно
 В x64 Developer PowerShell:
 
 ```powershell
-cmake --preset windows -DFLUXTOP_RELEASE_TAG=v0.2.0-preview.1
+cmake --preset windows -DFLUXTOP_RELEASE_TAG=v0.2.1
 cmake --build --preset release
 ./tools/Package-Release.ps1
 ```
@@ -58,3 +58,20 @@ CI выпускает неподписанный EXE; цифровая подп�
 Launcher сохраняет предыдущий EXE при ошибке активации. Это ещё не протокол
 готовности основного монитора: ready/timeout/fallback из ADR-0001 остаётся
 следующим этапом. Отдельный updater всё равно выполняется до старта монитора.
+
+## Проверка обновления Preview → 0.2.1
+
+После успешного CI для `main` создать аннотированный тег `v0.2.1` на
+этом же коммите и отправить его в `origin`. Workflow `Publish Windows EXE`
+создаст **обычный релиз** и asset с точным именем `FluxTop.exe`.
+Не создавать релиз вручную одновременно с workflow — это приводит к гонке.
+
+1. Убедиться, что https://github.com/Dilichan/FluxTop/releases/tag/v0.2.1
+   существует, а в Assets лежат `FluxTop.exe`, `SHA256SUMS.txt`, `LICENSE.txt`.
+2. Завершить установленный монитор 0.2.0-preview.1 полностью через трей.
+3. Запустить старый скачанный `FluxTop.exe`, а не локальный `build/Release/fluxtop.exe`.
+4. После запуска проверить новую версию в клиенте и сохранность `history.db`.
+5. Если обновление не удалось, посмотреть `%LOCALAPPDATA%\FluxTop\update.log`.
+
+Исключить при проверке изменённую ветку Git: локальный `fluxtop.cmd`
+обновляет **исходники**, а пользовательский `FluxTop.exe` — GitHub Releases.

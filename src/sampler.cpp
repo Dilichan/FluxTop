@@ -22,6 +22,7 @@ Snapshot Sampler::collect() {
     gpu_.collect(snapshot);
     const auto hwtemps = read_hardware_temperatures();
     snapshot.cpu_temperature_c = hwtemps.cpu_c;
+    snapshot.cpu_temperature_board = hwtemps.cpu_from_board;
     if (!snapshot.gpu_temperature_c) snapshot.gpu_temperature_c = hwtemps.gpu_c;
     network_.collect(snapshot);
     spikes_.update(snapshot.processes, snapshot.total_ram_capacity, snapshot.total_gpu_memory_capacity);

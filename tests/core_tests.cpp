@@ -3,6 +3,7 @@
 #include "fluxtop/options.hpp"
 #include "fluxtop/output.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -275,6 +276,63 @@ void focused_process_tests() {
         "unavailable foreground has no effect");
     check(fluxtop::prioritize_focused_process(rows,101),"already first PID remains valid");
 }
+void multiprocess_aggregation_tests() {
+    using fluxtop::Process;
+    auto make=[](std::uint32_t pid,std::uint32_t parent,std::uint64_t birth,
+                 const char* path,double cpu,std::uint64_t ram,double gpu,std::uint64_t vram) {
+        Process p;
+        p.pid=pid; p.parent_pid=parent; p.creation_time=birth;
+        p.exe_path=std::string(path); p.name="browser.exe";
+        p.cpu_percent=cpu; p.working_set=ram; p.gpu_percent=gpu;
+        p.dedicated_gpu_bytes=vram;
+        return p;
+    };
+    constexpr std::uint64_t mib=1048576ULL;
+    auto root=make(100,0,10,"c:/browser/browser.exe",2,400*mib,3,0);
+    auto gpu=make(101,100,11,"c:/browser/browser.exe",4,200*mib,45,500*mib);
+    auto tab=make(102,101,12,"c:/browser/browser.exe",1,300*mib,2,150*mib);
+    auto detached=make(200,0,9,"c:/browser/browser.exe",8,100*mib,5,80*mib);
+    auto older=make(104,100,5,"c:/browser/browser.exe",9,50*mib,7,60*mib);
+    auto other=make(103,100,13,"d:/tools/browser.exe",6,70*mib,9,90*mib);
+    // All five processes of the same installed executable must appear in ONE
+    // application row, even if their PPID trees have multiple independent roots.
+    auto grouped=fluxtop::aggregate_application_processes({gpu,tab,root,detached,other,older});
+    check(grouped.size()==2,"same EXE path merges detached roots; different paths stay apart");
+    const auto it=std::find_if(grouped.begin(),grouped.end(),[](const auto& p){
+        return p.exe_path && *p.exe_path=="c:/browser/browser.exe";
+    });
+    check(it!=grouped.end(),"application identity is canonical full executable path");
+    if (it!=grouped.end()) {
+        check(it->cpu_percent && *it->cpu_percent==24,"CPU across all same-path workers");
+        check(it->working_set && *it->working_set==1050*mib,
+            "RAM across all five workers, including the detached roots");
+        check(it->dedicated_gpu_bytes && *it->dedicated_gpu_bytes==790*mib,
+            "GPU memory across all five workers");
+        check(it->gpu_percent && *it->gpu_percent==45,"GPU load is maximum, not sum");
+        check(it->member_pids.size()==5,"five distinct PIDs are represented exactly once");
+        auto focused=grouped;
+        check(fluxtop::prioritize_focused_process(focused,102)
+            && focused.front().exe_path==it->exe_path,"child foreground pins whole application");
+        check(fluxtop::prioritize_focused_process(focused,200)
+            && focused.front().exe_path==it->exe_path,"detached foreground pins same application");
+    }
+    // When the executable path is unavailable, only confirmed parent-child
+    // lineage may merge; a matching executable name alone is insufficient.
+    auto no_path_parent=make(501,0,100,"c:/unused.exe",1,50*mib,0,0);
+    auto no_path_child=make(502,501,101,"c:/unused.exe",2,60*mib,0,0);
+    auto no_path_unrelated=make(503,0,100,"c:/unused.exe",3,70*mib,0,0);
+    no_path_parent.exe_path.reset(); no_path_child.exe_path.reset();
+    no_path_unrelated.exe_path.reset();
+    const auto cautious=fluxtop::aggregate_application_processes(
+        {no_path_child,no_path_parent,no_path_unrelated});
+    check(cautious.size()==2,"pathless related processes merge; unrelated names stay separate");
+    const auto matched=std::find_if(cautious.begin(),cautious.end(),[](const auto& p){
+        return p.pid==501;
+    });
+    check(matched!=cautious.end() && matched->working_set
+        && *matched->working_set==110*mib,"pathless parent-child memory is correct");
+}
+
 void output_tests() {
     check(fluxtop::json_escape("a\"\\\n\t\x01") == "\"a\\\"\\\\\\n\\t\\u0001\"", "JSON control escaping");
     check(fluxtop::json_escape("приложение") == "\"приложение\"", "UTF-8 preserved");
@@ -315,6 +373,7 @@ int main() {
     cpu_tests();
     sort_tests();
     focused_process_tests();
+    multiprocess_aggregation_tests();
     spike_tests();
     orange_burst_visibility_tests();
     per_metric_colors_and_bursts_tests();

@@ -11,6 +11,7 @@ namespace fluxtop {
 
 struct RawProcess {
     std::uint32_t pid{};
+    std::uint32_t parent_pid{}; // Toolhelp32 parent; verified by creation time before grouping.
     std::string name;
     std::optional<std::string> exe_path;
     std::optional<std::uint64_t> creation_time;
@@ -36,6 +37,7 @@ struct Process : RawProcess {
     std::array<double,6> auto_scores{}; // CPU, RAM, GPU, GPU RAM, Rx, Tx
     std::array<double,6> burst_scores{}; // Immediate growth, separate from sustained load
     std::optional<double> rx_bytes_per_second, tx_bytes_per_second;
+    std::vector<std::uint32_t> member_pids; // Only populated in UI-level aggregate, never raw history.
 };
 
 class CpuTracker {
@@ -63,6 +65,9 @@ bool auto_metric_has_burst(const Process& row, AutoMetric metric);
 // Actual utilization for colors, independent of weighted AutoScore. Network has no absolute capacity.
 std::optional<double> auto_metric_load_percent(const Process& row, AutoMetric metric,
     std::optional<std::uint64_t> ram_capacity, std::optional<std::uint64_t> gpu_capacity);
+// Display-only aggregation of verified same-image parent/child processes.
+// Original per-PID snapshots and history are never modified.
+std::vector<Process> aggregate_application_processes(const std::vector<Process>& rows);
 void sort_processes(std::vector<Process>& rows, Sort sort, unsigned visible_metrics = 31U);
 // Move the focused process to row zero without changing the order of other rows.
 // Return false if pid is zero or not present in this snapshot.
@@ -87,6 +92,7 @@ struct Snapshot {
     std::optional<double> total_cpu_percent, total_gpu_percent;
     std::optional<std::uint64_t> total_ram_used, total_ram_capacity, total_gpu_memory, total_gpu_memory_capacity;
     std::optional<double> cpu_temperature_c, gpu_temperature_c;
+    bool cpu_temperature_board{}; // True if CPU value is an explicit motherboard/ACPI CPU zone.
     std::optional<double> total_rx_bytes_per_second, total_tx_bytes_per_second;
     std::string network_status;
     double interval_ms{};

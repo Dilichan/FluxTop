@@ -190,6 +190,96 @@ std::optional<double> auto_metric_load_percent(const Process& row, AutoMetric me
     return std::nullopt;
 }
 
+namespace {
+// Strict identity: no joining independent applications by name alone.
+bool same_executable_family(const Process& child, const Process& parent) {
+    if (!child.creation_time || !parent.creation_time ||
+        *parent.creation_time >= *child.creation_time) return false;
+    if (child.exe_path && parent.exe_path)
+        return *child.exe_path == *parent.exe_path;
+    // Both paths can be unavailable for protected processes. A verified parent
+    // link, matching names and creation order are then the conservative fallback.
+    return !child.exe_path && !parent.exe_path && child.name == parent.name;
+}
+void add_bytes(std::optional<std::uint64_t>& target, std::optional<std::uint64_t> value) {
+    if (!value) return;
+    const auto max = std::numeric_limits<std::uint64_t>::max();
+    target = *value > max - target.value_or(0) ? max : target.value_or(0) + *value;
+}
+void add_positive(std::optional<double>& target, std::optional<double> value) {
+    if (!value || !std::isfinite(*value) || *value < 0) return;
+    const double sum = target.value_or(0) + *value;
+    if (std::isfinite(sum)) target = sum;
+}
+void max_gpu(std::optional<double>& target, std::optional<double> value) {
+    if (value && std::isfinite(*value) && *value >= 0)
+        target = std::max(target.value_or(0.0),*value);
+}
+} // namespace
+
+std::vector<Process> aggregate_application_processes(const std::vector<Process>& rows) {
+    std::unordered_map<std::uint32_t,std::size_t> positions;
+    positions.reserve(rows.size());
+    for (std::size_t i=0;i<rows.size();++i) positions.emplace(rows[i].pid,i);
+    std::vector<std::size_t> roots(rows.size());
+    for (std::size_t i=0;i<rows.size();++i) {
+        auto current=i;
+        // Every accepted hop has an earlier creation time, so cycles and reused
+        // parent PIDs cannot create an incorrect process family.
+        for (std::size_t hops=0;hops<rows.size();++hops) {
+            const auto found=positions.find(rows[current].parent_pid);
+            if (found==positions.end()) break;
+            const auto parent=found->second;
+            if (parent==current || !same_executable_family(rows[current],rows[parent])) break;
+            current=parent;
+        }
+        roots[i]=current;
+    }
+    // Same canonical full EXE path identifies an installed application, even
+    // when its workers have disconnected parent chains. A PID/name alone is
+    // never enough to merge unrelated processes. Paths were case-normalized
+    // by ProcessCollector; private/unknown paths use verified parent lineage.
+    std::unordered_map<std::string,std::size_t> image_groups;
+    std::unordered_map<std::size_t,std::size_t> lineage_groups;
+    image_groups.reserve(rows.size());
+    lineage_groups.reserve(rows.size());
+    std::vector<Process> result;
+    result.reserve(rows.size());
+    for (std::size_t i=0;i<rows.size();++i) {
+        const Process& root=rows[roots[i]];
+        const auto& image=rows[i].exe_path ? rows[i].exe_path : root.exe_path;
+        const auto next=result.size();
+        std::size_t group_index=next;
+        if (image && !image->empty()) {
+            group_index=image_groups.try_emplace(*image,next).first->second;
+        } else {
+            group_index=lineage_groups.try_emplace(roots[i],next).first->second;
+        }
+        if (group_index==next) {
+            Process combined=root;
+            combined.cpu_percent.reset(); combined.working_set.reset(); combined.private_bytes.reset();
+            combined.gpu_percent.reset(); combined.dedicated_gpu_bytes.reset();
+            combined.rx_bytes_per_second.reset(); combined.tx_bytes_per_second.reset();
+            combined.spike_score=0; combined.auto_scores.fill(0); combined.burst_scores.fill(0);
+            combined.member_pids.clear();
+            result.push_back(std::move(combined));
+        }
+        auto& combined=result[group_index];
+        const auto& part=rows[i];
+        combined.member_pids.push_back(part.pid);
+        add_positive(combined.cpu_percent,part.cpu_percent);
+        add_bytes(combined.working_set,part.working_set);
+        add_bytes(combined.private_bytes,part.private_bytes);
+        max_gpu(combined.gpu_percent,part.gpu_percent); // Never sum independent WDDM engines.
+        add_bytes(combined.dedicated_gpu_bytes,part.dedicated_gpu_bytes);
+        add_positive(combined.rx_bytes_per_second,part.rx_bytes_per_second);
+        add_positive(combined.tx_bytes_per_second,part.tx_bytes_per_second);
+    }
+    for (auto& group : result)
+        if (group.cpu_percent) group.cpu_percent=std::clamp(*group.cpu_percent,0.0,100.0);
+    return result;
+}
+
 void sort_processes(std::vector<Process>& rows, Sort sort, unsigned visible_metrics) {
     const auto value = [sort,visible_metrics](const Process& row) -> std::optional<double> {
         switch (sort) {
@@ -225,7 +315,8 @@ void sort_processes(std::vector<Process>& rows, Sort sort, unsigned visible_metr
 bool prioritize_focused_process(std::vector<Process>& rows, std::uint32_t pid) {
     if (!pid) return false;
     const auto position = std::find_if(rows.begin(),rows.end(),[pid](const Process& p) {
-        return p.pid == pid;
+        return p.pid == pid || std::find(p.member_pids.begin(),p.member_pids.end(),pid)
+            != p.member_pids.end();
     });
     if (position == rows.end()) return false;
     if (position != rows.begin()) std::rotate(rows.begin(),position,position+1);
