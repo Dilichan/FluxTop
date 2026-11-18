@@ -83,6 +83,8 @@ if(BUILD_TESTING)
     add_test(NAME statistics COMMAND fluxtop_statistics_tests "${CMAKE_CURRENT_BINARY_DIR}")
     add_test(NAME statistics_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
         -File "${PROJECT_SOURCE_DIR}/tests/statistics_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
+    add_test(NAME statistics_popout_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+        -File "${PROJECT_SOURCE_DIR}/tests/statistics_popout_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
     set_tests_properties(history PROPERTIES TIMEOUT 20)
     add_executable(fluxtop_temperature_tests tests/temperature_tests.cpp src/temperatures.cpp)
     target_include_directories(fluxtop_temperature_tests PRIVATE include)

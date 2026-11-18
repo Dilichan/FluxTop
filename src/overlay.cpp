@@ -408,13 +408,15 @@ void Overlay::init_client() {
     control(L"STATIC", L"", 0, stats_control, 22, 567, 536, 136);
     control(L"STATIC", L"Ctrl+Alt+F9 — клиент   ·   Ctrl+Alt+F10 — оверлей", 0, 0, 22, 711, 540, 24);
     control(L"BUTTON", L"Завершить работу", WS_TABSTOP, quit_app, 373, 743, 185, 32);
-    statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,options_.top);
+    statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,10U);
     statistics_->activate(false);
     initializing_client_ = false; client_stats();
 }
 void Overlay::switch_page(unsigned page) {
     client_page_=page==1?1:0;
     for(const auto& child:controls_) ShowWindow(child.window,client_page_==0?SW_SHOW:SW_HIDE);
+    // Statistics gets a readable workspace; Settings retains its compact dimensions.
+    layout_client();
     if(statistics_) statistics_->activate(client_page_==1);
 }
 void Overlay::layout_client() {
@@ -426,10 +428,12 @@ void Overlay::layout_client() {
         SendMessageW(child.window, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         MoveWindow(child.window, px(child.bounds.left), px(child.bounds.top+40), px(child.bounds.right-child.bounds.left), px(child.bounds.bottom-child.bounds.top), TRUE);
     }
-    if(tabs_) MoveWindow(tabs_,0,0,px(580),px(840),TRUE);
-    if(statistics_) statistics_->resize(px(12),px(40),px(556),px(785));
+    const int page_width=client_page_==1?780:580;
+    const int page_height=client_page_==1?920:840;
+    if(tabs_) MoveWindow(tabs_,0,0,px(page_width),px(page_height),TRUE);
+    if(statistics_) statistics_->resize(px(12),px(40),px(page_width-24),px(page_height-52));
     if (client_font_) DeleteObject(client_font_); client_font_ = font;
-    RECT rect{0,0,px(580),px(840)};
+    RECT rect{0,0,px(page_width),px(page_height)};
     AdjustWindowRectExForDpi(&rect, static_cast<DWORD>(GetWindowLongPtrW(client_, GWL_STYLE)), FALSE, 0, client_dpi_);
     SetWindowPos(client_, nullptr, 0, 0, rect.right-rect.left, rect.bottom-rect.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
@@ -459,7 +463,6 @@ void Overlay::apply_client() {
     row_colors_ = SendDlgItemMessageW(client_,row_colors_control,BM_GETCHECK,0,0)==BST_CHECKED;
     scroll_ = 0; if (old_font_size != options_.font_size) fonts();
     fit_table(); update_view(); save_settings(); client_stats();
-    if(statistics_) statistics_->set_limit(options_.top);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 void Overlay::client_stats() {
@@ -509,7 +512,7 @@ void Overlay::receive() {
         grouped_processes_=aggregate_application_processes(snapshot_->processes);
         grouped_spikes_.update(grouped_processes_,snapshot_->total_ram_capacity,
             snapshot_->total_gpu_memory_capacity);
-        if(statistics_) statistics_->on_snapshot(snapshot_->timestamp_ms,grouped_processes_);
+        if(statistics_) statistics_->on_snapshot(snapshot_->timestamp_ms,grouped_processes_,options_.interval_ms);
     }
     update_view(); client_stats();
     if (visible_) InvalidateRect(hwnd_, nullptr, FALSE);

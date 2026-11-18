@@ -19,7 +19,10 @@ void check(bool condition, const char* message) {
 void rejects(std::initializer_list<std::string_view> args) {
     try {
         (void)fluxtop::parse_options(std::span(args.begin(), args.size()));
-        check(false, "invalid arguments must throw");
+        std::cerr << "FAIL: expected invalid_argument for:";
+        for (const auto arg : args) std::cerr << ' ' << arg;
+        std::cerr << '\n';
+        ++failures;
     } catch (const std::invalid_argument&) {}
 }
 void cpu_tests() {
@@ -452,8 +455,13 @@ int main() {
         check(fluxtop::parse_options(topArgs).sort == fluxtop::Sort::automatic, "custom row count and auto without GPU accepted");
     }
     rejects({"--font-size", "20"});
-    rejects({"--overlay", "--font-size", "9"});
-    rejects({"--overlay", "--font-size", "37"});
+    rejects({"--overlay", "--font-size", "4"});
+    rejects({"--overlay", "--font-size", "43"});
+    for(const auto size : {"5", "9", "37", "42"}) {
+        const std::string_view valid[]{"--overlay", "--font-size", size};
+        check(fluxtop::parse_options(valid).font_explicit,
+            "the entire new 5..42 font-size interval is valid");
+    }
     const std::string_view fontArgs[]{"--overlay", "--font-size", "24"};
     check(fluxtop::parse_options(fontArgs).font_explicit && fluxtop::parse_options(fontArgs).font_size == 24,
           "explicit overlay font overrides saved settings");

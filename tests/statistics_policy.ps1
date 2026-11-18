@@ -15,6 +15,10 @@ foreach($condition in @(
     $page.Contains('DTM_SETRANGE'),
     $page.Contains('on_snapshot'),
     $overlay.Contains('TCN_SELCHANGE'),
-    $overlay.Contains('statistics_->set_limit(options_.top)')
+    $page.Contains('L"stats_top"'),
+    $page.Contains('stats_limit_id'),
+    $page.Contains('StatisticsPage::prepare_colors('),
+    $overlay.Contains('statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,10U)'),
+    -not $overlay.Contains('statistics_->set_limit(options_.top)')
 )) { if(-not $condition) {throw 'Statistics integration contract failed'} }
 'FluxTop statistics integration contract passed'
