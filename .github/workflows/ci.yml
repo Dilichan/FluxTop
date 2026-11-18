@@ -1,0 +1,36 @@
+name: Windows build
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset windows
+      - name: Build Release
+        run: cmake --build --preset release
+      - name: Test
+        run: ctest --preset release
+      - name: Test Git updater with local repositories
+        shell: powershell
+        run: ./tests/update_tests.ps1
+      - name: Test launcher fallback and locking
+        shell: powershell
+        run: ./tests/launcher_tests.ps1
+      - name: Validate JSONL contract
+        shell: pwsh
+        run: |
+          $lines = & ./build/Release/fluxtop.exe --samples 2 --interval-ms 250 --no-gpu --jsonl
+          if ($LASTEXITCODE -ne 0 -or $lines.Count -ne 2) { throw 'Collector failed or wrong sample count' }
+          foreach ($line in $lines) {
+            $sample = $line | ConvertFrom-Json
+            if ($sample.schema_version -ne 1 -or $sample.gpu_status -ne 'disabled') { throw 'Invalid schema/status' }
+            if ($sample.process_count -lt 1 -or $sample.self.working_set_bytes -le 0) { throw 'Missing live metrics' }
+          }
