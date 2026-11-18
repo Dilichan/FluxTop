@@ -748,7 +748,7 @@ int Overlay::run() {
     foreground_hook_ = SetWinEventHook(EVENT_SYSTEM_FOREGROUND,EVENT_SYSTEM_FOREGROUND,
         nullptr,foreground_changed,0,0,WINEVENT_OUTOFCONTEXT);
     // If the hook is unavailable, the regular snapshot still updates focused PID.
-    if ((!options_.samples || inspect) && !options_.tray) show_client();
+    if (inspect && !options_.tray) show_client();
     worker_.start(options_,[this](std::optional<Snapshot> snapshot,std::string error,bool finished) {
         std::lock_guard lock(mailbox_mutex_); pending_=std::move(snapshot); pending_error_=std::move(error); pending_finished_=finished;
         if (!posted_) posted_=PostMessageW(hwnd_,sample_message,0,0)!=FALSE;
