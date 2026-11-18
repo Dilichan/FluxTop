@@ -13,12 +13,12 @@ public:
     GpuCollector& operator=(const GpuCollector&) = delete;
     void collect(Snapshot& snapshot);
 private:
-    bool read(PDH_HCOUNTER counter, bool memory,
-              std::unordered_map<std::uint32_t, double>& values);
+    bool read(PDH_HCOUNTER counter,
+              std::unordered_map<std::uint32_t, double>& values, std::optional<double>& total, bool adapter_memory = false);
     bool enabled_;
     PDH_HQUERY query_{};
     PDH_HCOUNTER engine_{};
-    PDH_HCOUNTER memory_{};
+    PDH_HCOUNTER adapter_memory_{};
     std::vector<std::max_align_t> buffer_;
 };
 } // namespace fluxtop

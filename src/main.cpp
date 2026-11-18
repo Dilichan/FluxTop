@@ -1,8 +1,11 @@
 #include "fluxtop/gpu_collector.hpp"
 #include "fluxtop/options.hpp"
+#include "fluxtop/overlay.hpp"
 #include "fluxtop/output.hpp"
 #include "fluxtop/process_collector.hpp"
+#include "fluxtop/privileges.hpp"
 #include "fluxtop/windows.hpp"
+#include "fluxtop/sampler.hpp"
 
 #include <psapi.h>
 #include <chrono>
@@ -26,17 +29,6 @@ public:
     }
     ~StopHandler() { SetConsoleCtrlHandler(stop_handler, FALSE); }
 };
-void self_memory(fluxtop::Snapshot& snapshot) {
-    PROCESS_MEMORY_COUNTERS_EX memory{};
-    memory.cb = sizeof(memory);
-    if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory), sizeof(memory))) {
-        snapshot.self_working_set = memory.WorkingSetSize;
-        snapshot.self_private_bytes = memory.PrivateUsage;
-        snapshot.self_peak_working_set = memory.PeakWorkingSetSize;
-    }
-    DWORD handles{};
-    if (GetProcessHandleCount(GetCurrentProcess(), &handles)) snapshot.self_handles = handles;
-}
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -48,6 +40,7 @@ int wmain(int argc, wchar_t** argv) {
         const auto options = fluxtop::parse_options(args);
         if (options.help) { std::cout << fluxtop::usage(); return 0; }
         if (options.version) { std::cout << "FluxTop " << FLUXTOP_VERSION << '\n'; return 0; }
+        if (options.overlay) return fluxtop::run_overlay(options);
         std::cout.imbue(std::locale::classic());
         // Windows console uses UTF-8 during this process; restore its previous code page on exit.
         struct ConsoleEncoding {
@@ -58,12 +51,7 @@ int wmain(int argc, wchar_t** argv) {
         fluxtop::Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
         if (!event.valid()) throw fluxtop::windows_error("CreateEventW");
         StopHandler handler(event.get());
-        fluxtop::ProcessCollector processes;
-        fluxtop::GpuCollector gpu(options.gpu);
-        const auto origin = std::chrono::steady_clock::now();
-        // Warm up deltas without exporting misleading initial CPU values.
-        auto initial = processes.collect();
-        gpu.collect(initial);
+        fluxtop::Sampler sampler(options.gpu, options.network);
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(options.interval_ms);
         unsigned emitted = 0;
         while (!options.samples || emitted < options.samples) {
@@ -73,13 +61,7 @@ int wmain(int argc, wchar_t** argv) {
             if (wait == WAIT_OBJECT_0) break;
             if (wait != WAIT_TIMEOUT) throw fluxtop::windows_error("WaitForSingleObject");
             const auto start = std::chrono::steady_clock::now();
-            auto snapshot = processes.collect();
-            gpu.collect(snapshot);
-            self_memory(snapshot);
-            snapshot.collection_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-            snapshot.elapsed_ms = std::chrono::duration<double, std::milli>(start - origin).count();
-            snapshot.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
+            auto snapshot = sampler.collect();
             fluxtop::sort_processes(snapshot.processes, options.sort);
             if (options.jsonl) fluxtop::write_jsonl(std::cout, snapshot, options.top);
             else fluxtop::write_table(std::cout, snapshot, options.top);
