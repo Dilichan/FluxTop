@@ -42,7 +42,8 @@ jobs:
         run: |
           $notesPath = Join-Path $env:RUNNER_TEMP 'release-notes.md'
           & ./tools/Get-ReleaseNotes.ps1 -Tag $env:RELEASE_TAG -OutputPath $notesPath
-          if ($LASTEXITCODE -ne 0) { throw 'Release notes generation failed' }
+          if (-not (Test-Path -LiteralPath $notesPath -PathType Leaf)) { throw 'Release notes file missing' }
+          if ([string]::IsNullOrWhiteSpace((Get-Content -LiteralPath $notesPath -Raw))) { throw 'Release notes file empty' }
           $arguments=@('release','create',$env:RELEASE_TAG,'out/release/FluxTop.exe','out/release/SHA256SUMS.txt','out/release/LICENSE.txt',
             '--verify-tag','--title',"FluxTop $env:RELEASE_TAG",'--notes-file',$notesPath)
           if ($env:RELEASE_TAG -like '*-preview.*') { $arguments+='--prerelease' }
