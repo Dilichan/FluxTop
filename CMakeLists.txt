@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
-project(FluxTop VERSION 0.2.0 LANGUAGES CXX RC)
+project(FluxTop VERSION 0.2.1 LANGUAGES CXX RC)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-set(FLUXTOP_RELEASE_TAG "v${PROJECT_VERSION}-preview.1" CACHE STRING "GitHub release tag embedded in the downloadable launcher")
+set(FLUXTOP_RELEASE_TAG "v${PROJECT_VERSION}" CACHE STRING "GitHub release tag embedded in the downloadable launcher")
 
 if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "FluxTop requires 64-bit Windows and a Windows SDK")
@@ -26,7 +26,7 @@ target_include_directories(fluxtop_history PUBLIC include)
 target_compile_features(fluxtop_history PUBLIC cxx_std_20)
 target_compile_definitions(fluxtop_history PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
 target_link_libraries(fluxtop_history PUBLIC winsqlite3)
-add_executable(fluxtop src/main.cpp src/process_collector.cpp src/gpu_collector.cpp src/privileges.cpp src/sampler.cpp src/overlay.cpp src/network_collector.cpp src/autostart.cpp
+add_executable(fluxtop src/main.cpp src/process_collector.cpp src/gpu_collector.cpp src/privileges.cpp src/sampler.cpp src/overlay.cpp src/network_collector.cpp src/autostart.cpp src/temperatures.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/fluxtop.rc")
 target_link_libraries(fluxtop PRIVATE fluxtop_core fluxtop_icons fluxtop_history psapi pdh advapi32 d2d1 dwrite shell32 user32 gdi32 ole32 comctl32 tdh uuid)
 target_compile_definitions(fluxtop PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN

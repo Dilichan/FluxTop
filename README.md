@@ -1,4 +1,4 @@
-﻿# FluxTop
+# FluxTop
 
 <img src="assets/branding/fluxtop-mark-small.svg" width="64" alt="FluxTop">
 
@@ -6,10 +6,10 @@
 Показывает, какие процессы нагружают CPU, память, видеокарту и сеть. Настройки
 открываются в отдельном клиенте, а таблица остаётся поверх окон и игр в borderless.
 
-**[Скачать FluxTop.exe для Windows](https://github.com/Dilichan/FluxTop/releases/download/v0.2.0-preview.1/FluxTop.exe)** · [Все версии](https://github.com/Dilichan/FluxTop/releases) · [Сообщить об ошибке](https://github.com/Dilichan/FluxTop/issues)
+**[Скачать FluxTop.exe для Windows](https://github.com/Dilichan/FluxTop/releases/download/v0.2.1/FluxTop.exe)** · [Все версии](https://github.com/Dilichan/FluxTop/releases) · [Сообщить об ошибке](https://github.com/Dilichan/FluxTop/issues)
 
 Git, компилятор и отдельная установка Visual C++ Runtime не нужны.
-Это **0.2.0 Preview**: приложение уже работает, но ещё развивается.
+Это **0.2.1**: приложение уже работает, но ещё развивается.
 
 ![Пример прозрачного оверлея FluxTop](assets/preview/overlay.svg)
 

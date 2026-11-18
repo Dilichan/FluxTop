@@ -26,6 +26,8 @@ bool collect_memory(Snapshot& snapshot) {
     if (D3DKMTEnumAdapters(&adapters.data) < 0) { adapters.data.NumAdapters = 0; return false; }
     if (!adapters.data.NumAdapters) return false;
     std::vector<UINT> physical_counts;
+    std::uint64_t capacity = 0;
+    bool has_capacity = false;
     for (ULONG i = 0; i < adapters.data.NumAdapters; ++i) {
         D3DKMT_PHYSICAL_ADAPTER_COUNT count{};
         D3DKMT_QUERYADAPTERINFO info{};
@@ -35,7 +37,33 @@ bool collect_memory(Snapshot& snapshot) {
         info.PrivateDriverDataSize = sizeof(count);
         if (D3DKMTQueryAdapterInfo(&info) < 0 || !count.Count) return false;
         physical_counts.push_back(count.Count);
+        D3DKMT_SEGMENTSIZEINFO sizes{};
+        D3DKMT_QUERYADAPTERINFO size_query{};
+        size_query.hAdapter = adapters.data.Adapters[i].hAdapter;
+        size_query.Type = KMTQAITYPE_GETSEGMENTSIZE;
+        size_query.pPrivateDriverData = &sizes;
+        size_query.PrivateDriverDataSize = sizeof(sizes);
+        if (D3DKMTQueryAdapterInfo(&size_query) >= 0 && sizes.DedicatedVideoMemorySize > 0
+            && sizes.DedicatedVideoMemorySize <= std::numeric_limits<std::uint64_t>::max() - capacity) {
+            capacity += sizes.DedicatedVideoMemorySize;
+            has_capacity = true;
+        }
+        for (UINT physical = 0; physical < count.Count; ++physical) {
+            D3DKMT_ADAPTER_PERFDATA perf{};
+            perf.PhysicalAdapterIndex = physical;
+            D3DKMT_QUERYADAPTERINFO perf_query{};
+            perf_query.hAdapter = adapters.data.Adapters[i].hAdapter;
+            perf_query.Type = KMTQAITYPE_ADAPTERPERFDATA;
+            perf_query.pPrivateDriverData = &perf;
+            perf_query.PrivateDriverDataSize = sizeof(perf);
+            if (D3DKMTQueryAdapterInfo(&perf_query) >= 0 && perf.Temperature >= 150 && perf.Temperature <= 1150) {
+                const auto degrees = static_cast<double>(perf.Temperature) / 10.0;
+                if (!snapshot.gpu_temperature_c || degrees > *snapshot.gpu_temperature_c)
+                    snapshot.gpu_temperature_c = degrees;
+            }
+        }
     }
+    if (has_capacity) snapshot.total_gpu_memory_capacity = capacity;
     bool available = false;
     for (auto& row : snapshot.processes) {
         if (!row.has_baseline || !row.creation_time) continue;

@@ -1,5 +1,6 @@
 #include "fluxtop/sampler.hpp"
 #include "fluxtop/windows.hpp"
+#include "fluxtop/temperatures.hpp"
 #include <psapi.h>
 #include <iostream>
 
@@ -19,6 +20,9 @@ Snapshot Sampler::collect() {
     snapshot.elevated = privileges_.elevated;
     snapshot.debug_privilege_enabled = privileges_.debug_enabled;
     gpu_.collect(snapshot);
+    const auto hwtemps = read_hwinfo_temperatures();
+    snapshot.cpu_temperature_c = hwtemps.cpu_c;
+    if (!snapshot.gpu_temperature_c) snapshot.gpu_temperature_c = hwtemps.gpu_c;
     network_.collect(snapshot);
     spikes_.update(snapshot.processes);
     PROCESS_MEMORY_COUNTERS_EX memory{};

@@ -88,7 +88,7 @@ void spike_tests() {
         row.working_set = 0; row.dedicated_gpu_bytes = 0;
     }
     tracker.update(rows);
-    check(rows[0].spike_score == 0, "first sample has no spike");
+    check(rows[0].spike_score == 0, "first sample has no burst");
     rows[0].cpu_percent = 10;
     rows[1].working_set = 192ULL * 1048576;
     rows[2].gpu_percent = 20;
@@ -96,31 +96,61 @@ void spike_tests() {
     tracker.update(rows);
     fluxtop::sort_processes(rows, fluxtop::Sort::automatic);
     check(rows[0].pid == 4 && rows[1].pid == 3 && rows[2].pid == 2 && rows[3].pid == 1,
-        "auto ranks positive spikes across four normalized metrics");
+        "auto ranks resource bursts with normalized rates");
     tracker.update(rows);
-    check(rows[0].spike_score == 0, "steady high usage is not a spike");
-    rows[0].creation_time = 2; rows[0].cpu_percent = 100;
+    check(rows[0].spike_score == 0, "steady usage is no longer a new burst");
+    check(fluxtop::auto_rank(rows[1]).score >= 1.0, "steady GPU remains eligible after burst");
     tracker.update(rows);
-    check(rows[0].spike_score == 0, "PID reuse cannot produce a false spike");
-    tracker.update(rows = {});
-    rows = {cpu}; rows[0].creation_time = 1; rows[0].cpu_percent = 100;
     tracker.update(rows);
-    check(rows[0].spike_score == 0, "exited process baselines are removed");
-    rows[0].rx_bytes_per_second = 0;
-    tracker.update(rows);
-    rows[0].rx_bytes_per_second = 131072;
-    tracker.update(rows);
-    check(rows[0].spike_score == 2.0, "auto detects network receive bursts in KiB/s units");
-    rows[0].tx_bytes_per_second=0; tracker.update(rows);
-    rows[0].tx_bytes_per_second=196608; tracker.update(rows);
-    check(rows[0].spike_score==3.0,"auto detects transmit bursts independently from receive");
-    auto steady=rows[0]; steady.pid=99; steady.spike_score=0; steady.cpu_percent=100;
-    rows[0].cpu_percent=0; rows.push_back(steady);
-    fluxtop::sort_processes(rows,fluxtop::Sort::automatic);
-    check(rows[0].pid!=99,"network burst ranks above steady high CPU");
-    tracker.update(rows);
-    check(rows[0].spike_score==0,"steady network traffic stops being a spike");
+    fluxtop::sort_processes(rows, fluxtop::Sort::automatic);
+    check(rows[0].pid == 3, "active steady GPU stays above low usage");
+
+    fluxtop::Process cpuHeavy;
+    cpuHeavy.pid = 99; cpuHeavy.creation_time = 7; cpuHeavy.cpu_percent = 85;
+    std::vector<fluxtop::Process> high{cpuHeavy};
+    tracker.update(high);
+    check(fluxtop::auto_rank(high[0]).metric == fluxtop::AutoMetric::cpu,
+        "high CPU ranks even on the first sample");
+    tracker.update(high);
+    check(fluxtop::auto_rank(high[0]).score >= 1.0,
+        "stable CPU load does not disappear from auto ranking");
+    check(fluxtop::auto_rank(high[0],2U).metric == fluxtop::AutoMetric::none,
+        "hidden CPU does not influence automatic ranking");
+
+    high[0].cpu_percent=0;
+    tracker.update(high);
+    check(fluxtop::auto_rank(high[0]).metric == fluxtop::AutoMetric::none,
+        "process drops from ranking when sustained load disappears");
+    high[0].creation_time=8; high[0].cpu_percent=100;
+    tracker.update(high);
+    check(high[0].spike_score == 0, "PID reuse cannot create a false burst");
+    tracker.update(high = {});
+    high = {cpuHeavy}; tracker.update(high);
+    check(high[0].spike_score == 0, "exited process baselines are removed");
+
+    fluxtop::Process network;
+    network.pid=100; network.creation_time=9;
+    network.rx_bytes_per_second=0; network.tx_bytes_per_second=0;
+    high={network}; tracker.update(high);
+    high[0].rx_bytes_per_second=131072;
+    tracker.update(high);
+    check(high[0].spike_score == 2.0, "Rx burst detection preserved");
+    check(fluxtop::auto_rank(high[0]).burst, "rising Rx value should be orange");
+    check(fluxtop::auto_rank(high[0]).metric == fluxtop::AutoMetric::rx,
+        "Rx is attributed to the exact network value");
+    tracker.update(high);
+    check(high[0].spike_score==0 && fluxtop::auto_rank(high[0]).metric == fluxtop::AutoMetric::rx,
+        "steady Rx remains ranked after burst");
+    check(!fluxtop::auto_rank(high[0]).burst, "stable Rx should be red, not orange");
+    high[0].tx_bytes_per_second=196608;
+    tracker.update(high);
+    check(high[0].spike_score == 3.0, "Tx burst detected independently");
+    check(fluxtop::auto_rank(high[0]).metric == fluxtop::AutoMetric::tx,
+        "Tx is attributed to the exact network value");
+    check(fluxtop::auto_rank(high[0],1U).metric == fluxtop::AutoMetric::none,
+        "hidden network column does not drive auto ranking");
 }
+
 void output_tests() {
     check(fluxtop::json_escape("a\"\\\n\t\x01") == "\"a\\\"\\\\\\n\\t\\u0001\"", "JSON control escaping");
     check(fluxtop::json_escape("приложение") == "\"приложение\"", "UTF-8 preserved");

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -19,12 +20,21 @@ struct RawProcess {
     std::optional<std::uint64_t> private_bytes;
 };
 
+enum class AutoMetric : std::uint8_t { none, cpu, ram, gpu, vram, rx, tx };
+struct AutoRank {
+    double score{};
+    AutoMetric metric{AutoMetric::none};
+    bool burst{};
+};
+
 struct Process : RawProcess {
     std::optional<double> cpu_percent;
     std::optional<double> gpu_percent;
     std::optional<std::uint64_t> dedicated_gpu_bytes;
     bool has_baseline{};
     double spike_score{};
+    std::array<double,6> auto_scores{}; // CPU, RAM, GPU, GPU RAM, Rx, Tx
+    std::array<double,6> burst_scores{}; // Immediate growth, separate from sustained load
     std::optional<double> rx_bytes_per_second, tx_bytes_per_second;
 };
 
@@ -47,7 +57,8 @@ public:
 private:
     std::unordered_map<std::uint32_t, Process> previous_;
 };
-void sort_processes(std::vector<Process>& rows, Sort sort);
+AutoRank auto_rank(const Process& row, unsigned visible_metrics = 31U);
+void sort_processes(std::vector<Process>& rows, Sort sort, unsigned visible_metrics = 31U);
 std::optional<std::uint32_t> gpu_instance_pid(const std::wstring& instance);
 
 struct Snapshot {
@@ -66,7 +77,8 @@ struct Snapshot {
     std::optional<std::uint32_t> self_handles;
     std::string gpu_status; // disabled, unavailable, partial, ready
     std::optional<double> total_cpu_percent, total_gpu_percent;
-    std::optional<std::uint64_t> total_ram_used, total_ram_capacity, total_gpu_memory;
+    std::optional<std::uint64_t> total_ram_used, total_ram_capacity, total_gpu_memory, total_gpu_memory_capacity;
+    std::optional<double> cpu_temperature_c, gpu_temperature_c;
     std::optional<double> total_rx_bytes_per_second, total_tx_bytes_per_second;
     std::string network_status;
     double interval_ms{};

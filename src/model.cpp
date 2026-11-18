@@ -34,37 +34,81 @@ std::vector<Process> CpuTracker::update(const std::vector<RawProcess>& raw, unsi
     return rows;
 }
 
+namespace {
+// Normalized sustained load + rising-edge burst; thresholds are deliberately conservative.
+constexpr double mib = 1048576.0;
+constexpr double kib = 1024.0;
+constexpr std::array<double,6> sustained_units{10.0,256.0*mib,10.0,256.0*mib,64.0*kib,64.0*kib};
+constexpr std::array<double,6> burst_units{5.0,64.0*mib,5.0,64.0*mib,64.0*kib,64.0*kib};
+constexpr std::array<unsigned,6> visible_bits{1U,2U,4U,8U,16U,16U};
+std::array<std::optional<double>,6> metric_values(const Process& p) {
+    return {p.cpu_percent,
+        p.working_set ? std::optional<double>(static_cast<double>(*p.working_set)) : std::nullopt,
+        p.gpu_percent,
+        p.dedicated_gpu_bytes ? std::optional<double>(static_cast<double>(*p.dedicated_gpu_bytes)) : std::nullopt,
+        p.rx_bytes_per_second,p.tx_bytes_per_second};
+}
+double nonnegative(std::optional<double> value) {
+    return value && std::isfinite(*value) && *value > 0 ? *value : 0.0;
+}
+} // namespace
+
 void SpikeTracker::update(std::vector<Process>& rows) {
     std::unordered_map<std::uint32_t, Process> next;
     next.reserve(rows.size());
     for (auto& row : rows) {
         row.spike_score = 0;
+        row.auto_scores.fill(0);
+        row.burst_scores.fill(0);
         const auto found = previous_.find(row.pid);
-        if (row.creation_time && found != previous_.end() && found->second.creation_time == row.creation_time) {
-            const auto& before = found->second;
-            const auto growth = [](auto now, auto old, double scale) {
-                return now && old && *now > *old ? (static_cast<double>(*now) - static_cast<double>(*old)) / scale : 0.0;
-            };
-            row.spike_score = std::max({growth(row.cpu_percent, before.cpu_percent, 5.0),
-                growth(row.gpu_percent, before.gpu_percent, 5.0),
-                growth(row.working_set, before.working_set, 64.0 * 1048576),
-                growth(row.dedicated_gpu_bytes, before.dedicated_gpu_bytes, 64.0 * 1048576),
-                growth(row.rx_bytes_per_second, before.rx_bytes_per_second, 64.0 * 1024),
-                growth(row.tx_bytes_per_second, before.tx_bytes_per_second, 64.0 * 1024)});
+        const bool same_process = row.creation_time && found != previous_.end()
+            && found->second.creation_time == row.creation_time;
+        const auto current = metric_values(row);
+        const auto previous = same_process ? metric_values(found->second)
+            : std::array<std::optional<double>,6>{};
+        for (std::size_t i = 0; i < current.size(); ++i) {
+            const double now = nonnegative(current[i]);
+            const double before = nonnegative(previous[i]);
+            const double burst = same_process && current[i] && previous[i] && now > before
+                ? (now-before) / burst_units[i] : 0.0;
+            row.spike_score = std::max(row.spike_score,burst);
+            row.burst_scores[i] = burst;
+            // Sustained load must rank even when the derivative is zero.
+            const double steady = now >= sustained_units[i]
+                ? std::log2(1.0 + now / sustained_units[i]) : 0.0;
+            // Decay previous priority only while the process is still significantly active.
+            const double retained = same_process && steady >= 1.0
+                ? found->second.auto_scores[i] * 0.65 : 0.0;
+            row.auto_scores[i] = std::max({steady,burst,retained});
         }
-        next.emplace(row.pid, row);
+        next.emplace(row.pid,row);
     }
     previous_ = std::move(next);
 }
 
-void sort_processes(std::vector<Process>& rows, Sort sort) {
-    const auto value = [sort](const Process& row) -> std::optional<double> {
+AutoRank auto_rank(const Process& row, unsigned visible_metrics) {
+    AutoRank result{};
+    for (std::size_t i = 0; i < row.auto_scores.size(); ++i) {
+        if (!(visible_metrics & visible_bits[i])) continue;
+        const double score = row.auto_scores[i];
+        if (std::isfinite(score) && score >= 1.0 && score > result.score) {
+            result.score = score;
+            result.metric = static_cast<AutoMetric>(i+1);
+            // Orange only when the burst actually determines the rank.
+            result.burst = row.burst_scores[i] >= 1.0 && row.burst_scores[i] >= score - 1e-9;
+        }
+    }
+    return result;
+}
+
+void sort_processes(std::vector<Process>& rows, Sort sort, unsigned visible_metrics) {
+    const auto value = [sort,visible_metrics](const Process& row) -> std::optional<double> {
         switch (sort) {
         case Sort::cpu: return row.cpu_percent;
         case Sort::ram: return row.working_set ? std::optional<double>(static_cast<double>(*row.working_set)) : std::nullopt;
         case Sort::gpu: return row.gpu_percent;
         case Sort::vram: return row.dedicated_gpu_bytes ? std::optional<double>(static_cast<double>(*row.dedicated_gpu_bytes)) : std::nullopt;
-        case Sort::automatic: return row.spike_score >= 1.0 ? row.spike_score : 0.0;
+        case Sort::automatic: return auto_rank(row, visible_metrics).score;
         case Sort::rx: return row.rx_bytes_per_second;
         case Sort::tx: return row.tx_bytes_per_second;
         case Sort::network:

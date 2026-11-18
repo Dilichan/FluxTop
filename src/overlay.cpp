@@ -30,8 +30,13 @@ enum Control : UINT { open_client = 100, toggle_table, quit_app, top_control, so
     alpha_control, visible_control, move_control, icons_control, stats_control, startup_control,
     alpha_label, interval_control, summary_control, metric_control = 200 };
 constexpr unsigned all_metrics = 31;
+constexpr int load_band(double x) { return x < 50.0 ? 0 : x < 70.0 ? 1 : 2; }
+constexpr int temperature_band(double x) { return x < 65.0 ? 0 : x <= 80.0 ? 1 : 2; }
+static_assert(load_band(49.9) == 0 && load_band(50.0) == 1 && load_band(70.0) == 2);
+static_assert(temperature_band(64.9) == 0 && temperature_band(65.0) == 1
+    && temperature_band(80.0) == 1 && temperature_band(80.1) == 2);
 constexpr std::array<const wchar_t*,5> metric_names{L"CPU",L"RAM",L"GPU",L"GPU RAM",L"Rx/Tx"};
-constexpr std::array<float,5> metric_widths{5.8f,5.8f,5.8f,10.4f,16.0f};
+constexpr std::array<float,5> metric_widths{5.0f,5.8f,5.8f,10.4f,14.0f};
 constexpr UINT_PTR settings_timer = 1;
 
 std::wstring wide(std::string_view value) {
@@ -85,6 +90,8 @@ struct Row {
     std::uint32_t pid{};
     std::optional<std::uint64_t> created;
     std::wstring name, cpu, ram, gpu, vram, network;
+    AutoMetric highlight{AutoMetric::none};
+    bool burst{};
     bool operator==(const Row&) const = default;
 };
 
@@ -119,7 +126,10 @@ private:
     void release_surface();
     void surface();
     void paint();
-    void draw_text(std::wstring_view value, D2D1_RECT_F rect, IDWriteTextFormat* font);
+    void draw_text(std::wstring_view value, D2D1_RECT_F rect, IDWriteTextFormat* font, bool highlight = false, bool burst = false);
+    void draw_header_metric(unsigned column, const std::wstring& reading, std::optional<double> load,
+        std::optional<double> temperature, D2D1_RECT_F rect);
+    void draw_network_text(const Row& row, D2D1_RECT_F rect);
     std::array<D2D1_RECT_F,6> columns(float y, float height) const;
     float text_size() const { return static_cast<float>(options_.font_size); }
     float row_height() const { return text_size() * 1.6f; }
@@ -128,8 +138,8 @@ private:
     float table_width() const {
         float width = summary_only() ? 0 : 12.0f + (show_icons_ ? 1.7f : 0);
         for (unsigned i=0;i<metric_names.size();++i) if (active_metrics() & (1U<<i)) {
-            if (width) width += .6f;
-            width += metric_widths[i];
+            if (width) width += .45f;
+            width += (i == 0 || i == 2) ? std::max(metric_widths[i], 9.8f) : i == 3 ? std::max(metric_widths[i], 12.8f) : metric_widths[i];
         }
         return text_size()*width+4;
     }
@@ -304,7 +314,7 @@ void Overlay::init_client() {
     SendMessageW(top, EM_SETLIMITTEXT, 3, 0);
     control(L"STATIC", L"Сортировка", 0, 0, 22, 106, 230, 24);
     const auto sort = control(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, sort_control, 290, 102, 268, 160);
-    for (const auto label : {L"CPU", L"RAM", L"GPU", L"Память GPU", L"Авто — всплески нагрузки", L"Rx — приём", L"Tx — передача", L"Rx/Tx — суммарный трафик"}) SendMessageW(sort, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
+    for (const auto label : {L"CPU", L"RAM", L"GPU", L"Память GPU", L"Авто — всплески и нагрузка", L"Rx — приём", L"Tx — передача", L"Rx/Tx — суммарный трафик"}) SendMessageW(sort, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
     SendMessageW(sort, CB_SETCURSEL, static_cast<WPARAM>(options_.sort), 0);
     control(L"STATIC", L"Размер текста, px (10–36)", 0, 0, 22, 150, 250, 24);
     const auto edit = control(L"EDIT", std::to_wstring(options_.font_size).c_str(), WS_BORDER | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, font_control, 290, 146, 268, 29);
@@ -433,12 +443,15 @@ void Overlay::receive() {
 }
 void Overlay::update_view() {
     if (!snapshot_) return;
-    auto& s = *snapshot_; sort_processes(s.processes, options_.sort);
+    auto& s = *snapshot_; sort_processes(s.processes, options_.sort, active_metrics());
     std::vector<Row> next;
     for (std::size_t i = 0; !summary_only() && i < std::min(s.processes.size(), static_cast<std::size_t>(options_.top)); ++i) {
         const auto& p = s.processes[i];
         auto name = wide(p.name); if (name.ends_with(L".exe")) name.resize(name.size()-4);
-        next.push_back({p.pid,p.creation_time,std::move(name),percent(p.cpu_percent),memory(p.working_set),percent(p.gpu_percent),memory(p.dedicated_gpu_bytes),network_rate(p.rx_bytes_per_second,p.tx_bytes_per_second)});
+                const auto rank = options_.sort == Sort::automatic ? auto_rank(p,active_metrics()) : AutoRank{};
+        const auto highlight = options_.sort == Sort::automatic
+            ? rank.metric : AutoMetric::none;
+        next.push_back({p.pid,p.creation_time,std::move(name),percent(p.cpu_percent),memory(p.working_set),percent(p.gpu_percent),memory(p.dedicated_gpu_bytes),network_rate(p.rx_bytes_per_second,p.tx_bytes_per_second),highlight,rank.burst});
     }
     if (visible_ && show_icons_ && !summary_only()) {
         if (!icons_) icons_ = std::make_unique<AppIconCache>(local_file(L"FLUXTOP_ICON_DB", L"icons.db"), [this] {
@@ -472,16 +485,87 @@ void Overlay::surface() {
     require_hr(target_->CreateSolidColorBrush(D2D1::ColorF(1,1,1,1),&brush_), "Text brush");
     target_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 }
-void Overlay::draw_text(std::wstring_view value, D2D1_RECT_F rect, IDWriteTextFormat* font) {
+void Overlay::draw_text(std::wstring_view value, D2D1_RECT_F rect, IDWriteTextFormat* font, bool highlight, bool burst) {
     auto shadow = rect; shadow.left += 1; shadow.right += 1; shadow.top += 1; shadow.bottom += 1;
     brush_->SetColor(D2D1::ColorF(0,0,0,.8f));
     target_->DrawText(value.data(),static_cast<UINT32>(value.size()),font,shadow,brush_.Get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    brush_->SetColor(D2D1::ColorF(1,1,1,1));
+    brush_->SetColor(highlight ? (burst ? D2D1::ColorF(1.0f,0.53f,0.12f,1.0f)
+        : D2D1::ColorF(1.0f,0.22f,0.22f,1.0f)) : D2D1::ColorF(1,1,1,1));
     target_->DrawText(value.data(),static_cast<UINT32>(value.size()),font,rect,brush_.Get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
+}
+
+void Overlay::draw_network_text(const Row& row, D2D1_RECT_F rect) {
+    draw_text(row.network,rect,number_font_.Get());
+    if (options_.sort != Sort::automatic || (row.highlight != AutoMetric::rx && row.highlight != AutoMetric::tx)) return;
+    const auto separator = row.network.find(L" / ");
+    if (separator == std::wstring::npos) return;
+    const std::size_t first = row.highlight == AutoMetric::rx ? 0 : separator + 3;
+    const std::size_t last = row.highlight == AutoMetric::rx ? separator : row.network.find(L' ',first);
+    const std::size_t limit = last == std::wstring::npos ? row.network.size() : last;
+    if (limit <= first) return;
+    ComPtr<IDWriteTextLayout> layout;
+    if (FAILED(write_factory_->CreateTextLayout(row.network.c_str(),static_cast<UINT32>(row.network.size()),
+        number_font_.Get(),rect.right-rect.left,rect.bottom-rect.top,&layout))) return;
+    DWRITE_HIT_TEST_METRICS hit{};
+    UINT32 count{};
+    if (FAILED(layout->HitTestTextRange(static_cast<UINT32>(first),static_cast<UINT32>(limit-first),
+        0,0,&hit,1,&count)) || count != 1 || hit.width <= 0) return;
+    target_->PushAxisAlignedClip(D2D1::RectF(rect.left+hit.left,rect.top+hit.top,
+        rect.left+hit.left+hit.width,rect.top+hit.top+hit.height),D2D1_ANTIALIAS_MODE_ALIASED);
+    draw_text(row.network,rect,number_font_.Get(),true,row.burst);
+    target_->PopAxisAlignedClip();
+}
+
+void Overlay::draw_header_metric(unsigned column, const std::wstring& reading, std::optional<double> load,
+    std::optional<double> temperature, D2D1_RECT_F rect) {
+    std::wstring line = metric_names[column];
+    line += L" ";
+    const auto from = line.size();
+    line += reading;
+    const auto digits = line.size() - from;
+    std::size_t temp_from = 0, temp_length = 0;
+    if (column == 0 || column == 2) {
+        line += L" ";
+        temp_from = line.size();
+        line += (temperature ? decimal(*temperature,0) + L"°C" : L"—°C");
+        if (temperature) temp_length = line.size() - temp_from;
+    }
+    draw_text(line,rect,number_font_.Get());
+    auto tint = [&](std::size_t offset, std::size_t length, D2D1_COLOR_F color) {
+        ComPtr<IDWriteTextLayout> layout;
+        if (FAILED(write_factory_->CreateTextLayout(line.c_str(),static_cast<UINT32>(line.size()),
+            number_font_.Get(),rect.right-rect.left,rect.bottom-rect.top,&layout))) return;
+        DWRITE_HIT_TEST_METRICS hits[8]{};
+        UINT32 count = 0;
+        if (FAILED(layout->HitTestTextRange(static_cast<UINT32>(offset),static_cast<UINT32>(length),
+            0,0,hits,8,&count))) return;
+        for (UINT32 i=0;i<count;++i) {
+            const auto& hit = hits[i];
+            if (hit.width <= 0 || hit.height <= 0) continue;
+            target_->PushAxisAlignedClip(D2D1::RectF(rect.left+hit.left,rect.top+hit.top,
+                rect.left+hit.left+hit.width,rect.top+hit.top+hit.height),D2D1_ANTIALIAS_MODE_ALIASED);
+            brush_->SetColor(color);
+            target_->DrawText(line.c_str(),static_cast<UINT32>(line.size()),number_font_.Get(),
+                rect,brush_.Get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            target_->PopAxisAlignedClip();
+        }
+    };
+    if (load && std::isfinite(*load) && *load >= 0) {
+        const auto color = *load < 50 ? D2D1::ColorF(0.25f,0.92f,0.35f,1.0f)
+            : *load < 70 ? D2D1::ColorF(1.0f,0.80f,0.13f,1.0f)
+            : D2D1::ColorF(1.0f,0.22f,0.22f,1.0f);
+        tint(from,digits,color);
+    }
+    if (temp_length) {
+        const auto color = *temperature < 65 ? D2D1::ColorF(0.25f,0.92f,0.35f,1.0f)
+            : *temperature <= 80 ? D2D1::ColorF(1.0f,0.80f,0.13f,1.0f)
+            : D2D1::ColorF(1.0f,0.22f,0.22f,1.0f);
+        tint(temp_from,temp_length,color);
+    }
 }
 std::array<D2D1_RECT_F,6> Overlay::columns(float y, float height) const {
     std::array<D2D1_RECT_F,6> result{};
-    const float fs = text_size(), gap = fs*.6f;
+    const float fs = text_size(), gap = fs*.45f;
     float start = 2;
     if (!summary_only()) {
         start += show_icons_ ? fs*1.7f : 0;
@@ -489,7 +573,9 @@ std::array<D2D1_RECT_F,6> Overlay::columns(float y, float height) const {
         start = result[0].right+gap;
     }
     for (unsigned i=0;i<metric_names.size();++i) if (active_metrics() & (1U<<i)) {
-        result[i+1] = D2D1::RectF(start,y,start+fs*metric_widths[i],y+height);
+        const auto factor = (i == 0 || i == 2) ? std::max(metric_widths[i], 9.8f)
+            : i == 3 ? std::max(metric_widths[i], 12.8f) : metric_widths[i];
+        result[i+1] = D2D1::RectF(start,y,start+fs*factor,y+height);
         start = result[i+1].right+gap;
     }
     return result;
@@ -511,8 +597,25 @@ void Overlay::paint() {
         totals = {percent(s.total_cpu_percent),percent(ram),percent(s.total_gpu_percent),
             memory(s.total_gpu_memory),network_rate(s.total_rx_bytes_per_second,s.total_tx_bytes_per_second)};
     }
+    std::array<std::optional<double>,5> load{};
+    std::optional<double> cpu_temperature, gpu_temperature;
+    if (snapshot_) {
+        const auto& s = *snapshot_;
+        load[0] = s.total_cpu_percent;
+        if (s.total_ram_used && s.total_ram_capacity && *s.total_ram_capacity)
+            load[1] = 100.0 * static_cast<double>(*s.total_ram_used) / static_cast<double>(*s.total_ram_capacity);
+        load[2] = s.total_gpu_percent;
+        if (s.total_gpu_memory && s.total_gpu_memory_capacity && *s.total_gpu_memory_capacity) {
+            load[3] = 100.0 * static_cast<double>(*s.total_gpu_memory) / static_cast<double>(*s.total_gpu_memory_capacity);
+            totals[3] = decimal(static_cast<double>(*s.total_gpu_memory) / 1073741824.0)
+                + L"/" + decimal(static_cast<double>(*s.total_gpu_memory_capacity) / 1073741824.0) + L" GiB";
+        }
+        cpu_temperature = s.cpu_temperature_c;
+        gpu_temperature = s.gpu_temperature_c;
+    }
     for (std::size_t i=1;i<header.size();++i) if (active_metrics() & (1U<<(i-1)))
-        draw_text(std::wstring(metric_names[i-1])+L" "+totals[i-1],header[i],number_font_.Get());
+        draw_header_metric(static_cast<unsigned>(i-1),totals[i-1],load[i-1],
+            i==1 ? cpu_temperature : i==3 ? gpu_temperature : std::optional<double>{},header[i]);
     const auto count = visible_rows(dip(bitmap_size_.cy));
     scroll_ = std::min(scroll_, rows_.size()>count ? rows_.size()-count : 0);
     for (std::size_t i=0;i<count && i+scroll_<rows_.size();++i) {
@@ -527,8 +630,11 @@ void Overlay::paint() {
         }
         draw_text(row.name,cells[0],body_font_.Get());
         const std::array values{row.cpu,row.ram,row.gpu,row.vram,row.network};
-        for (std::size_t column=0;column<metric_names.size();++column) if (active_metrics() & (1U<<column))
-            draw_text(values[column],cells[column+1],number_font_.Get());
+        for (std::size_t column=0;column<metric_names.size();++column) if (active_metrics() & (1U<<column)) {
+            if (column == 4) draw_network_text(row,cells[column+1]);
+            else draw_text(values[column],cells[column+1],number_font_.Get(),
+                options_.sort == Sort::automatic && static_cast<unsigned>(row.highlight) == column+1,row.burst);
+        }
     }
     const auto result = target_->EndDraw();
     if (result == D2DERR_RECREATE_TARGET) { release_surface(); return; }
