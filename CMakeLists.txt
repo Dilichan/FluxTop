@@ -81,6 +81,8 @@ if(BUILD_TESTING)
     target_compile_definitions(fluxtop_statistics_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
     target_link_libraries(fluxtop_statistics_tests PRIVATE fluxtop_history fluxtop_core winsqlite3)
     add_test(NAME statistics COMMAND fluxtop_statistics_tests "${CMAKE_CURRENT_BINARY_DIR}")
+    add_test(NAME statistics_table_popout_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+        -File "${PROJECT_SOURCE_DIR}/tests/statistics_table_popout_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
     add_test(NAME statistics_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
         -File "${PROJECT_SOURCE_DIR}/tests/statistics_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
     add_test(NAME statistics_popout_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass

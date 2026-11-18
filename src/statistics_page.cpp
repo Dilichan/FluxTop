@@ -18,13 +18,16 @@
 namespace fluxtop {
 namespace {
 constexpr wchar_t page_class[]=L"FluxTop.Statistics.Page";
+constexpr wchar_t hover_class[]=L"FluxTop.Statistics.HoverTooltip.v1";
+constexpr wchar_t table_class[]=L"FluxTop.Statistics.DetachedTable.v1";
 constexpr UINT ready_message=WM_APP+201;
 constexpr UINT_PTR animate_message=2201;
-enum : int { period_id=1001,from_id,to_id,system_id,table_id,stats_limit_id,popout_live_id,popout_history_id };
+enum : int { period_id=1001,from_id,to_id,system_id,table_id,stats_limit_id,popout_live_id,popout_history_id,popout_table_id };
 // Logical page dimensions; chart labels and Win32 controls share the same grid.
 constexpr int page_width=760, page_height=860;
-constexpr RECT one_minute{54,153,728,305};
-constexpr RECT history_chart{54,365,728,517};
+constexpr int auto_live_id=1201, auto_history_id=1202, popup_auto_id=1203;
+constexpr RECT one_minute{54,190,728,332};
+constexpr RECT history_chart{54,406,728,548};
 std::int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -74,6 +77,22 @@ double pixel_hue(int r,int g,int b) {
     double hue=hi==r?60.0*(g-b)/delta:hi==g?60.0*(b-r)/delta+120:60.0*(r-g)/delta+240;
     return hue<0?hue+360:hue;
 }
+// Pick a readable 0..Y scale from the values actually visible in this chart.
+// E.g. a peak of 29 -> 35, peak of 7 -> 9; preserve 0..100 for empty data.
+double auto_vertical_zoom(const std::vector<StatisticsApplication>& apps,
+    std::int64_t from,std::int64_t to) {
+    double peak=0.0;
+    bool found=false;
+    for(const auto& app:apps) for(const auto& point:app.points) {
+        if(point.first<from || point.first>to || !std::isfinite(point.second)) continue;
+        found=true;peak=std::max(peak,std::clamp(point.second,0.0,100.0));
+    }
+    if(!found) return 1.0;
+    const double padded=std::clamp(peak*1.18,2.0,100.0);
+    const double step=padded<=10.0?1.0:padded<=25.0?2.0:padded<=50.0?5.0:10.0;
+    const double ceiling=std::clamp(std::ceil(padded/step)*step,2.0,100.0);
+    return 100.0/ceiling;
+}
 void label(HDC dc,const wchar_t* text,int x,int y,COLORREF color=RGB(58,56,52)) {
     SetTextColor(dc,color); SetBkMode(dc,TRANSPARENT); TextOutW(dc,x,y,text,static_cast<int>(wcslen(text)));
 }
@@ -85,6 +104,8 @@ StatisticsPage::StatisticsPage(HWND parent,std::filesystem::path database,
     limit_=static_cast<unsigned>(std::clamp(GetPrivateProfileIntW(L"overlay",L"stats_top",
         static_cast<int>(limit),settings_.c_str()),1U,100U));
     system_=GetPrivateProfileIntW(L"overlay",L"stats_show_system",0,settings_.c_str())!=0;
+    auto_scale_[0]=GetPrivateProfileIntW(L"overlay",L"stats_auto_live",1,settings_.c_str())!=0;
+    auto_scale_[1]=GetPrivateProfileIntW(L"overlay",L"stats_auto_history",1,settings_.c_str())!=0;
     popups_[0].owner=this;popups_[0].kind=0;
     popups_[1].owner=this;popups_[1].kind=1;
     WNDCLASSEXW cls{}; cls.cbSize=sizeof(cls);cls.hInstance=GetModuleHandleW(nullptr);
@@ -96,6 +117,18 @@ StatisticsPage::StatisticsPage(HWND parent,std::filesystem::path database,
         0,0,page_width,page_height,parent,nullptr,GetModuleHandleW(nullptr),this);
     if(!hwnd_) throw windows_error("Create Statistics page");
     make_controls();
+    WNDCLASSEXW hover{};
+    hover.cbSize=sizeof(hover);
+    hover.hInstance=GetModuleHandleW(nullptr);
+    hover.lpfnWndProc=hover_dispatch;
+    hover.lpszClassName=hover_class;
+    hover.hCursor=LoadCursorW(nullptr,IDC_ARROW);
+    if(!RegisterClassExW(&hover) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)
+        throw windows_error("Register statistics tooltip");
+    tooltip_=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_TRANSPARENT,
+        hover_class,L"",WS_POPUP,0,0,260,68,GetAncestor(hwnd_,GA_ROOT),nullptr,
+        GetModuleHandleW(nullptr),this);
+    if(!tooltip_) throw windows_error("Create statistics tooltip");
     worker_=std::jthread([this](std::stop_token stop){
         unsigned finished=0;
         while(!stop.stop_requested()) {
@@ -119,6 +152,8 @@ StatisticsPage::StatisticsPage(HWND parent,std::filesystem::path database,
 }
 StatisticsPage::~StatisticsPage() {
     if(hwnd_) KillTimer(hwnd_,animate_message);
+    if(table_window_ && IsWindow(table_window_)) DestroyWindow(table_window_);
+    if(tooltip_ && IsWindow(tooltip_)) DestroyWindow(tooltip_);
     for(auto& popup:popups_)
         if(popup.window && IsWindow(popup.window)) DestroyWindow(popup.window);
     worker_.request_stop();{std::lock_guard lock(mutex_);cancel_query_.request_stop();}wake_.notify_all();
@@ -150,7 +185,9 @@ void StatisticsPage::make_controls() {
     SendMessageW(limit_slider_,TBM_SETRANGE,TRUE,MAKELPARAM(1,100));
     SendMessageW(limit_slider_,TBM_SETPOS,TRUE,limit_);
     SetWindowTextW(limit_label_,(L"Приложений в статистике: "+std::to_wstring(limit_)).c_str());
-    first_label_=add(L"STATIC",L"Первый снимок в БД: определяем…",0,0);
+    // Keep the database-bound calendar control, but hide internal storage notes.
+    first_label_=add(L"STATIC",L"",0,0);
+    ShowWindow(first_label_,SW_HIDE);
     table_=add(WC_LISTVIEWW,L"",LVS_REPORT|LVS_SINGLESEL|LVS_SHOWSELALWAYS|WS_TABSTOP,table_id);
     ListView_SetExtendedListViewStyle(table_,LVS_EX_FULLROWSELECT|LVS_EX_DOUBLEBUFFER);
     for(const auto& col:std::array<std::pair<const wchar_t*,int>,3>{{{L"Приложение",300},{L"Аптайм",140},{L"Последняя активность",255}}}) {
@@ -160,8 +197,13 @@ void StatisticsPage::make_controls() {
     }
     image_list_=ImageList_Create(16,16,ILC_COLOR32|ILC_MASK,12,12);
     if(image_list_) ListView_SetImageList(table_,image_list_,LVSIL_SMALL);
-    popout_live_=add(L"BUTTON",L"Открыть отдельно",BS_FLAT|WS_TABSTOP,popout_live_id);
+    popout_live_=add(L"BUTTON",L"Открыть отдельно",WS_TABSTOP,popout_live_id);
     popout_history_=add(L"BUTTON",L"Открыть отдельно",BS_FLAT|WS_TABSTOP,popout_history_id);
+    auto_live_=add(L"BUTTON",L"Автомасштаб",BS_AUTOCHECKBOX|WS_TABSTOP,auto_live_id);
+    auto_history_=add(L"BUTTON",L"Автомасштаб",BS_AUTOCHECKBOX|WS_TABSTOP,auto_history_id);
+    SendMessageW(auto_live_,BM_SETCHECK,auto_scale_[0]?BST_CHECKED:BST_UNCHECKED,0);
+    SendMessageW(auto_history_,BM_SETCHECK,auto_scale_[1]?BST_CHECKED:BST_UNCHECKED,0);
+    popout_table_=add(L"BUTTON",L"Открыть отдельно",WS_TABSTOP,popout_table_id);
     layout();update_dates();
 }
 void StatisticsPage::resize(int x,int y,int width,int height) {
@@ -176,28 +218,35 @@ void StatisticsPage::layout() {
         MoveWindow(w,sx(x),sy(y),sx(width),sy(height),TRUE);
     };
     // A shared rhythm keeps captions, axes and controls from overlapping.
-    put(period_,18,18,155,230);
-    put(from_,197,19,153,27);
-    put(to_,370,19,153,27);
-    put(first_label_,18,60,724,43);
-    put(popout_live_,599,117,137,28);
-    put(popout_history_,599,329,137,28);
-    put(show_system_,18,559,300,29);
-    put(limit_label_,337,565,234,25);
-    put(limit_slider_,564,557,170,35);
-    put(table_,18,633,716,211);
+    put(period_,18,56,165,230);
+    put(from_,210,57,150,27);
+    put(to_,385,57,150,27);
+    put(first_label_,18,102,724,27);
+    put(popout_live_,596,151,140,28);
+    put(auto_live_,441,151,148,28);
+    put(popout_history_,596,367,140,28);
+    put(auto_history_,441,367,148,28);
+    // The statistics-only limit controls BOTH charts and BOTH uptime tables.
+    put(limit_label_,18,17,315,27);
+    put(limit_slider_,344,11,394,35);
+    put(show_system_,18,581,335,29);
+    put(table_,18,662,716,182);
+    put(popout_table_,596,621,140,28);
     ListView_SetColumnWidth(table_,0,sx(307));
     ListView_SetColumnWidth(table_,1,sx(140));
     ListView_SetColumnWidth(table_,2,sx(255));
     if(!font_) font_=CreateFontW(-MulDiv(14,GetDpiForWindow(hwnd_),96),0,0,0,FW_NORMAL,0,0,0,
         DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
-    for(auto child:{period_,from_,to_,first_label_,show_system_,limit_label_,limit_slider_,table_,popout_live_,popout_history_})
+    for(auto child:{period_,from_,to_,first_label_,show_system_,limit_label_,limit_slider_,table_,popout_live_,popout_history_,popout_table_,auto_live_,auto_history_})
         SendMessageW(child,WM_SETFONT,reinterpret_cast<WPARAM>(font_),TRUE);
-    ListView_SetBkColor(table_,RGB(250,250,250));
-    ListView_SetTextBkColor(table_,RGB(250,250,250));
+    ListView_SetBkColor(table_,GetSysColor(COLOR_WINDOW));
+    ListView_SetTextBkColor(table_,GetSysColor(COLOR_WINDOW));
+    ListView_SetTextColor(table_,GetSysColor(COLOR_WINDOWTEXT));
 }
 void StatisticsPage::activate(bool active) {
     active_=active;ShowWindow(hwnd_,active?SW_SHOW:SW_HIDE);
+    if(!active && tooltip_) ShowWindow(tooltip_,SW_HIDE);
+    if(!active && !popups_[0].window) KillTimer(hwnd_,animate_message);
     if(active) request();
 }
 void StatisticsPage::set_limit(unsigned limit) {
@@ -207,7 +256,10 @@ void StatisticsPage::set_limit(unsigned limit) {
     SendMessageW(limit_slider_,TBM_SETPOS,TRUE,limit_);
     SetWindowTextW(limit_label_,(L"Приложений в статистике: "+std::to_wstring(limit_)).c_str());
     WritePrivateProfileStringW(L"overlay",L"stats_top",std::to_wstring(limit_).c_str(),settings_.c_str());
-    if(active_) request();
+    rebuild_live_series();
+    if(active_) InvalidateRect(hwnd_,nullptr,FALSE);
+    for(auto& popup:popups_) if(popup.window) InvalidateRect(popup.window,nullptr,FALSE);
+    if(active_ || table_window_ || popups_[0].window || popups_[1].window) request();
 }
 std::int64_t StatisticsPage::custom_timestamp(HWND picker,bool until_end) {
     SYSTEMTIME local{};
@@ -228,7 +280,7 @@ std::int64_t StatisticsPage::custom_timestamp(HWND picker,bool until_end) {
     return static_cast<std::int64_t>((ticks.QuadPart-116444736000000000ULL)/10000ULL);
 }
 void StatisticsPage::request() {
-    if(!active_ && !popups_[0].window && !popups_[1].window) return;
+    if(!active_ && !popups_[0].window && !popups_[1].window && !table_window_) return;
     const auto now=now_ms();
     std::int64_t from=period_index_==0?now-86400000:now-604800000;
     std::int64_t to=now+1000;
@@ -255,9 +307,8 @@ void StatisticsPage::update_dates() {
         SYSTEMTIME bounds[2]{local_time(first_record_),local_time(now_ms())};
         SendMessageW(from_,DTM_SETRANGE,GDTR_MIN|GDTR_MAX,reinterpret_cast<LPARAM>(bounds));
         SendMessageW(to_,DTM_SETRANGE,GDTR_MIN|GDTR_MAX,reinterpret_cast<LPARAM>(bounds));
-        const auto line=std::wstring(L"Первая запись в БД: ")+local_label(first_record_)
-            +L"   ·   AutoScore записывается с момента установки статистики";
-        SetWindowTextW(first_label_,line.c_str());
+        // No user-facing implementation details; the calendar is still range-limited.
+        SetWindowTextW(first_label_,L"");
     }
 }
 void StatisticsPage::accept() {
@@ -276,29 +327,137 @@ void StatisticsPage::accept() {
     for(auto& popup:popups_) if(popup.window) InvalidateRect(popup.window,nullptr,FALSE);
 }
 void StatisticsPage::populate_table() {
-    ListView_DeleteAllItems(table_);
-    if(image_list_) ImageList_RemoveAll(image_list_);
-    std::map<std::wstring,int> images;
-    for(std::size_t i=0;i<history_.uptime.size();++i) {
-        const auto& app=history_.uptime[i];
-        LVITEMW item{};item.mask=LVIF_TEXT|LVIF_IMAGE;item.iItem=static_cast<int>(i);
-        item.pszText=const_cast<wchar_t*>(app.name.c_str());
-        item.iImage=-1;
-        if(image_list_ && !app.path.empty()) {
-            if(const auto it=images.find(app.path);it!=images.end()) item.iImage=it->second;
-            else if(HICON icon=application_icon(app.path)) {
-                item.iImage=ImageList_AddIcon(image_list_,icon);
-                images.emplace(app.path,item.iImage);
+    // Render the same selected SQLite rows into the tab and the detached table.
+    const auto fill=[this](HWND list,HIMAGELIST images) {
+        if(!list || !IsWindow(list)) return;
+        SendMessageW(list,WM_SETREDRAW,FALSE,0);
+        ListView_DeleteAllItems(list);
+        if(images) ImageList_RemoveAll(images);
+        std::map<std::wstring,int> icons;
+        for(std::size_t i=0;i<history_.uptime.size();++i) {
+            const auto& app=history_.uptime[i];
+            LVITEMW item{};
+            item.mask=LVIF_TEXT|LVIF_IMAGE;
+            item.iItem=static_cast<int>(i);
+            item.pszText=const_cast<wchar_t*>(app.name.c_str());
+            item.iImage=-1;
+            if(images && !app.path.empty()) {
+                if(const auto found=icons.find(app.path);found!=icons.end()) item.iImage=found->second;
+                else if(HICON icon=application_icon(app.path)) {
+                    item.iImage=ImageList_AddIcon(images,icon);
+                    icons.emplace(app.path,item.iImage);
+                }
             }
+            const auto row=ListView_InsertItem(list,&item);
+            if(row<0) continue;
+            auto uptime=span_label(app.observed_seconds);
+            auto last=local_label(app.last_seen_ms);
+            ListView_SetItemText(list,row,1,uptime.data());
+            ListView_SetItemText(list,row,2,last.data());
         }
-        const auto index=ListView_InsertItem(table_,&item);
-        if(index<0) continue;
-        auto uptime=span_label(app.observed_seconds);
-        auto last=local_label(app.last_seen_ms);
-        ListView_SetItemText(table_,index,1,uptime.data());
-        ListView_SetItemText(table_,index,2,last.data());
+        SendMessageW(list,WM_SETREDRAW,TRUE,0);
+        InvalidateRect(list,nullptr,FALSE);
+    };
+    fill(table_,image_list_);
+    fill(table_window_list_,table_image_list_);
+    if(table_window_info_) {
+        const auto line=L"Наблюдаемый аптайм  ·  "+std::to_wstring(history_.uptime.size())+
+            L" приложений  ·  лимит "+std::to_wstring(limit_);
+        SetWindowTextW(table_window_info_,line.c_str());
     }
 }
+
+void StatisticsPage::open_table() {
+    if(table_window_ && IsWindow(table_window_)) {
+        ShowWindow(table_window_,SW_RESTORE);
+        SetForegroundWindow(table_window_);
+        return;
+    }
+    WNDCLASSEXW cls{};
+    cls.cbSize=sizeof(cls);
+    cls.hInstance=GetModuleHandleW(nullptr);
+    cls.lpfnWndProc=table_dispatch;
+    cls.lpszClassName=table_class;
+    cls.hCursor=LoadCursorW(nullptr,IDC_ARROW);
+    cls.hbrBackground=GetSysColorBrush(COLOR_BTNFACE);
+    if(!RegisterClassExW(&cls) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)
+        throw windows_error("Register detached uptime table");
+    table_window_=CreateWindowExW(0,table_class,L"FluxTop — аптайм приложений",
+        WS_OVERLAPPEDWINDOW|WS_VISIBLE,CW_USEDEFAULT,CW_USEDEFAULT,980,560,
+        nullptr,nullptr,GetModuleHandleW(nullptr),this);
+    if(!table_window_) throw windows_error("Create detached uptime table");
+    ShowWindow(table_window_,SW_SHOW);
+    populate_table();
+    request();
+}
+
+void StatisticsPage::layout_table_window() {
+    if(!table_window_ || !table_window_list_ || !IsWindow(table_window_list_)) return;
+    RECT r{};GetClientRect(table_window_,&r);
+    const int width=std::max(0,static_cast<int>(r.right-r.left));
+    const int height=std::max(0,static_cast<int>(r.bottom-r.top));
+    // The detached table does not need a status/instruction strip.
+    if(table_window_info_) ShowWindow(table_window_info_,SW_HIDE);
+    MoveWindow(table_window_list_,16,12,std::max(0,width-32),std::max(0,height-28),TRUE);
+    const int available=std::max(450,width-58);
+    ListView_SetColumnWidth(table_window_list_,0,available*47/100);
+    ListView_SetColumnWidth(table_window_list_,1,available*21/100);
+    ListView_SetColumnWidth(table_window_list_,2,available*32/100);
+}
+
+LRESULT CALLBACK StatisticsPage::table_dispatch(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
+    auto* page=reinterpret_cast<StatisticsPage*>(GetWindowLongPtrW(window,GWLP_USERDATA));
+    if(msg==WM_NCCREATE) {
+        page=static_cast<StatisticsPage*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
+        page->table_window_=window;
+        SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(page));
+        return TRUE;
+    }
+    if(!page) return DefWindowProcW(window,msg,wp,lp);
+    switch(msg) {
+    case WM_CREATE: {
+        page->table_window_info_=CreateWindowExW(0,L"STATIC",L"Наблюдаемый аптайм",
+            WS_CHILD|WS_VISIBLE|SS_LEFT,0,0,1,1,window,nullptr,GetModuleHandleW(nullptr),nullptr);
+        page->table_window_list_=CreateWindowExW(WS_EX_CLIENTEDGE,WC_LISTVIEWW,L"",
+            WS_CHILD|WS_VISIBLE|WS_TABSTOP|LVS_REPORT|LVS_SHOWSELALWAYS|
+            LVS_SINGLESEL|LVS_SHAREIMAGELISTS,0,0,1,1,
+            window,nullptr,GetModuleHandleW(nullptr),nullptr);
+        if(!page->table_window_info_ || !page->table_window_list_) return -1;
+        ListView_SetExtendedListViewStyle(page->table_window_list_,
+            LVS_EX_FULLROWSELECT|LVS_EX_DOUBLEBUFFER);
+        for(const wchar_t* title:{L"Приложение",L"Аптайм",L"Последняя активность"}) {
+            LVCOLUMNW col{};col.mask=LVCF_TEXT|LVCF_WIDTH;
+            col.pszText=const_cast<wchar_t*>(title);col.cx=180;
+            ListView_InsertColumn(page->table_window_list_,
+                Header_GetItemCount(ListView_GetHeader(page->table_window_list_)),&col);
+        }
+        page->table_image_list_=ImageList_Create(16,16,ILC_COLOR32|ILC_MASK,16,16);
+        if(page->table_image_list_)
+            ListView_SetImageList(page->table_window_list_,page->table_image_list_,LVSIL_SMALL);
+        page->table_font_=CreateFontW(-16,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+        if(page->table_font_) for(HWND child:{page->table_window_info_,page->table_window_list_})
+            SendMessageW(child,WM_SETFONT,reinterpret_cast<WPARAM>(page->table_font_),TRUE);
+        page->layout_table_window();
+        return 0;
+    }
+    case WM_SIZE: page->layout_table_window();return 0;
+    case WM_GETMINMAXINFO: {
+        auto* bounds=reinterpret_cast<MINMAXINFO*>(lp);
+        bounds->ptMinTrackSize={540,300};return 0;
+    }
+    case WM_CLOSE:DestroyWindow(window);return 0;
+    case WM_DESTROY:
+        if(page->table_window_list_)
+            ListView_SetImageList(page->table_window_list_,nullptr,LVSIL_SMALL);
+        if(page->table_image_list_) {ImageList_Destroy(page->table_image_list_);page->table_image_list_=nullptr;}
+        if(page->table_font_) {DeleteObject(page->table_font_);page->table_font_=nullptr;}
+        page->table_window_=nullptr;page->table_window_list_=nullptr;page->table_window_info_=nullptr;
+        return 0;
+    }
+    return DefWindowProcW(window,msg,wp,lp);
+}
+
 HICON StatisticsPage::application_icon(const std::wstring& path) {
     if(path.empty()) return nullptr;
     if(const auto it=icon_cache_.find(path);it!=icon_cache_.end()) return it->second;
@@ -314,11 +473,11 @@ HICON StatisticsPage::application_icon(const std::wstring& path) {
     icon_cache_.emplace(path,icon);return icon;
 }
 void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Process>& grouped,unsigned interval_ms) {
-    if(!active_ && !popups_[0].window && !popups_[1].window) return;
+    if(!active_ && !popups_[0].window && !popups_[1].window && !table_window_) return;
     animation_started_=GetTickCount64();
     animation_duration_ms_=std::clamp(interval_ms,250U,10000U);
     last_live_timestamp_=timestamp_ms;
-    SetTimer(hwnd_,animate_message,33,nullptr);
+    if(active_ || popups_[0].window) SetTimer(hwnd_,animate_message,33,nullptr);
     std::vector<const Process*> sorted;
     sorted.reserve(grouped.size());
     for(const auto& p:grouped) {
@@ -339,7 +498,8 @@ void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Pro
     std::stable_sort(sorted.begin(),sorted.end(),[](const Process* a,const Process* b){
         return auto_rank(*a,31U).score>auto_rank(*b,31U).score;
     });
-    for(std::size_t i=0;i<std::min<std::size_t>(sorted.size(),limit_);++i) {
+    // Keep up to 100 live series so increasing stats_top does not need a new collection.
+    for(std::size_t i=0;i<std::min<std::size_t>(sorted.size(),100U);++i) {
         const auto* p=sorted[i];
         auto convert=[](std::string_view s)->std::wstring {
             const int n=MultiByteToWideChar(CP_UTF8,0,s.data(),static_cast<int>(s.size()),nullptr,0);
@@ -491,7 +651,7 @@ void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<Statis
     }
     RestoreDC(dc,clip);
     if(apps.empty() || std::none_of(apps.begin(),apps.end(),[](const auto& a){return !a.points.empty();}))
-        label(dc,is_live?L"Ожидание измерений AutoScore…":L"Баллы появятся после начала записи статистики",
+        label(dc,is_live?L"Ожидание данных…":L"Нет данных за выбранный период",
             area.left+20,area.top+55,RGB(119,111,98));
     const auto start_label=is_live && !detached?std::wstring(L"−60 секунд"):local_label(from);
     const auto end_label=is_live && !detached?std::wstring(L"сейчас"):local_label(to-1);
@@ -532,22 +692,33 @@ void StatisticsPage::rebuild_live_series() {
     if(minute.size()>limit_) minute.resize(limit_);
     live_apps_=minute; // Mouse hit-testing uses the exact graph order/series colors.
     prepare_colors(live_apps_);
+    // Auto-axis limits only change with new data, not WM_MOUSEMOVE/WM_PAINT.
+    const auto anchor=last_live_timestamp_>0?last_live_timestamp_:now_ms();
+    cached_auto_zoom_[0]=auto_vertical_zoom(live_apps_,anchor-60000,anchor);
+    cached_auto_zoom_[1]=auto_vertical_zoom(history_.history,window_from_,window_to_);
+    for(auto& popup:popups_) popup.axis_dirty=true;
 }
 void StatisticsPage::draw(HDC dc) {
     RECT physical{};GetClientRect(hwnd_,&physical);
     SetMapMode(dc,MM_ANISOTROPIC);SetWindowExtEx(dc,page_width,page_height,nullptr);
     SetViewportExtEx(dc,std::max<LONG>(1,physical.right),std::max<LONG>(1,physical.bottom),nullptr);
+    // StatisticsPage native-theme refinement v2: only chart areas are custom-drawn.
     const RECT background{0,0,page_width,page_height};
-    HBRUSH paper=CreateSolidBrush(RGB(245,246,247));FillRect(dc,&background,paper);DeleteObject(paper);
+    FillRect(dc,&background,GetSysColorBrush(COLOR_BTNFACE));
     HFONT print=CreateFontW(-15,0,0,0,FW_SEMIBOLD,0,0,0,DEFAULT_CHARSET,0,0,
         CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
     const auto old_font=SelectObject(dc,print);
-    const auto now=now_ms();
-    draw_graph(dc,one_minute,live_apps_,now-60000,now,L"ПОСЛЕДНЯЯ МИНУТА · AutoScore 0–100",true);
-    draw_graph(dc,history_chart,history_.history,window_from_,window_to_,L"ИСТОРИЯ · СРЕДНИЙ БАЛЛ AutoScore",false);
-    if(!history_.error.empty()) label(dc,history_.error.c_str(),18,540,RGB(162,50,40));
-    label(dc,L"НАБЛЮДАЕМЫЙ АПТАЙМ ПРИЛОЖЕНИЙ",18,603);
-    if(hover_section_>=0) paint_tooltip(dc);
+    // FluxTop stable auto-axis / separate popout window v2:
+    // The same sample timestamp is used by graph painting and hit-testing.
+    // Mouse movement must not scroll the axis or change the auto-scale.
+    const auto now=last_live_timestamp_>0?last_live_timestamp_:now_ms();
+    const double live_zoom=auto_scale_[0]?cached_auto_zoom_[0]:1.0;
+    const double history_zoom=auto_scale_[1]?cached_auto_zoom_[1]:1.0;
+    draw_graph(dc,one_minute,live_apps_,now-60000,now,L"ПОСЛЕДНЯЯ МИНУТА · AutoScore",true,live_zoom);
+    draw_graph(dc,history_chart,history_.history,window_from_,window_to_,L"ИСТОРИЯ · СРЕДНИЙ БАЛЛ AutoScore",false,history_zoom);
+    if(!history_.error.empty()) label(dc,history_.error.c_str(),18,567,RGB(162,50,40));
+    label(dc,L"НАБЛЮДАЕМЫЙ АПТАЙМ ПРИЛОЖЕНИЙ",18,634);
+    // Tooltip is a topmost popup, never painted underneath native controls.
     SelectObject(dc,old_font);DeleteObject(print);
 }
 void StatisticsPage::mouse(int x,int y) {
@@ -557,21 +728,22 @@ void StatisticsPage::mouse(int x,int y) {
     const bool in_live=y>=one_minute.top && y<=one_minute.bottom;
     const bool in_history=y>=history_chart.top && y<=history_chart.bottom;
     if(!in_live && !in_history) {
-        if(hover_section_!=-1) {hover_section_=-1;InvalidateRect(hwnd_,nullptr,FALSE);}
+        if(hover_section_!=-1) {hover_section_=-1;if(tooltip_) ShowWindow(tooltip_,SW_HIDE);}
         return;
     }
     const auto& chart=in_live?live_apps_:history_.history;
     const auto& area=in_live?one_minute:history_chart;
-    const auto now=now_ms();
+    const auto now=last_live_timestamp_>0?last_live_timestamp_:now_ms();
     const auto from=in_live?now-60000:window_from_;
     const auto to=in_live?now:window_to_;
+    const double zoom=auto_scale_[in_live?0:1]?cached_auto_zoom_[in_live?0:1]:1.0;
     double best=9.0*9.0;
     int section=-1;std::size_t selected=0;double score=0;
     if(to>from) for(std::size_t i=0;i<chart.size();++i) {
         const auto& pts=chart[i].points;
         for(std::size_t j=0;j<pts.size();++j) {
             const double xpos=area.left+std::clamp(static_cast<double>(pts[j].first-from)/static_cast<double>(to-from),0.0,1.0)*(area.right-area.left);
-            const double ypos=area.bottom-std::clamp(pts[j].second,0.0,100.0)/100*(area.bottom-area.top);
+            const double ypos=area.bottom-std::clamp(pts[j].second*zoom,0.0,100.0)/100*(area.bottom-area.top);
             const double dist=(xpos-x)*(xpos-x)+(ypos-y)*(ypos-y);
             if(dist<best) {best=dist;section=in_live?0:1;selected=i;score=pts[j].second;}
             if(j==0) continue;
@@ -580,31 +752,90 @@ void StatisticsPage::mouse(int x,int y) {
             if(xpos<=old_x || x<old_x || x>xpos) continue;
             const double t=(x-old_x)/(xpos-old_x);
             const double line_score=prev.second+(pts[j].second-prev.second)*t;
-            const double line_y=area.bottom-std::clamp(line_score,0.0,100.0)/100*(area.bottom-area.top);
+            const double line_y=area.bottom-std::clamp(line_score*zoom,0.0,100.0)/100*(area.bottom-area.top);
             const double d=(line_y-y)*(line_y-y);
             if(d<best){best=d;section=in_live?0:1;selected=i;score=line_score;}
         }
     }
     if(hover_section_!=section || hover_index_!=selected || hover_at_.x!=x || hover_at_.y!=y) {
         hover_section_=section;hover_index_=selected;hover_value_=score;hover_at_={x,y};
-        InvalidateRect(hwnd_,nullptr,FALSE);
+        if(section<0 && tooltip_) ShowWindow(tooltip_,SW_HIDE);
+        else if(tooltip_) {
+            POINT cursor{};GetCursorPos(&cursor);
+            const UINT dpi=GetDpiForWindow(tooltip_);
+            const int tip_width=MulDiv(344,static_cast<int>(dpi),96);
+            const int tip_height=MulDiv(104,static_cast<int>(dpi),96);
+            int left=static_cast<int>(cursor.x)+MulDiv(18,static_cast<int>(dpi),96);
+            int top=static_cast<int>(cursor.y)+MulDiv(20,static_cast<int>(dpi),96);
+            MONITORINFO monitor{sizeof(monitor)};
+            if(GetMonitorInfoW(MonitorFromPoint(cursor,MONITOR_DEFAULTTONEAREST),&monitor)) {
+                left=std::clamp(left,static_cast<int>(monitor.rcWork.left),
+                    std::max(static_cast<int>(monitor.rcWork.left),static_cast<int>(monitor.rcWork.right)-tip_width));
+                top=std::clamp(top,static_cast<int>(monitor.rcWork.top),
+                    std::max(static_cast<int>(monitor.rcWork.top),static_cast<int>(monitor.rcWork.bottom)-tip_height));
+            }
+            SetWindowPos(tooltip_,HWND_TOPMOST,left,top,tip_width,tip_height,
+                SWP_NOACTIVATE|SWP_SHOWWINDOW);
+            InvalidateRect(tooltip_,nullptr,FALSE);
+        }
     }
 }
 void StatisticsPage::paint_tooltip(HDC dc) {
+    // FluxTop graph-style hover tooltip restored: same ink/paper look as the charts.
+    if(hover_section_<0) return;
     const auto& source=hover_section_==0?live_apps_:history_.history;
     if(hover_index_>=source.size()) return;
     const auto& app=source[hover_index_];
-    const int left=std::clamp(static_cast<int>(hover_at_.x+14),10,page_width-240);
-    const int top=std::clamp(static_cast<int>(hover_at_.y+13),110,page_height-75);
-    RECT r{left,top,left+225,top+54};
-    HBRUSH bg=CreateSolidBrush(RGB(255,255,244));FillRect(dc,&r,bg);DeleteObject(bg);
-    FrameRect(dc,&r,reinterpret_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
-    if(auto icon=application_icon(app.path)) DrawIconEx(dc,left+7,top+15,icon,20,20,0,nullptr,DI_NORMAL);
-    RECT label_rect{left+33,top+5,left+216,top+28};
-    SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(44,40,35));
-    DrawTextW(dc,app.name.c_str(),-1,&label_rect,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
-    wchar_t score[48]{};swprintf_s(score,L"AutoScore: %.1f / 100",hover_value_);
-    label(dc,score,left+33,top+29,chart_color(app));
+    RECT bounds{};GetClientRect(tooltip_,&bounds);
+    const auto scale=[this](int n) {return MulDiv(n,static_cast<int>(GetDpiForWindow(tooltip_)),96);};
+    const HBRUSH paper=CreateSolidBrush(RGB(250,248,239));
+    FillRect(dc,&bounds,paper);DeleteObject(paper);
+    const HBRUSH edge=CreateSolidBrush(RGB(151,137,112));
+    FrameRect(dc,&bounds,edge);DeleteObject(edge);
+    RECT accent{scale(1),bounds.bottom-scale(5),bounds.right-scale(1),bounds.bottom-scale(1)};
+    const HBRUSH color=CreateSolidBrush(chart_color(app));
+    FillRect(dc,&accent,color);DeleteObject(color);
+    if(auto icon=application_icon(app.path))
+        DrawIconEx(dc,scale(15),scale(28),icon,scale(32),scale(32),0,nullptr,DI_NORMAL);
+    const HFONT heading=CreateFontW(-scale(20),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,
+        DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,
+        DEFAULT_PITCH,L"Segoe Print");
+    const HFONT score_font=CreateFontW(-scale(18),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,
+        DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,
+        DEFAULT_PITCH,L"Segoe Print");
+    const HGDIOBJ original=SelectObject(dc,heading?heading:GetStockObject(DEFAULT_GUI_FONT));
+    SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(53,49,43));
+    RECT name{scale(58),scale(13),bounds.right-scale(12),scale(51)};
+    DrawTextW(dc,app.name.c_str(),-1,&name,
+        DT_LEFT|DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
+    SelectObject(dc,score_font?score_font:GetStockObject(DEFAULT_GUI_FONT));
+    wchar_t value[80]{};swprintf_s(value,L"AutoScore: %.1f / 100",hover_value_);
+    SetTextColor(dc,chart_color(app));
+    RECT score{scale(58),scale(55),bounds.right-scale(12),scale(89)};
+    DrawTextW(dc,value,-1,&score,DT_LEFT|DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
+    SelectObject(dc,original);
+    if(heading) DeleteObject(heading);
+    if(score_font) DeleteObject(score_font);
+}
+LRESULT CALLBACK StatisticsPage::hover_dispatch(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
+    auto* page=reinterpret_cast<StatisticsPage*>(GetWindowLongPtrW(window,GWLP_USERDATA));
+    if(msg==WM_NCCREATE) {
+        page=static_cast<StatisticsPage*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
+        SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(page));
+        return TRUE;
+    }
+    if(!page) return DefWindowProcW(window,msg,wp,lp);
+    switch(msg) {
+    case WM_ERASEBKGND:return 1;
+    case WM_MOUSEACTIVATE:return MA_NOACTIVATE;
+    case WM_NCHITTEST:return HTTRANSPARENT;
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};const HDC dc=BeginPaint(window,&ps);
+        page->paint_tooltip(dc);
+        EndPaint(window,&ps);return 0;
+    }
+    }
+    return DefWindowProcW(window,msg,wp,lp);
 }
 LRESULT CALLBACK StatisticsPage::dispatch(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     auto* self=reinterpret_cast<StatisticsPage*>(GetWindowLongPtrW(hwnd,GWLP_USERDATA));
@@ -636,14 +867,18 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
         }
         EndPaint(hwnd_,&ps);return 0;
     }
-    case WM_MOUSEMOVE: mouse(GET_X_LPARAM(lp),GET_Y_LPARAM(lp));return 0;
+    case WM_MOUSEMOVE: {
+        TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,hwnd_,0};
+        TrackMouseEvent(&tracking);
+        mouse(GET_X_LPARAM(lp),GET_Y_LPARAM(lp));return 0;
+    }
     case WM_TIMER:
         if(wp==animate_message) {
             const bool animating=animation_started_
                 && GetTickCount64()-animation_started_<animation_duration_ms_;
             if(active_) InvalidateRect(hwnd_,nullptr,FALSE);
-            for(auto& popup:popups_) if(popup.window) InvalidateRect(popup.window,nullptr,FALSE);
-            if(!animating) KillTimer(hwnd_,animate_message);
+            if(popups_[0].window) InvalidateRect(popups_[0].window,nullptr,FALSE);
+            if(!animating || (!active_ && !popups_[0].window)) KillTimer(hwnd_,animate_message);
             return 0;
         }
         break;
@@ -655,12 +890,25 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
             return 0;
         }
         break;
-    case WM_MOUSELEAVE: hover_section_=-1;InvalidateRect(hwnd_,nullptr,FALSE);return 0;
+    case WM_MOUSELEAVE:
+        hover_section_=-1;
+        if(tooltip_) ShowWindow(tooltip_,SW_HIDE);
+        return 0;
     case WM_SIZE: if(hwnd_) {layout();InvalidateRect(hwnd_,nullptr,FALSE);} return 0;
     case ready_message: accept();return 0;
     case WM_COMMAND:
+        if(HIWORD(wp)==BN_CLICKED && (LOWORD(wp)==auto_live_id || LOWORD(wp)==auto_history_id)) {
+            const unsigned index=LOWORD(wp)==auto_live_id?0U:1U;
+            const HWND control=index==0?auto_live_:auto_history_;
+            auto_scale_[index]=SendMessageW(control,BM_GETCHECK,0,0)==BST_CHECKED;
+            WritePrivateProfileStringW(L"overlay",index==0?L"stats_auto_live":L"stats_auto_history",
+                auto_scale_[index]?L"1":L"0",settings_.c_str());
+            InvalidateRect(hwnd_,nullptr,FALSE);
+            return 0;
+        }
         if(HIWORD(wp)==BN_CLICKED && LOWORD(wp)==popout_live_id) {open_popup(0);return 0;}
         if(HIWORD(wp)==BN_CLICKED && LOWORD(wp)==popout_history_id) {open_popup(1);return 0;}
+        if(HIWORD(wp)==BN_CLICKED && LOWORD(wp)==popout_table_id) {open_table();return 0;}
         if(LOWORD(wp)==period_id && HIWORD(wp)==CBN_SELCHANGE) {
             period_index_=static_cast<int>(SendMessageW(period_,CB_GETCURSEL,0,0));
             update_dates();request();return 0;

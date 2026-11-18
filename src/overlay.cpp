@@ -817,7 +817,8 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
     switch (msg) {
     case WM_CREATE: client_dpi_=GetDpiForWindow(window); init_client(); return 0;
     case WM_SIZE:
-        if (wp==SIZE_MINIMIZED) { PostMessageW(window,WM_CLOSE,0,0); return 0; }
+        // Minimize is not Close. Detached graph focus transitions cannot close the client.
+        if (wp==SIZE_MINIMIZED) return 0;
         break;
     case WM_DPICHANGED: { client_dpi_=HIWORD(wp); const auto* r=reinterpret_cast<RECT*>(lp); SetWindowPos(window,nullptr,r->left,r->top,0,0,SWP_NOSIZE|SWP_NOZORDER); layout_client(); return 0; }
     case WM_HSCROLL:

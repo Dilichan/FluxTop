@@ -1,6 +1,6 @@
 // Reuse the StatisticsPage model and colour map: detached windows never collect data.
 void StatisticsPage::popup_range(const PopupState& popup,std::int64_t& from,std::int64_t& to) const {
-    const auto end=popup.kind==0?now_ms():window_to_;
+    const auto end=popup.kind==0?(last_live_timestamp_>0?last_live_timestamp_:now_ms()):window_to_;
     const auto begin=popup.kind==0?end-60000:window_from_;
     const double total=static_cast<double>(std::max<std::int64_t>(1000,end-begin));
     const double span=std::max(1000.0,total/std::clamp(popup.zoom_x,1.0,128.0));
@@ -32,12 +32,13 @@ void StatisticsPage::open_popup(unsigned kind) {
         throw windows_error("Register detached statistics graph");
     popup.owner=this;popup.kind=kind;
     popup.zoom_x=1.0;popup.zoom_y=1.0;popup.pan_ms=0;
+    popup.auto_scale=GetPrivateProfileIntW(L"overlay",
+        kind==0?L"stats_popup_auto_live":L"stats_popup_auto_history",1,settings_.c_str())!=0;
     popup.dragging=false;popup.cursor={-1,-1};
     const wchar_t* title=kind==0?L"FluxTop — последняя минута (AutoScore)"
         :L"FluxTop — история (AutoScore)";
-    const HWND owner=GetAncestor(hwnd_,GA_ROOT);
     popup.window=CreateWindowExW(0,window_class,title,WS_OVERLAPPEDWINDOW|WS_VISIBLE,
-        CW_USEDEFAULT,CW_USEDEFAULT,1050,590,owner,nullptr,GetModuleHandleW(nullptr),&popup);
+        CW_USEDEFAULT,CW_USEDEFAULT,1050,590,nullptr,nullptr,GetModuleHandleW(nullptr),&popup);
     if(!popup.window) throw windows_error("Create detached statistics graph");
     ShowWindow(popup.window,SW_SHOW);
     UpdateWindow(popup.window);
@@ -47,24 +48,22 @@ void StatisticsPage::open_popup(unsigned kind) {
 void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
     RECT client{};GetClientRect(popup.window,&client);
     if(client.right<180 || client.bottom<180) return;
-    HBRUSH surface=CreateSolidBrush(RGB(245,246,247));
-    FillRect(dc,&client,surface);DeleteObject(surface);
+    // Native background and labels; the graph retains its hand-drawn look.
+    FillRect(dc,&client,GetSysColorBrush(COLOR_BTNFACE));
     HFONT font=CreateFontW(-17,0,0,0,FW_SEMIBOLD,0,0,0,DEFAULT_CHARSET,0,0,
         CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
     const auto old_font=SelectObject(dc,font);
     label(dc,popup.kind==0?L"AutoScore · последняя минута":L"AutoScore · история",22,18);
-    HFONT help_font=CreateFontW(-13,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,
-        CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
-    SelectObject(dc,help_font);
-    label(dc,L"Колесо: время  ·  Ctrl+колесо: баллы  ·  ЛКМ: двигать  ·  двойной клик: сброс",22,46,RGB(90,97,108));
+    // Controls are native Win32; navigation instructions are intentionally absent.
     std::int64_t from{},to{};popup_range(popup,from,to);
-    const RECT graph{68,112,client.right-30,client.bottom-61};
+    const RECT graph{68,83,client.right-30,client.bottom-35};
     const auto& apps=popup.kind==0?live_apps_:history_.history;
-    draw_graph(dc,graph,apps,from,to,L"",popup.kind==0,popup.zoom_y,true);
-    wchar_t zoom[128]{};
-    swprintf_s(zoom,L"Время: %.1fx    Баллы: %.1fx    Серий: %u",
-        popup.zoom_x,popup.zoom_y,static_cast<unsigned>(apps.size()));
-    label(dc,zoom,70,client.bottom-29,RGB(78,85,95));
+    if(popup.auto_scale && popup.axis_dirty) {
+        popup.cached_auto_zoom=auto_vertical_zoom(apps,from,to);
+        popup.axis_dirty=false;
+    }
+    const double vertical_zoom=popup.auto_scale?popup.cached_auto_zoom:popup.zoom_y;
+    draw_graph(dc,graph,apps,from,to,L"",popup.kind==0,vertical_zoom,true);
     // Hover uses the very same series and plotting scale as the detached graph.
     if(popup.cursor.x>=graph.left && popup.cursor.x<=graph.right
         && popup.cursor.y>=graph.top && popup.cursor.y<=graph.bottom && to>from) {
@@ -76,7 +75,7 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
             for(std::size_t j=0;j<pts.size();++j) {
                 const auto xpos=graph.left+static_cast<double>(pts[j].first-from)*width/static_cast<double>(to-from);
                 if(xpos<graph.left-20 || xpos>graph.right+20) continue;
-                const double ypos=graph.bottom-std::clamp(pts[j].second*popup.zoom_y,0.0,100.0)*height/100.0;
+                const double ypos=graph.bottom-std::clamp(pts[j].second*vertical_zoom,0.0,100.0)*height/100.0;
                 const double distance=(xpos-popup.cursor.x)*(xpos-popup.cursor.x)
                     +(ypos-popup.cursor.y)*(ypos-popup.cursor.y);
                 if(distance<best) {best=distance;selected=i;score=pts[j].second;found=true;}
@@ -85,32 +84,48 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
                 if(xpos<=old_x || popup.cursor.x<old_x || popup.cursor.x>xpos) continue;
                 const double fraction=(popup.cursor.x-old_x)/(xpos-old_x);
                 const double value=pts[j-1].second+(pts[j].second-pts[j-1].second)*fraction;
-                const double line_y=graph.bottom-std::clamp(value*popup.zoom_y,0.0,100.0)*height/100.0;
+                const double line_y=graph.bottom-std::clamp(value*vertical_zoom,0.0,100.0)*height/100.0;
                 const double dx=line_y-popup.cursor.y;
                 if(dx*dx<best) {best=dx*dx;selected=i;score=value;found=true;}
             }
         }
         if(found && selected<apps.size()) {
             const auto& app=apps[selected];
-            const int left=std::clamp(static_cast<int>(popup.cursor.x)+14,12,std::max(12,static_cast<int>(client.right)-260));
-            const int top=std::clamp(static_cast<int>(popup.cursor.y)+14,80,std::max(80,static_cast<int>(client.bottom)-80));
-            const RECT bubble{left,top,left+245,top+64};
-            HBRUSH bg=CreateSolidBrush(RGB(255,255,249));FillRect(dc,&bubble,bg);DeleteObject(bg);
-            HPEN border=CreatePen(PS_SOLID,1,RGB(190,198,205));
-            const auto old_pen=SelectObject(dc,border);
-            const auto old_brush=SelectObject(dc,GetStockObject(NULL_BRUSH));
-            Rectangle(dc,bubble.left,bubble.top,bubble.right,bubble.bottom);
-            SelectObject(dc,old_brush);SelectObject(dc,old_pen);DeleteObject(border);
-            if(auto icon=application_icon(app.path)) DrawIconEx(dc,left+9,top+19,icon,24,24,0,nullptr,DI_NORMAL);
-            RECT name{left+39,top+7,left+235,top+33};
-            SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(39,43,48));
-            DrawTextW(dc,app.name.c_str(),-1,&name,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
-            wchar_t value[70]{};swprintf_s(value,L"AutoScore: %.1f / 100",score);
+            const int box_width=314,box_height=94;
+            const int left=std::clamp(static_cast<int>(popup.cursor.x)+14,
+                static_cast<int>(graph.left)+4,std::max(static_cast<int>(graph.left)+4,static_cast<int>(graph.right)-box_width-4));
+            const int top=std::clamp(static_cast<int>(popup.cursor.y)+14,
+                static_cast<int>(graph.top)+4,std::max(static_cast<int>(graph.top)+4,static_cast<int>(graph.bottom)-box_height-4));
+            const RECT bubble{left,top,left+box_width,top+box_height};
+            HBRUSH bg=CreateSolidBrush(RGB(250,248,239));FillRect(dc,&bubble,bg);DeleteObject(bg);
+            HBRUSH edge=CreateSolidBrush(RGB(151,137,112));FrameRect(dc,&bubble,edge);DeleteObject(edge);
+            const RECT accent{left+1,bubble.bottom-5,bubble.right-1,bubble.bottom-1};
+            HBRUSH line_color=CreateSolidBrush(series_color(app,selected));
+            FillRect(dc,&accent,line_color);DeleteObject(line_color);
+            if(auto icon=application_icon(app.path))
+                DrawIconEx(dc,left+13,top+28,icon,30,30,0,nullptr,DI_NORMAL);
+            HFONT name_font=CreateFontW(-19,0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,
+                DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,
+                DEFAULT_PITCH,L"Segoe Print");
+            HFONT score_font=CreateFontW(-17,0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,
+                DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,
+                DEFAULT_PITCH,L"Segoe Print");
+            const HGDIOBJ previous=SelectObject(dc,name_font?name_font:GetStockObject(DEFAULT_GUI_FONT));
+            RECT name{left+53,top+12,left+box_width-12,top+49};
+            SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(53,49,43));
+            DrawTextW(dc,app.name.c_str(),-1,&name,
+                DT_LEFT|DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
+            SelectObject(dc,score_font?score_font:GetStockObject(DEFAULT_GUI_FONT));
+            wchar_t value[80]{};swprintf_s(value,L"AutoScore: %.1f / 100",score);
             SetTextColor(dc,series_color(app,selected));
-            TextOutW(dc,left+39,top+36,value,static_cast<int>(wcslen(value)));
+            RECT score_box{left+53,top+51,left+box_width-12,top+81};
+            DrawTextW(dc,value,-1,&score_box,DT_LEFT|DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
+            SelectObject(dc,previous);
+            if(name_font) DeleteObject(name_font);
+            if(score_font) DeleteObject(score_font);
         }
     }
-    SelectObject(dc,old_font);DeleteObject(help_font);DeleteObject(font);
+    SelectObject(dc,old_font);DeleteObject(font);
 }
 LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
     auto* popup=reinterpret_cast<PopupState*>(GetWindowLongPtrW(window,GWLP_USERDATA));
@@ -124,6 +139,26 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
     if(!popup || !popup->owner) return DefWindowProcW(window,msg,wp,lp);
     auto* page=popup->owner;
     switch(msg) {
+    case WM_CREATE: {
+        popup->auto_toggle=CreateWindowExW(0,L"BUTTON",L"Автомасштаб",
+            WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_AUTOCHECKBOX,
+            22,48,180,28,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(popup_auto_id)),
+            GetModuleHandleW(nullptr),nullptr);
+        if(!popup->auto_toggle) return -1;
+        SendMessageW(popup->auto_toggle,BM_SETCHECK,popup->auto_scale?BST_CHECKED:BST_UNCHECKED,0);
+        return 0;
+    }
+    case WM_COMMAND:
+        if(LOWORD(wp)==popup_auto_id && HIWORD(wp)==BN_CLICKED) {
+            popup->auto_scale=SendMessageW(popup->auto_toggle,BM_GETCHECK,0,0)==BST_CHECKED;
+            popup->axis_dirty=true;
+            WritePrivateProfileStringW(L"overlay",
+                popup->kind==0?L"stats_popup_auto_live":L"stats_popup_auto_history",
+                popup->auto_scale?L"1":L"0",page->settings_.c_str());
+            InvalidateRect(window,nullptr,FALSE);
+            return 0;
+        }
+        break;
     case WM_ERASEBKGND:return 1;
     case WM_PAINT: {
         PAINTSTRUCT ps{};const HDC dc=BeginPaint(window,&ps);
@@ -142,13 +177,45 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
     }
     case WM_MOUSEWHEEL: {
         const double factor=GET_WHEEL_DELTA_WPARAM(wp)>0?1.25:0.8;
-        if(GET_KEYSTATE_WPARAM(wp)&MK_CONTROL)
-            popup->zoom_y=std::clamp(popup->zoom_y*factor,1.0,16.0);
-        else popup->zoom_x=std::clamp(popup->zoom_x*factor,1.0,128.0);
+        if(GET_KEYSTATE_WPARAM(wp)&MK_CONTROL) {
+            if(popup->auto_scale) {
+                std::int64_t from{},to{};page->popup_range(*popup,from,to);
+                const auto& apps=popup->kind==0?page->live_apps_:page->history_.history;
+                popup->zoom_y=auto_vertical_zoom(apps,from,to);
+                popup->auto_scale=false;
+                SendMessageW(popup->auto_toggle,BM_SETCHECK,BST_UNCHECKED,0);
+                WritePrivateProfileStringW(L"overlay",
+                    popup->kind==0?L"stats_popup_auto_live":L"stats_popup_auto_history",
+                    L"0",page->settings_.c_str());
+            }
+            popup->zoom_y=std::clamp(popup->zoom_y*factor,1.0,100.0);
+        } else {
+            RECT r{};GetClientRect(window,&r);
+            POINT cursor{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
+            ScreenToClient(window,&cursor);
+            const double fraction=std::clamp((static_cast<double>(cursor.x)-68.0)
+                /static_cast<double>(std::max<LONG>(1,r.right-98)),0.0,1.0);
+            std::int64_t before_from{},before_to{};
+            page->popup_range(*popup,before_from,before_to);
+            const double at=static_cast<double>(before_from)
+                +fraction*static_cast<double>(before_to-before_from);
+            popup->zoom_x=std::clamp(popup->zoom_x*factor,1.0,128.0);
+            std::int64_t after_from{},after_to{};
+            page->popup_range(*popup,after_from,after_to);
+            popup->pan_ms+=at-(static_cast<double>(after_from)
+                +fraction*static_cast<double>(after_to-after_from));
+        }
+        popup->axis_dirty=true;
         InvalidateRect(window,nullptr,FALSE);return 0;
     }
     case WM_LBUTTONDBLCLK:
         popup->zoom_x=1;popup->zoom_y=1;popup->pan_ms=0;
+        popup->auto_scale=true;
+        popup->axis_dirty=true;
+        SendMessageW(popup->auto_toggle,BM_SETCHECK,BST_CHECKED,0);
+        WritePrivateProfileStringW(L"overlay",
+            popup->kind==0?L"stats_popup_auto_live":L"stats_popup_auto_history",
+            L"1",page->settings_.c_str());
         InvalidateRect(window,nullptr,FALSE);return 0;
     case WM_LBUTTONDOWN:
         popup->dragging=true;popup->last={GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
@@ -166,14 +233,25 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
             const auto width=std::max<LONG>(1,r.right-98);
             popup->pan_ms-=static_cast<double>(current.x-popup->last.x)
                 *static_cast<double>(to-from)/static_cast<double>(width);
+            const auto full=popup->kind==0?60000.0:
+                static_cast<double>(std::max<std::int64_t>(1000,page->window_to_-page->window_from_));
+            const double half_range=std::max(0.0,(full-full/popup->zoom_x)/2.0);
+            popup->pan_ms=std::clamp(popup->pan_ms,-half_range,half_range);
             popup->last=current;
+            popup->axis_dirty=true;
         }
         InvalidateRect(window,nullptr,FALSE);return 0;
+    }
+    case WM_GETMINMAXINFO: {
+        auto* bounds=reinterpret_cast<MINMAXINFO*>(lp);
+        bounds->ptMinTrackSize={460,340};
+        return 0;
     }
     case WM_SIZE:InvalidateRect(window,nullptr,FALSE);return 0;
     case WM_CLOSE:DestroyWindow(window);return 0;
     case WM_DESTROY:
         if(GetCapture()==window) ReleaseCapture();
+        popup->auto_toggle=nullptr;
         popup->window=nullptr;popup->dragging=false;return 0;
     }
     return DefWindowProcW(window,msg,wp,lp);
