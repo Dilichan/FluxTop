@@ -16,14 +16,6 @@ Snapshot ProcessCollector::collect() {
     if (!Process32FirstW(snapshot.get(), &entry)) throw windows_error("Process32FirstW");
     std::vector<RawProcess> raw;
     std::unordered_map<std::uint32_t, Path> next_paths;
-    std::unordered_map<std::uint32_t, NtProcessRow> native_rows;
-    // Environment override exists for the AUTOMATED A/B test only.
-    wchar_t legacy_mode[4]{};
-    const bool legacy = GetEnvironmentVariableW(L"FLUXTOP_FORCE_LEGACY_PROCESSES",legacy_mode,4)>0 && legacy_mode[0]==L'1';
-    const bool native_ready = !legacy && !native_unavailable_ && native_.collect(native_rows);
-    if (!legacy && !native_ready) native_unavailable_ = true;
-    const auto native_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
     raw.reserve(512);
     next_paths.reserve(paths_.size());
     Snapshot result;
@@ -51,70 +43,53 @@ Snapshot ProcessCollector::collect() {
         row.pid = entry.th32ProcessID;
         row.parent_pid = entry.th32ParentProcessID;
         row.name = utf8(entry.szExeFile);
-        const auto fast = native_ready ? native_rows.find(row.pid) : native_rows.end();
-        const bool have_native = native_ready && fast != native_rows.end();
-        if (have_native) {
-            row.creation_time = fast->second.created;
-            row.cpu_ticks = fast->second.cpu_ticks;
-            row.sampled_ns = native_ns;
-            row.working_set = fast->second.working_set;
-            row.private_bytes = fast->second.private_bytes;
-        }
-        const auto cached = row.creation_time ? paths_.find(row.pid) : paths_.end();
-        const bool have_path = cached != paths_.end() && cached->second.creation == *row.creation_time;
-        if (have_path) row.exe_path = cached->second.value;
-        // Fast path: skip handles completely for unchanged known processes.
-        // First-seen processes still need one handle to identify their image path.
-        if (!have_native || !have_path) {
-            Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, row.pid));
-            if (process.valid()) {
-                if (!have_native) {
-                    FILETIME created{}, exited{}, kernel{}, user{};
-                    if (GetProcessTimes(process.get(), &created, &exited, &kernel, &user)) {
-                        row.sampled_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            std::chrono::steady_clock::now().time_since_epoch()).count();
-                        row.creation_time = filetime_ticks(created);
-                        row.cpu_ticks = filetime_ticks(kernel) + filetime_ticks(user);
+        Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, row.pid));
+        if (process.valid()) {
+            FILETIME created{}, exited{}, kernel{}, user{};
+            if (GetProcessTimes(process.get(), &created, &exited, &kernel, &user)) {
+                row.sampled_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                row.creation_time = filetime_ticks(created);
+                row.cpu_ticks = filetime_ticks(kernel) + filetime_ticks(user);
+                if (const auto found = paths_.find(row.pid); found != paths_.end() && found->second.creation == *row.creation_time)
+                    row.exe_path = found->second.value;
+                else {
+                    // A typical executable path fits in 512 wchar_t. Only allocate
+                    // a large buffer for the exceptional long-path process.
+                    wchar_t short_path[512]{};
+                    DWORD length = static_cast<DWORD>(512U);
+                    std::wstring path;
+                    if (QueryFullProcessImageNameW(process.get(), 0, short_path, &length)) {
+                        path.assign(short_path, length);
+                    } else if (GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+                        path.resize(32768);
+                        length = static_cast<DWORD>(path.size());
+                        if (QueryFullProcessImageNameW(process.get(), 0, path.data(), &length))
+                            path.resize(length);
+                        else path.clear();
                     }
-                    PROCESS_MEMORY_COUNTERS_EX memory{};
-                    memory.cb = sizeof(memory);
-                    if (GetProcessMemoryInfo(process.get(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory),sizeof(memory))) {
-                        row.working_set = memory.WorkingSetSize;
-                        row.private_bytes = memory.PrivateUsage;
-                    }
-                }
-                if (row.creation_time) {
-                    if (const auto found=paths_.find(row.pid);
-                        found!=paths_.end() && found->second.creation==*row.creation_time)
-                        row.exe_path=found->second.value;
-                    else {
-                        wchar_t short_path[512]{};
-                        DWORD length=512U;
-                        std::wstring path;
-                        if(QueryFullProcessImageNameW(process.get(),0,short_path,&length)) path.assign(short_path,length);
-                        else if(GetLastError()==ERROR_INSUFFICIENT_BUFFER) {
-                            path.resize(32768);length=static_cast<DWORD>(path.size());
-                            if(QueryFullProcessImageNameW(process.get(),0,path.data(),&length)) path.resize(length);
-                            else path.clear();
-                        }
-                        if(!path.empty()) {
-                            std::wstring folded(length,L'\0');
-                            if(LCMapStringEx(LOCALE_NAME_INVARIANT,LCMAP_LOWERCASE,path.data(),static_cast<int>(length),
-                                folded.data(),static_cast<int>(length),nullptr,nullptr,0)) path=std::move(folded);
-                            row.exe_path=utf8(path.c_str());
-                        }
+                    if (!path.empty()) {
+                        // Invariant case folding makes Windows paths stable application keys.
+                        std::wstring folded(length, L'\0');
+                        if (LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, path.data(), static_cast<int>(length),
+                            folded.data(), static_cast<int>(length), nullptr, nullptr, 0)) path = std::move(folded);
+                        row.exe_path = utf8(path.c_str());
                     }
                 }
+                if (row.exe_path) next_paths.emplace(row.pid, Path{*row.creation_time, *row.exe_path});
+            }
+            PROCESS_MEMORY_COUNTERS_EX memory{};
+            memory.cb = sizeof(memory);
+            if (GetProcessMemoryInfo(process.get(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory), sizeof(memory))) {
+                row.working_set = memory.WorkingSetSize;
+                row.private_bytes = memory.PrivateUsage;
             }
         }
-        if (row.creation_time && row.exe_path)
-            next_paths.emplace(row.pid,Path{*row.creation_time,*row.exe_path});
         if (!row.cpu_ticks || !row.working_set) ++result.inaccessible;
         raw.push_back(std::move(row));
     } while (Process32NextW(snapshot.get(), &entry));
     if (GetLastError() != ERROR_NO_MORE_FILES) throw windows_error("Process32NextW");
     paths_ = std::move(next_paths);
-    result.process_backend = native_ready ? "native" : "win32";
     // Transfer process names and paths instead of copying every string again.
     result.processes = tracker_.update(std::move(raw), result.logical_processors);
     for (const auto& row : result.processes) {

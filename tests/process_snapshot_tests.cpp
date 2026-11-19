@@ -1,4 +1,5 @@
 #include "fluxtop/process_collector.hpp"
+#include <windows.h>
 #include <psapi.h>
 #include <algorithm>
 #include <chrono>
@@ -13,6 +14,7 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(140));
         const auto second=collector.collect();
         if(first.processes.empty() || second.processes.empty()) return 1;
+        if(first.process_backend!="win32" || second.process_backend!="win32") return 6;
         const auto pid=GetCurrentProcessId();
         const fluxtop::RawProcess* self=nullptr;
         for(const auto& p:second.processes) if(p.pid==pid) {self=&p;break;}

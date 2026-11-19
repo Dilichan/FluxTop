@@ -5,7 +5,6 @@ $read={param($p) [IO.File]::ReadAllText((Join-Path $Root $p),$utf8)}
 $sampler=& $read 'src/sampler.cpp'
 $overlay=& $read 'src/overlay.cpp'
 $history=& $read 'src/history.cpp'
-$native=& $read 'src/nt_process_snapshot.cpp'
 $process=& $read 'src/process_collector.cpp'
 $temperature=& $read 'src/temperatures.cpp'
 $checks=[ordered]@{
@@ -17,8 +16,8 @@ $checks=[ordered]@{
  'Network ETW collector is optional' = ($sampler.Contains('if (need_network && !network_)') -and $sampler.Contains('if (!need_network) network_.reset()'))
  'WMI lazily suspends without readers' = ($temperature.Contains('demand_until_.load') -and $temperature.Contains('continue; // Zero WMI queries'))
  'GPU temperature bypasses CPU WMI' = ($sampler.Contains('read_hardware_temperatures() : read_hwinfo_temperatures()'))
- 'Native process query is validated' = ($native.Contains('self_matches(rows)') -and $native.Contains('offsetof(NativeProcess, private_pages)==200'))
- 'Native process fallback remains' = ($process.Contains('native_unavailable_ = true') -and $process.Contains('if (!have_native)'))
+ 'Win32 is the sole process collector' = ($process.Contains('CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)') -and $process.Contains('GetProcessTimes(') -and $process.Contains('GetProcessMemoryInfo(') -and -not $process.Contains('native_.collect'))
+ 'Experimental native implementation removed' = (-not (Test-Path (Join-Path $Root 'src/nt_process_snapshot.cpp')) -and -not (Test-Path (Join-Path $Root 'include/fluxtop/nt_process_snapshot.hpp')))
  'FPS sampling remains independent' = ($sampler.Contains('fps_.collect(snapshot.processes, fps_targets_)') -and $overlay.Contains('worker_.set_fps_targets'))
 }
 $bad=@($checks.GetEnumerator()|Where-Object {-not $_.Value}|ForEach-Object {$_.Key})

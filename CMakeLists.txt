@@ -26,7 +26,7 @@ target_include_directories(fluxtop_history PUBLIC include)
 target_compile_features(fluxtop_history PUBLIC cxx_std_20)
 target_compile_definitions(fluxtop_history PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
 target_link_libraries(fluxtop_history PUBLIC fluxtop_core winsqlite3)
-add_executable(fluxtop src/main.cpp src/process_collector.cpp src/nt_process_snapshot.cpp src/gpu_collector.cpp src/fps_collector.cpp src/privileges.cpp src/sampler.cpp src/overlay.cpp src/statistics_page.cpp src/statistics_history.cpp src/network_collector.cpp src/autostart.cpp src/temperatures.cpp
+add_executable(fluxtop src/main.cpp src/process_collector.cpp src/gpu_collector.cpp src/fps_collector.cpp src/privileges.cpp src/sampler.cpp src/overlay.cpp src/statistics_page.cpp src/statistics_history.cpp src/network_collector.cpp src/autostart.cpp src/temperatures.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/fluxtop.rc")
 target_link_libraries(fluxtop PRIVATE fluxtop_core fluxtop_icons fluxtop_history psapi pdh advapi32 d2d1 dwrite shell32 user32 gdi32 ole32 oleaut32 wbemuuid comctl32 tdh uuid)
 target_compile_definitions(fluxtop PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN
@@ -72,7 +72,7 @@ if(BUILD_TESTING)
         -Launcher "$<TARGET_FILE:fluxtop_launcher>" -FixtureRoot "${CMAKE_CURRENT_BINARY_DIR}")
     set_tests_properties(installation_fixture PROPERTIES TIMEOUT 30)
     set_tests_properties(release_update portable PROPERTIES TIMEOUT 30)
-    add_executable(fluxtop_process_snapshot_tests tests/process_snapshot_tests.cpp src/process_collector.cpp src/nt_process_snapshot.cpp)
+    add_executable(fluxtop_process_snapshot_tests tests/process_snapshot_tests.cpp src/process_collector.cpp)
     target_include_directories(fluxtop_process_snapshot_tests PRIVATE include)
     target_compile_features(fluxtop_process_snapshot_tests PRIVATE cxx_std_20)
     target_compile_definitions(fluxtop_process_snapshot_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
