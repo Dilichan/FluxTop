@@ -1,4 +1,5 @@
 #include "fluxtop/statistics_history.hpp"
+#include "fluxtop/diagnostics.hpp"
 #include "fluxtop/history_math.hpp"
 #include <winsqlite/winsqlite3.h>
 #include <windows.h>
@@ -41,7 +42,7 @@ struct Db {
         :context{stop,std::chrono::steady_clock::now()+std::chrono::seconds(3)}{
         if(sqlite3_open_v2(utf8path(file).c_str(),&db,SQLITE_OPEN_READONLY|SQLITE_OPEN_NOMUTEX,nullptr)!=SQLITE_OK)
             throw std::runtime_error("History database unavailable");
-        sqlite3_busy_timeout(db,100);
+        sqlite3_busy_timeout(db,250);
         sqlite3_progress_handler(db,2000,[](void* ptr)->int{
             const auto& c=*static_cast<ReadContext*>(ptr);
             return c.cancel.stop_requested() || std::chrono::steady_clock::now()>c.deadline;
@@ -146,12 +147,16 @@ bool statistics_is_system(std::wstring_view name,std::wstring_view path){
 StatisticsHistory read_statistics(const std::filesystem::path& file,
     std::int64_t from_ms,std::int64_t to_ms,unsigned limit,bool include_system,std::stop_token stop){
     StatisticsHistory out;
+    diagnostics::write(diagnostics::Level::trace,"statistics.read","query started");
     if(stop.stop_requested() || file.empty() || !std::filesystem::exists(file))return out;
     try {
         Db connection(file,stop);
         Query version(connection.db,"PRAGMA user_version");
-        if(version.next()!=SQLITE_ROW || sqlite3_column_int(version.s,0)!=2)
-            throw std::runtime_error("Unsupported history schema (expected compact rollups v2)");
+        if(version.next()!=SQLITE_ROW)
+            throw std::runtime_error("Cannot read database schema");
+        const int schema=sqlite3_column_int(version.s,0);
+        if(schema==0)return out; // Icon cache created the file before the first completed minute.
+        if(schema!=2)throw std::runtime_error("Unsupported history schema (expected compact rollups v2)");
         Query bounds(connection.db,"SELECT first_ms,last_ms FROM history_state WHERE id=1");
         if(bounds.next()!=SQLITE_ROW || sqlite3_column_type(bounds.s,0)==SQLITE_NULL)return out;
         out.first_record_ms=sqlite3_column_int64(bounds.s,0);
@@ -170,7 +175,10 @@ StatisticsHistory read_statistics(const std::filesystem::path& file,
         const auto start=std::max(out.first_record_ms,now-history_minute_ms);
         ranked=top_apps(connection.db,start,now+1000,limit,include_system,true,stop);
         out.recent=graph(connection.db,ranked,start,now+1000,1000,stop);
+        diagnostics::write(diagnostics::Level::trace,"statistics.result",
+            "uptime="+std::to_string(out.uptime.size())+" history="+std::to_string(out.history.size()));
     }catch(const std::exception& err){
+        diagnostics::write(diagnostics::Level::warning,"statistics.error",err.what());
         if(!stop.stop_requested())out.error=utf16(reinterpret_cast<const unsigned char*>(err.what()));
     }
     return out;

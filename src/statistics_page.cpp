@@ -1,3 +1,4 @@
+#include "fluxtop/diagnostics.hpp"
 #include "fluxtop/statistics_page.hpp"
 #include "fluxtop/windows.hpp"
 #include <commctrl.h>
@@ -331,6 +332,7 @@ void StatisticsPage::activate(bool active) {
     if(active) request();
 }
 void StatisticsPage::set_limit(unsigned limit) {
+    diagnostics::write(diagnostics::Level::info,"ui.statistics_limit","limit="+std::to_string(limit));
     limit=std::clamp(limit,1U,100U);
     if(limit_==limit) return;
     limit_=limit;
@@ -361,6 +363,7 @@ std::int64_t StatisticsPage::custom_timestamp(HWND picker,bool until_end) {
     return static_cast<std::int64_t>((ticks.QuadPart-116444736000000000ULL)/10000ULL);
 }
 void StatisticsPage::request() {
+    diagnostics::write(diagnostics::Level::trace,"ui.statistics","statistics query requested");
     if(!active_ && !popups_[0].window && !popups_[1].window && !table_window_) return;
     const auto now=now_ms();
     std::int64_t from=period_index_==0?now-86400000:now-604800000;

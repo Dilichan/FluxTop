@@ -1,3 +1,4 @@
+#include "fluxtop/diagnostics.hpp"
 #include "fluxtop/release_update.hpp"
 #include "fluxtop/windows.hpp"
 #include <winhttp.h>
@@ -196,7 +197,7 @@ bool try_release_update(const std::filesystem::path& directory,const std::filesy
         const auto bytes=download_release_update(*release);
         return activate_release(directory,bytes,*release,[tray](const auto& path){ return launch(path,tray); });
     } catch(const std::exception& error) {
-        try { std::ofstream(directory/L"update.log",std::ios::trunc)<<error.what()<<'\n'; } catch(...) {}
+        diagnostics::write(diagnostics::Level::error,"update.failure",error.what());
         return false;
     }
 }

@@ -1,4 +1,5 @@
 #include "fluxtop/overlay.hpp"
+#include "fluxtop/diagnostics.hpp"
 #include "fluxtop/overlay_layout.hpp"
 #include "fluxtop/statistics_page.hpp"
 #include "fluxtop/app_icons.hpp"
@@ -349,6 +350,7 @@ HWND Overlay::control(const wchar_t* kind, const wchar_t* label, DWORD style, UI
     controls_.push_back({window, {x,y,x+width,y+height}}); return window;
 }
 void Overlay::show_client() {
+    diagnostics::write(diagnostics::Level::info,"ui.open","settings client requested");
     if (client_) { ShowWindow(client_, SW_RESTORE); SetForegroundWindow(client_); return; }
     const std::wstring client_title = L"FluxTop v" + wide(FLUXTOP_VERSION);
     client_ = CreateWindowExW(0, client_class, client_title.c_str(), WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
@@ -452,6 +454,7 @@ void Overlay::init_client() {
     initializing_client_ = false; client_stats();
 }
 void Overlay::switch_page(unsigned page) {
+    diagnostics::write(diagnostics::Level::info,"ui.page","tab="+std::to_string(page));
     client_page_=page==1?1:0;
     for(const auto& child:controls_) ShowWindow(child.window,client_page_==0?SW_SHOW:SW_HIDE);
     // Statistics gets a readable workspace; Settings retains its compact dimensions.
@@ -510,6 +513,10 @@ void Overlay::apply_client() {
         previous_rows_.clear();row_motion_.clear();
     }
     scroll_ = 0; if (old_font_size != options_.font_size) fonts();
+    diagnostics::write(diagnostics::Level::info,"ui.settings",
+        "interval_ms="+std::to_string(options_.interval_ms)+" top="+std::to_string(options_.top)+
+        " sort="+std::to_string(static_cast<int>(options_.sort))+
+        " show_icons="+std::to_string(show_icons_)+" animate="+std::to_string(animation_enabled_));
     fit_table(); update_view(); save_settings(); client_stats();
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -539,6 +546,7 @@ void Overlay::movement() {
 }
 void Overlay::activity() { /* History collection continues even when both windows are hidden. */ }
 void Overlay::set_visible(bool visible) {
+    diagnostics::write(diagnostics::Level::info,"ui.overlay",visible?"show":"hide");
     if (visible == visible_) return;
     if (!visible && !tray_ && !toggle_key_ && !client_) return;
     visible_ = visible;
@@ -562,6 +570,9 @@ void Overlay::receive() {
         pending_.reset(); pending_finished_ = false; posted_ = false;
     }
     if (received_snapshot && snapshot_) {
+        diagnostics::write(diagnostics::Level::trace,"ui.snapshot",
+            "processes="+std::to_string(snapshot_->processes.size())+
+            " history_error="+snapshot_->history_error);
         // Keep process-level history untouched. Aggregate only the displayed family rows.
         grouped_processes_=aggregate_application_processes(snapshot_->processes);
         grouped_spikes_.update(grouped_processes_,snapshot_->total_ram_capacity,
@@ -621,7 +632,7 @@ void Overlay::update_view() {
     if (visible_ && !summary_only() && foreground_pid_) fps_targets.push_back(foreground_pid_);
     worker_.set_fps_targets(std::move(fps_targets));
     if (visible_ && show_icons_ && !summary_only()) {
-        if (!icons_) icons_ = std::make_unique<AppIconCache>(local_file(L"FLUXTOP_ICON_DB", L"icons.db"), [this] {
+        if (!icons_) icons_ = std::make_unique<AppIconCache>(history_path(), [this] {
             if (!icon_posted_.exchange(true)) PostMessageW(hwnd_, icon_message, 0, 0);
         });
         icons_->set_capacity(std::clamp<std::size_t>(static_cast<std::size_t>(options_.top)+16,32,128));
@@ -980,6 +991,7 @@ void Overlay::paint(bool animation_only) {
 }
 
 int Overlay::run() {
+    diagnostics::write(diagnostics::Level::info,"ui.start","overlay startup");
     load_settings(); dpi_ = GetDpiForSystem(); load_icons();
     require_hr(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,factory_.GetAddressOf()), "Direct2D factory");
     require_hr(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,__uuidof(IDWriteFactory),reinterpret_cast<IUnknown**>(write_factory_.GetAddressOf())), "DirectWrite factory");
@@ -1024,6 +1036,7 @@ LRESULT CALLBACK Overlay::dispatch(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
     if (!app) return DefWindowProcW(window,msg,wp,lp);
     try { return app->message(msg,wp,lp); }
     catch (const std::exception& error) {
+        diagnostics::write(diagnostics::Level::error,"ui.exception",error.what());
         app->exit_code_=1;
         if (!app->options_.samples) MessageBoxW(app->client_,wide(error.what()).c_str(),L"FluxTop — ошибка",MB_OK|MB_ICONERROR);
         DestroyWindow(window); return 0;
@@ -1034,7 +1047,9 @@ LRESULT CALLBACK Overlay::client_dispatch(HWND window,UINT msg,WPARAM wp,LPARAM 
     if (msg==WM_NCCREATE) { app=static_cast<Overlay*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams); app->client_=window; SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(app)); }
     if (!app) return DefWindowProcW(window,msg,wp,lp);
     try { return app->client_message(window,msg,wp,lp); }
-    catch (const std::exception& error) { MessageBoxW(window,wide(error.what()).c_str(),L"FluxTop — ошибка клиента",MB_OK|MB_ICONERROR); DestroyWindow(window); return 0; }
+    catch (const std::exception& error) {
+        diagnostics::write(diagnostics::Level::error,"ui.client_exception",error.what());
+        MessageBoxW(window,wide(error.what()).c_str(),L"FluxTop — ошибка клиента",MB_OK|MB_ICONERROR); DestroyWindow(window); return 0; }
 }
 LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
     switch (msg) {
@@ -1069,6 +1084,8 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         break;
     case WM_COMMAND:
         if (initializing_client_) return 0;
+        diagnostics::write(diagnostics::Level::trace,"ui.command",
+            "control_id="+std::to_string(LOWORD(wp))+" notification="+std::to_string(HIWORD(wp)));
         if (LOWORD(wp)==interval_control && HIWORD(wp)==EN_CHANGE) {
             SetTimer(window,settings_timer,300,nullptr); return 0;
         }
@@ -1108,7 +1125,9 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
     case WM_TIMER:
         if (wp==settings_timer) { KillTimer(window,settings_timer); apply_client(); return 0; }
         break;
-    case WM_CLOSE: KillTimer(window,settings_timer); apply_client(); DestroyWindow(window); return 0;
+    case WM_CLOSE:
+        diagnostics::write(diagnostics::Level::info,"ui.close","settings window closed");
+        KillTimer(window,settings_timer); apply_client(); DestroyWindow(window); return 0;
     case WM_DESTROY:
         statistics_.reset(); tabs_=nullptr; client_=nullptr; controls_.clear(); if (client_font_) { DeleteObject(client_font_); client_font_=nullptr; } activity(); return 0;
     }
@@ -1164,19 +1183,25 @@ LRESULT Overlay::message(UINT msg,WPARAM wp,LPARAM lp) {
         return 0;
     }
     case WM_CONTEXTMENU: if (moving_) show_client(); return 0;
-    case WM_HOTKEY: if (wp==toggle_hotkey) set_visible(!visible_); else if (wp==client_hotkey) show_client(); return 0;
+    case WM_HOTKEY:
+        diagnostics::write(diagnostics::Level::info,"ui.hotkey","hotkey="+std::to_string(wp));
+        if (wp==toggle_hotkey) set_visible(!visible_); else if (wp==client_hotkey) show_client(); return 0;
     case tray_message:
         if (lp==WM_LBUTTONDBLCLK || lp==NIN_KEYSELECT) show_client(); else if (lp==WM_RBUTTONUP || lp==WM_CONTEXTMENU) tray_menu(); return 0;
     case sample_message: receive(); return 0;
     case foreground_update_message:
+        diagnostics::write(diagnostics::Level::trace,"ui.foreground","foreground window changed");
         if (visible_) {
             update_view(); // Update FPS target and header in every sorting mode.
             InvalidateRect(hwnd_,nullptr,FALSE);
         }
         return 0;
-    case icon_message: icon_posted_=false; if (visible_) InvalidateRect(hwnd_,nullptr,FALSE); client_stats(); return 0;
+    case icon_message:
+        diagnostics::write(diagnostics::Level::trace,"ui.icons","icon notification received");
+        icon_posted_=false; if (visible_) InvalidateRect(hwnd_,nullptr,FALSE); client_stats(); return 0;
     case WM_CLOSE: DestroyWindow(hwnd_); return 0;
     case WM_DESTROY: {
+        diagnostics::write(diagnostics::Level::info,"ui.stop","overlay shutdown");
         if (foreground_hook_) { UnhookWinEvent(foreground_hook_); foreground_hook_ = nullptr; }
         foreground_update_target = nullptr;
         KillTimer(hwnd_,overlay_animation_timer);
@@ -1206,6 +1231,7 @@ int run_overlay(const Options& options) {
     FreeConsole();
     try { Overlay app(options); return app.run(); }
     catch (const std::exception& error) {
+        diagnostics::write(diagnostics::Level::error,"ui.fatal",error.what());
         if (!options.samples) MessageBoxW(nullptr,wide(error.what()).c_str(),L"FluxTop — ошибка запуска",MB_OK|MB_ICONERROR);
         return 1;
     }

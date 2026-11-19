@@ -1,4 +1,5 @@
 #include "fluxtop/sampler.hpp"
+#include "fluxtop/diagnostics.hpp"
 #include "fluxtop/windows.hpp"
 #include "fluxtop/temperatures.hpp"
 #include <psapi.h>
@@ -45,6 +46,11 @@ Snapshot Sampler::collect() {
     snapshot.interval_ms = std::chrono::duration<double, std::milli>(start - previous_).count();
     previous_ = start;
     history_.append(snapshot);
+    diagnostics::write(snapshot.history_error.empty()?diagnostics::Level::trace:diagnostics::Level::warning,
+        "sampler.snapshot","processes="+std::to_string(snapshot.processes.size())+
+        " collection_ms="+std::to_string(snapshot.collection_ms)+
+        " history_ms="+std::to_string(snapshot.history_write_ms)+
+        " history_error="+snapshot.history_error);
     return snapshot;
 }
 
@@ -59,9 +65,11 @@ void SamplingWorker::set_fps_targets(std::vector<std::uint32_t> targets) {
 }
 void SamplingWorker::pause(bool paused) { paused_ = paused; wake_.notify_all(); }
 void SamplingWorker::stop() {
+    diagnostics::write(diagnostics::Level::info,"sampler.stop","sampling worker stop requested");
     if (thread_.joinable()) { thread_.request_stop(); wake_.notify_all(); thread_.join(); }
 }
 void SamplingWorker::start(Options options, Notify notify) {
+    diagnostics::write(diagnostics::Level::info,"sampler.start","interval_ms="+std::to_string(options.interval_ms));
     interval_ = options.interval_ms;
     thread_ = std::jthread([this, options, notify = std::move(notify)](std::stop_token stop) {
         unsigned emitted = 0;
@@ -96,6 +104,7 @@ void SamplingWorker::start(Options options, Notify notify) {
                         last_sample = std::chrono::steady_clock::now();
                 }
             } catch (const std::exception& error) {
+                diagnostics::write(diagnostics::Level::error,"sampler.exception",error.what());
                 notify(std::nullopt, error.what(), false);
                 std::unique_lock lock(mutex_);
                 wake_.wait_for(lock, stop, std::chrono::seconds(2), [this] { return paused_.load(); });

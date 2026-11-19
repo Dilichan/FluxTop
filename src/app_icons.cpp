@@ -1,4 +1,5 @@
 #include "fluxtop/app_icons.hpp"
+#include "fluxtop/diagnostics.hpp"
 #include "fluxtop/windows.hpp"
 
 #include <shellapi.h>
@@ -118,20 +119,23 @@ private:
 
 class Database {
 public:
-    explicit Database(const std::filesystem::path& path) {
+    explicit Database(const std::filesystem::path& path) : path_(path) {
         if (path.empty()) return;
         std::error_code error;
         std::filesystem::create_directories(path.parent_path(), error);
         if (error) return;
         const auto name = utf8(path.c_str());
         if (sqlite3_open_v2(name.c_str(), &db_, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX, nullptr) != SQLITE_OK) { close(); return; }
-        sqlite3_busy_timeout(db_, 30);
+        sqlite3_busy_timeout(db_, 1000);
         sqlite3_limit(db_, SQLITE_LIMIT_LENGTH, 65536);
         // Bound the RAM page cache, not the on-disk archive or its row count.
-        const char* schema = "PRAGMA page_size=4096; PRAGMA cache_size=-128;"
-            "PRAGMA mmap_size=0; PRAGMA journal_mode=DELETE; PRAGMA temp_store=MEMORY;"
+        const char* schema = "PRAGMA cache_size=-128;"
+            "PRAGMA mmap_size=0; PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_mode=WAL; PRAGMA temp_store=MEMORY;"
             "CREATE TABLE IF NOT EXISTS icons(exe TEXT PRIMARY KEY,stamp INTEGER NOT NULL,bytes INTEGER NOT NULL,png BLOB NOT NULL,used INTEGER NOT NULL);";
-        if (sqlite3_exec(db_, schema, nullptr, nullptr, nullptr) != SQLITE_OK) close();
+        if (sqlite3_exec(db_, schema, nullptr, nullptr, nullptr) != SQLITE_OK) {
+            diagnostics::write(diagnostics::Level::warning,"icons.database","cannot initialize shared icons table");
+            close();
+        } else diagnostics::write(diagnostics::Level::info,"icons.database","opened shared SQLite icons table");
     }
     ~Database() { close(); }
     bool available() const { return db_ != nullptr; }
@@ -141,10 +145,24 @@ public:
         if (sqlite3_prepare_v2(db_, "SELECT png FROM icons WHERE exe=?1 AND stamp=?2 AND bytes=?3", -1, &query.value, nullptr) != SQLITE_OK) return {};
         bind(query.value, path, stamp, size);
         if (sqlite3_step(query.value) != SQLITE_ROW) return {};
+        diagnostics::write(diagnostics::Level::trace,"icons.cache","persistent icon hit");
         return codec.decode(sqlite3_column_blob(query.value, 0), sqlite3_column_bytes(query.value, 0));
     }
     void put(const std::wstring& path, std::uint64_t stamp, std::uint64_t size, const std::vector<std::byte>& png) {
         if (!db_ || png.empty() || png.size() > 16384) return;
+        // The icons table shares the 50 GiB emergency budget with history.
+        std::error_code ec;
+        const auto file_size=[&](const std::filesystem::path& file)->std::uint64_t {
+            const auto n=std::filesystem::file_size(file,ec);
+            if(ec){ec.clear();return 0;}return n;
+        };
+        auto wal=path_;wal+=L"-wal";
+        auto shm=path_;shm+=L"-shm";
+        if(file_size(path_)+file_size(wal)+file_size(shm)>=49ULL*1024*1024*1024 ||
+            file_size(wal)>256ULL*1024*1024) {
+            diagnostics::write(diagnostics::Level::warning,"icons.write","storage limit reached; icon persistence skipped");
+            return;
+        }
         // Keep older application paths available for future historical views.
         Statement insert;
         if (sqlite3_prepare_v2(db_, "INSERT OR REPLACE INTO icons(exe,stamp,bytes,png,used) VALUES(?1,?2,?3,?4,?5)", -1, &insert.value, nullptr) != SQLITE_OK) return;
@@ -152,7 +170,9 @@ public:
         sqlite3_bind_blob(insert.value, 4, png.data(), static_cast<int>(png.size()), SQLITE_TRANSIENT);
         const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
         sqlite3_bind_int64(insert.value, 5, now);
-        sqlite3_step(insert.value);
+        const auto result=sqlite3_step(insert.value);
+        if(result!=SQLITE_DONE) diagnostics::write(diagnostics::Level::warning,"icons.write",sqlite3_errmsg(db_));
+        else diagnostics::write(diagnostics::Level::trace,"icons.write","persistent PNG stored");
     }
 private:
     static void bind(sqlite3_stmt* statement, const std::wstring& path, std::uint64_t stamp, std::uint64_t size) {
@@ -162,6 +182,7 @@ private:
         sqlite3_bind_int64(statement, 3, static_cast<sqlite3_int64>(size));
     }
     void close() { if (db_) { sqlite3_close(db_); db_ = nullptr; } }
+    std::filesystem::path path_;
     sqlite3* db_{};
 };
 } // namespace
@@ -214,6 +235,7 @@ struct AppIconCache::Impl {
                     auto image = metadata ? db.get(path, stamp, size, codec) : nullptr;
                     const bool hit = image != nullptr;
                     if (!image) {
+                        diagnostics::write(diagnostics::Level::trace,"icons.extract","cache miss, extracting executable icon");
                         png.clear(); image = codec.extract(path, png);
                         if (metadata) db.put(path, stamp, size, png);
                     }

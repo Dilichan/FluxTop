@@ -1,4 +1,5 @@
 #include "fluxtop/autostart.hpp"
+#include "fluxtop/diagnostics.hpp"
 #include "fluxtop/windows.hpp"
 #include <shlobj.h>
 #include <wrl/client.h>
@@ -64,6 +65,7 @@ bool autostart_enabled() {
     return owned(link.Get(), path) && !disabled_by_windows();
 }
 void set_autostart(bool enabled) {
+    diagnostics::write(diagnostics::Level::info,"settings.autostart",enabled?"enabled":"disabled");
     const auto path = shortcut_path();
     const auto link = shell_link();
     if (std::filesystem::exists(path) && !owned(link.Get(), path))

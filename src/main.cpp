@@ -1,4 +1,5 @@
 #include "fluxtop/gpu_collector.hpp"
+#include "fluxtop/diagnostics.hpp"
 #include "fluxtop/options.hpp"
 #include "fluxtop/overlay.hpp"
 #include "fluxtop/output.hpp"
@@ -32,6 +33,7 @@ public:
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
+    fluxtop::diagnostics::write(fluxtop::diagnostics::Level::info,"process.start","monitor main entry");
     try {
         std::vector<std::string> storage;
         storage.reserve(static_cast<std::size_t>(argc));
@@ -40,6 +42,8 @@ int wmain(int argc, wchar_t** argv) {
         const auto options = fluxtop::parse_options(args);
         if (options.help) { std::cout << fluxtop::usage(); return 0; }
         if (options.version) { std::cout << "FluxTop " << FLUXTOP_VERSION << '\n'; return 0; }
+        fluxtop::diagnostics::write(fluxtop::diagnostics::Level::info,"process.options",
+            "overlay="+std::to_string(options.overlay)+" interval_ms="+std::to_string(options.interval_ms));
         if (options.overlay) return fluxtop::run_overlay(options);
         std::cout.imbue(std::locale::classic());
         // Windows console uses UTF-8 during this process; restore its previous code page on exit.
@@ -75,9 +79,11 @@ int wmain(int argc, wchar_t** argv) {
         }
         return 0;
     } catch (const std::invalid_argument& error) {
+        fluxtop::diagnostics::write(fluxtop::diagnostics::Level::error,"process.args",error.what());
         std::cerr << "FluxTop: " << error.what() << "\nUse --help for usage.\n";
         return 2;
     } catch (const std::exception& error) {
+        fluxtop::diagnostics::write(fluxtop::diagnostics::Level::error,"process.failure",error.what());
         std::cerr << "FluxTop: " << error.what() << '\n';
         return 1;
     }

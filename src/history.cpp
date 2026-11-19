@@ -1,4 +1,5 @@
 #include "fluxtop/history.hpp"
+#include "fluxtop/diagnostics.hpp"
 #include "fluxtop/history_math.hpp"
 #include <winsqlite/winsqlite3.h>
 #include <algorithm>
@@ -26,6 +27,7 @@ namespace fluxtop {
 namespace {
 constexpr std::uint64_t mib=1024ULL*1024;
 constexpr std::size_t max_pending_minutes=8;
+constexpr std::size_t max_pending_bytes=2*1024*1024;
 
 std::string database_filename(const std::filesystem::path& p) {
     const auto u=p.u8string();return {reinterpret_cast<const char*>(u.data()),u.size()};
@@ -79,6 +81,7 @@ constexpr char create_sql[] =
     "PRIMARY KEY(level,bucket_ms,application_id)) WITHOUT ROWID;"
     "CREATE INDEX rollups_app_time ON history_rollups(application_id,bucket_ms);"
     "CREATE INDEX rollups_time ON history_rollups(bucket_ms);"
+    "CREATE TABLE IF NOT EXISTS icons(exe TEXT PRIMARY KEY,stamp INTEGER NOT NULL,bytes INTEGER NOT NULL,png BLOB NOT NULL,used INTEGER NOT NULL);"
     "CREATE TABLE history_state(id INTEGER PRIMARY KEY CHECK(id=1),first_ms INTEGER,last_ms INTEGER,observations INTEGER NOT NULL DEFAULT 0);"
     "INSERT INTO history_state(id,observations) VALUES(1,0);"
     "PRAGMA user_version=2;";
@@ -110,6 +113,12 @@ struct MinuteBatch {
     std::int64_t bucket_ms{};
     std::unordered_map<std::string,ApplicationMinute> apps;
 };
+std::size_t footprint(const MinuteBatch& batch){
+    std::size_t size=sizeof(batch);
+    for(const auto& [identity,app]:batch.apps)
+        size+=sizeof(app)+identity.capacity()+app.identity.capacity()+app.name.capacity()+app.path.capacity()+128;
+    return size;
+}
 struct Observation {
     std::string identity,name,path;
     std::array<std::optional<double>,history_metric_count> metrics{};
@@ -174,6 +183,8 @@ bool compact_one(sqlite3* db,int source,int target,std::int64_t target_width,std
         del.integer(1,source);del.integer(2,start);del.integer(3,end);del.done();
     }
     tx.commit();
+    diagnostics::write(diagnostics::Level::trace,"history.rollup",
+        "source="+std::to_string(source)+" target="+std::to_string(target)+" bucket="+std::to_string(start));
     return true;
 }
 void compact(sqlite3* db,std::int64_t current_minute){
@@ -206,10 +217,12 @@ void shrink_wal(sqlite3* db,const std::filesystem::path& path){
         // will stop before the WAL can grow without limit.
         (void)sqlite3_wal_checkpoint_v2(db,nullptr,SQLITE_CHECKPOINT_TRUNCATE,&total,&checkpointed);
     }
+    if(wal>64*mib) diagnostics::write(diagnostics::Level::warning,"history.checkpoint",
+        "wal_before="+std::to_string(wal)+" wal_after="+std::to_string(wal_bytes(path)));
     if(wal_bytes(path)>256*mib) throw std::runtime_error("History WAL exceeds 256 MiB: checkpoint blocked; recording paused");
 }
 void init_db(sqlite3* db){
-    run_sql(db,"PRAGMA foreign_keys=ON;PRAGMA busy_timeout=150;PRAGMA cache_size=-1024;"
+    run_sql(db,"PRAGMA foreign_keys=ON;PRAGMA busy_timeout=1000;PRAGMA cache_size=-1024;"
                "PRAGMA temp_store=MEMORY;PRAGMA mmap_size=0;");
     Query version(db,"PRAGMA user_version");
     if(sqlite3_step(version.s)!=SQLITE_ROW)throw std::runtime_error("Cannot read SQLite schema");
@@ -281,8 +294,8 @@ std::wstring environment_w(const wchar_t* key){
 }
 }
 std::filesystem::path history_path(){
-    if(auto custom=environment_w(L"FLUXTOP_HISTORY_DB");!custom.empty())return std::filesystem::absolute(custom);
-    if(auto base=environment_w(L"LOCALAPPDATA");!base.empty())return std::filesystem::path(base)/L"FluxTop"/L"history.db";
+    if(auto custom=environment_w(L"FLUXTOP_DATA_DB");!custom.empty())return std::filesystem::absolute(custom);
+    if(auto base=environment_w(L"LOCALAPPDATA");!base.empty())return std::filesystem::path(base)/L"FluxTop"/L"fluxtop.db";
 #ifndef _WIN32
     if(const char* v=std::getenv("FLUXTOP_HISTORY_DB"))return std::filesystem::absolute(v);
     return std::filesystem::temp_directory_path()/"fluxtop-history.db";
@@ -298,6 +311,7 @@ struct HistoryWriter::Impl {
     bool has_current{};
     std::int64_t last_end_ms{};
     std::deque<MinuteBatch> queue;
+    std::size_t queue_bytes{};
     std::mutex mutex;
     std::condition_variable ready;
     std::thread thread;
@@ -318,14 +332,17 @@ struct HistoryWriter::Impl {
     }
     void push(MinuteBatch batch){
         if(batch.apps.empty())return;
+        const auto bytes=footprint(batch);
         {
             std::lock_guard lock(mutex);
             if(halted)return; // Keep the original error; never grow it every minute.
-            if(queue.size()>=max_pending_minutes){
-                halted=true;queue.clear();
+            if(queue.size()>=max_pending_minutes || queue_bytes+bytes>max_pending_bytes){
+                diagnostics::write(diagnostics::Level::error,"history.backpressure","writer queue capacity exceeded");
+                halted=true;queue.clear();queue_bytes=0;
                 error="History queue overflow; recording stopped instead of silently losing minutes";
                 return;
             }
+            queue_bytes+=bytes;
             queue.push_back(std::move(batch));
         }
         ready.notify_one();
@@ -338,7 +355,7 @@ struct HistoryWriter::Impl {
             current=MinuteBatch{};current.bucket_ms=bucket;
         }
         for(const auto& row:rows){
-            if(current.apps.size()>=20'000 && !current.apps.contains(row.identity)){
+            if(current.apps.size()>=4'096 && !current.apps.contains(row.identity)){
                 publish_error("Too many unique applications in one minute; excess rows cannot be recorded");
                 continue;
             }
@@ -395,6 +412,8 @@ struct HistoryWriter::Impl {
                     ready.wait(lock,[this]{return closing || !queue.empty();});
                     if(queue.empty() && closing)break;
                     batch=std::move(queue.front());queue.pop_front();
+                    const auto bytes=footprint(batch);
+                    queue_bytes=bytes>queue_bytes?0:queue_bytes-bytes;
                 }
                 try {
                     if(!db){
@@ -404,12 +423,16 @@ struct HistoryWriter::Impl {
                             SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_NOMUTEX,nullptr)!=SQLITE_OK)
                             throw std::runtime_error("Cannot open history database");
                         init_db(db);
+                        diagnostics::write(diagnostics::Level::info,"history.open","unified SQLite database ready (schema=2)");
                     }
                     write_minute(db,path,batch);
+                    diagnostics::write(diagnostics::Level::info,"history.minute",
+                        "bucket_ms="+std::to_string(batch.bucket_ms)+" apps="+std::to_string(batch.apps.size()));
                     saved.fetch_add(batch.apps.size(),std::memory_order_relaxed);
                     std::lock_guard lock(mutex);
                     if(!halted)error.clear();
                 } catch(const std::exception& ex){
+                    diagnostics::write(diagnostics::Level::error,"history.failure",ex.what());
                     if(db){sqlite3_close(db);db=nullptr;}
                     publish_error(ex.what());
                     const auto msg=std::string(ex.what());

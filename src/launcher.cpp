@@ -1,4 +1,5 @@
 #include "fluxtop/windows.hpp"
+#include "fluxtop/diagnostics.hpp"
 #include "fluxtop/release_update.hpp"
 #include "fluxtop/installation.hpp"
 #include <shellapi.h>
@@ -107,6 +108,7 @@ bool close_monitor_for_consented_update() {
 }
 }
 int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
+    fluxtop::diagnostics::write(fluxtop::diagnostics::Level::info,"launcher.start","bootstrap started");
     bool prepare=false,install_only=false;
     try {
         const HRESULT com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
@@ -133,6 +135,9 @@ int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
             }
             else throw std::runtime_error("Supported options: --tray, --prepare-only, --install-only, --uninstall, --check-update, --data-dir PATH");
         }
+        fluxtop::diagnostics::write(fluxtop::diagnostics::Level::info,"launcher.options",
+            "tray="+std::to_string(tray)+" autostart="+std::to_string(autostart)+
+            " install_only="+std::to_string(install_only)+" uninstall="+std::to_string(uninstall));
         if (directory.empty()) directory=data_directory();
         std::filesystem::create_directories(directory);
         // Keep download/activation and local-cache publication serialized across launches.
@@ -179,7 +184,7 @@ int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
                 (void)fluxtop::activate_release(directory,bytes,*candidate,launch_new);
                 return 0;
             } catch (const std::exception& error) {
-                try { std::ofstream(directory/L"update.log",std::ios::trunc)<<error.what()<<'\n'; } catch (...) {}
+                fluxtop::diagnostics::write(fluxtop::diagnostics::Level::error,"update.failure",error.what());
                 if (approved) {
                     // If activation failed after shutdown, restore the old app in tray mode.
                     if (!fluxtop::monitor_running() && std::filesystem::exists(installed)) {
@@ -191,7 +196,7 @@ int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
                         (void)ShellExecuteExW(&restart);
                     }
                     MessageBoxW(nullptr,
-                        L"Не удалось применить обновление FluxTop. Подробности: %LOCALAPPDATA%\\FluxTop\\update.log.",
+                        L"Не удалось применить обновление FluxTop. Подробности: %LOCALAPPDATA%\\FluxTop\\activity.log.",
                         L"FluxTop — обновление",MB_OK|MB_ICONERROR);
                 }
                 return 1;
@@ -293,6 +298,7 @@ int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
         SHELLEXECUTEINFOW start{}; start.cbSize=sizeof(start); start.fMask=SEE_MASK_NOCLOSEPROCESS;
         start.lpVerb=L"runas"; start.lpFile=monitor.c_str(); start.lpDirectory=directory.c_str();
         start.lpParameters=tray ? L"--overlay --tray" : L"--overlay"; start.nShow=SW_HIDE;
+        fluxtop::diagnostics::write(fluxtop::diagnostics::Level::info,"launcher.monitor","elevated monitor launch requested");
         if (!ShellExecuteExW(&start)) {
             const auto code=GetLastError();
             if (code==ERROR_CANCELLED) return ERROR_CANCELLED;
@@ -301,6 +307,7 @@ int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
         if (start.hProcess) CloseHandle(start.hProcess);
         return 0;
     } catch (const std::exception& error) {
+        fluxtop::diagnostics::write(fluxtop::diagnostics::Level::error,"launcher.failure",error.what());
         if (!prepare && !install_only) {
             const auto size=MultiByteToWideChar(CP_UTF8,0,error.what(),-1,nullptr,0);
             std::wstring message(static_cast<std::size_t>(std::max(1,size)),L'\0');

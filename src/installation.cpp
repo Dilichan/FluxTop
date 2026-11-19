@@ -1,4 +1,5 @@
 #include "fluxtop/installation.hpp"
+#include "fluxtop/diagnostics.hpp"
 #include "fluxtop/windows.hpp"
 #include "fluxtop/release_update.hpp"
 
@@ -191,6 +192,7 @@ void install_application(const std::filesystem::path& source,
     const std::filesystem::path& data_directory, std::wstring_view tag, bool register_windows) {
     std::filesystem::create_directories(data_directory);
     const auto installed=data_directory/L"FluxTop.exe";
+    diagnostics::write(diagnostics::Level::info,"install.begin","application installation requested");
     // For fixture tests, install the binary only and never alter real user shell state.
     copy_if_needed(source,installed);
     if (!register_windows) return;
@@ -201,15 +203,14 @@ void install_application(const std::filesystem::path& source,
     try { migrate_owned_startup(installed); }
     catch (const std::exception& error) {
         startup_warning=true;
-        std::ofstream log(data_directory/L"installation.log",std::ios::app);
-        if (log) log << "Startup shortcut migration failed: " << error.what() << '\n';
+        diagnostics::write(diagnostics::Level::warning,"install.startup",error.what());
     }
     make_uninstall_cleanup(data_directory);
     const auto installed_tag=launcher_release_tag(installed);
     register_program(installed,installed_tag.empty() ? tag : std::wstring_view(installed_tag));
     if (startup_warning) MessageBoxW(nullptr,
         L"FluxTop установлен, но Windows запретила обновить старый ярлык автозапуска. "
-        L"Выключите и снова включите автозапуск в настройках FluxTop. Подробности: installation.log.",
+        L"Выключите и снова включите автозапуск в настройках FluxTop. Подробности: activity.log.",
         L"FluxTop — автозапуск",MB_OK|MB_ICONWARNING);
 }
 void launch_installed_application(const std::filesystem::path& data_directory,bool tray) {
@@ -239,7 +240,7 @@ void uninstall_application(const std::filesystem::path& data_directory) {
     if (RegDeleteTreeW(HKEY_CURRENT_USER,uninstall_key)!=ERROR_SUCCESS)
         throw std::runtime_error("Cannot remove FluxTop installed-app registration");
     // Run a fixed, user-owned helper after this EXE exits. It removes only app
-    // binaries; history.db, overlay.ini, icons.db and diagnostics are preserved.
+    // binaries; fluxtop.db, overlay.ini and diagnostics are preserved.
     std::wstring cmd=L"/d /c \"\""+helper.wstring()+L"\"\"";
     SHELLEXECUTEINFOW start{};
     start.cbSize=sizeof(start);
