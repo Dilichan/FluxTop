@@ -259,6 +259,9 @@ class WmiCpuCache {
 public:
     WmiCpuCache() : worker_([this](std::stop_token stop){ loop(stop); }) {}
     std::optional<CpuReading> latest() const {
+        // Demand expires after 12 seconds: closing/hiding the CPU column
+        // suspends this independent worker without another UI callback.
+        demand_until_.store(GetTickCount64()+12000, std::memory_order_relaxed);
         const auto sample=last_ms_.load(std::memory_order_acquire);
         if (!sample || GetTickCount64()-sample>20000) return std::nullopt;
         const auto value=celsius_.load(std::memory_order_relaxed);
@@ -269,6 +272,10 @@ private:
     void loop(std::stop_token stop) {
         using namespace std::chrono_literals;
         while (!stop.stop_requested()) {
+            if (GetTickCount64() >= demand_until_.load(std::memory_order_relaxed)) {
+                std::this_thread::sleep_for(500ms);
+                continue; // Zero WMI queries until temperature data is needed again.
+            }
             const auto value=read_wmi_cpu();
             if (value) {
                 celsius_.store(value->celsius,std::memory_order_relaxed);
@@ -280,6 +287,7 @@ private:
                 std::this_thread::sleep_for(500ms);
         }
     }
+    mutable std::atomic<ULONGLONG> demand_until_{0};
     std::atomic<double> celsius_{0.0};
     std::atomic<bool> board_{false};
     std::atomic<ULONGLONG> last_ms_{0};

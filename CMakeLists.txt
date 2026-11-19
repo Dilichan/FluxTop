@@ -26,7 +26,7 @@ target_include_directories(fluxtop_history PUBLIC include)
 target_compile_features(fluxtop_history PUBLIC cxx_std_20)
 target_compile_definitions(fluxtop_history PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
 target_link_libraries(fluxtop_history PUBLIC fluxtop_core winsqlite3)
-add_executable(fluxtop src/main.cpp src/process_collector.cpp src/gpu_collector.cpp src/fps_collector.cpp src/privileges.cpp src/sampler.cpp src/overlay.cpp src/statistics_page.cpp src/statistics_history.cpp src/network_collector.cpp src/autostart.cpp src/temperatures.cpp
+add_executable(fluxtop src/main.cpp src/process_collector.cpp src/nt_process_snapshot.cpp src/gpu_collector.cpp src/fps_collector.cpp src/privileges.cpp src/sampler.cpp src/overlay.cpp src/statistics_page.cpp src/statistics_history.cpp src/network_collector.cpp src/autostart.cpp src/temperatures.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/fluxtop.rc")
 target_link_libraries(fluxtop PRIVATE fluxtop_core fluxtop_icons fluxtop_history psapi pdh advapi32 d2d1 dwrite shell32 user32 gdi32 ole32 oleaut32 wbemuuid comctl32 tdh uuid)
 target_compile_definitions(fluxtop PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN
@@ -72,6 +72,12 @@ if(BUILD_TESTING)
         -Launcher "$<TARGET_FILE:fluxtop_launcher>" -FixtureRoot "${CMAKE_CURRENT_BINARY_DIR}")
     set_tests_properties(installation_fixture PROPERTIES TIMEOUT 30)
     set_tests_properties(release_update portable PROPERTIES TIMEOUT 30)
+    add_executable(fluxtop_process_snapshot_tests tests/process_snapshot_tests.cpp src/process_collector.cpp src/nt_process_snapshot.cpp)
+    target_include_directories(fluxtop_process_snapshot_tests PRIVATE include)
+    target_compile_features(fluxtop_process_snapshot_tests PRIVATE cxx_std_20)
+    target_compile_definitions(fluxtop_process_snapshot_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
+    target_link_libraries(fluxtop_process_snapshot_tests PRIVATE fluxtop_core psapi)
+    add_test(NAME process_snapshot COMMAND fluxtop_process_snapshot_tests)
     add_executable(fluxtop_history_tests tests/history_tests.cpp)
     target_link_libraries(fluxtop_history_tests PRIVATE fluxtop_history)
     add_test(NAME history COMMAND fluxtop_history_tests "${CMAKE_CURRENT_BINARY_DIR}")
@@ -89,6 +95,8 @@ if(BUILD_TESTING)
         -File "${PROJECT_SOURCE_DIR}/tests/statistics_popout_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
     add_test(NAME statistics_tooltip_axis_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
         -File "${PROJECT_SOURCE_DIR}/tests/statistics_tooltip_axis_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
+    add_test(NAME architecture_optimization_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+        -File "${PROJECT_SOURCE_DIR}/tests/architecture_optimization_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
     add_test(NAME overlay_animation_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
         -File "${PROJECT_SOURCE_DIR}/tests/overlay_animation_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
     add_test(NAME fps_header_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
@@ -122,7 +130,7 @@ if(BUILD_TESTING)
         ENVIRONMENT "FLUXTOP_OVERLAY_SETTINGS=${CMAKE_CURRENT_BINARY_DIR}/overlay-smoke.ini;FLUXTOP_ICON_DB=${CMAKE_CURRENT_BINARY_DIR}/overlay-icons.db;FLUXTOP_HISTORY_DB=${CMAKE_CURRENT_BINARY_DIR}/overlay-history.db")
 endif()
 
-foreach(target fluxtop fluxtop_launcher fluxtop_release_update fluxtop_core fluxtop_icons fluxtop_history fluxtop_statistics_tests fluxtop_tests fluxtop_icon_tests fluxtop_network_tests fluxtop_history_tests fluxtop_release_tests fluxtop_temperature_tests)
+foreach(target fluxtop_process_snapshot_tests fluxtop fluxtop_launcher fluxtop_release_update fluxtop_core fluxtop_icons fluxtop_history fluxtop_statistics_tests fluxtop_tests fluxtop_icon_tests fluxtop_network_tests fluxtop_history_tests fluxtop_release_tests fluxtop_temperature_tests)
     if(TARGET ${target} AND MSVC)
         target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/W4;/WX;/permissive-;/utf-8;/EHsc>")
     endif()

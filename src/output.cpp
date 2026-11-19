@@ -58,6 +58,7 @@ void write_jsonl(std::ostream& out, const Snapshot& s, unsigned top) {
         << ",\"elapsed_ms\":" << s.elapsed_ms << ",\"collection_ms\":" << s.collection_ms
         << ",\"logical_processors\":" << s.logical_processors
         << ",\"process_count\":" << s.processes.size() << ",\"inaccessible\":" << s.inaccessible
+        << ",\"process_backend\":" << json_escape(s.process_backend)
         << ",\"gpu_status\":" << json_escape(s.gpu_status)
         << ",\"interval_ms\":" << s.interval_ms << ",\"history_records\":";
     nullable(out, s.history_records);

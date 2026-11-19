@@ -92,6 +92,7 @@ struct Snapshot {
     double elapsed_ms{};
     unsigned logical_processors{};
     std::size_t inaccessible{};
+    std::string process_backend = "win32"; // Actual backend used for this sample.
     std::uint32_t self_pid{};
     std::optional<bool> elevated;
     bool debug_privilege_enabled{};
@@ -111,6 +112,8 @@ struct Snapshot {
     std::optional<std::uint64_t> history_records;
     std::string history_error;
     double history_write_ms{};
+    std::size_t process_count{}; // Original count remains available after UI raw rows are released.
+    std::vector<Process> grouped_processes; // Grouped once, shared by history and overlay via move.
     std::vector<Process> processes;
 };
 
