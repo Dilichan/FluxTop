@@ -25,12 +25,12 @@ constexpr wchar_t hover_class[]=L"FluxTop.Statistics.HoverTooltip.v1";
 constexpr wchar_t table_class[]=L"FluxTop.Statistics.DetachedTable.v1";
 constexpr UINT ready_message=WM_APP+201;
 constexpr UINT_PTR animate_message=2201;
-enum : int { period_id=1001,from_id,to_id,system_id,table_id,stats_limit_id,popout_live_id,popout_history_id,popout_table_id,history_limit_id,uptime_limit_id };
+enum : int { period_id=1001,from_id,to_id,system_id,table_id,stats_limit_id,popout_live_id,popout_history_id,popout_table_id,history_limit_id,uptime_limit_id,uptime_period_id,uptime_from_id,uptime_to_id };
 // Logical page dimensions; chart labels and Win32 controls share the same grid.
 constexpr int page_width=760, page_height=860;
 constexpr int auto_live_id=1201, auto_history_id=1202, popup_auto_id=1203;
-constexpr RECT one_minute{54,190,728,332};
-constexpr RECT history_chart{54,406,728,548};
+constexpr RECT one_minute{54,96,728,238};
+constexpr RECT history_chart{54,402,728,544};
 std::int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -200,7 +200,7 @@ StatisticsPage::StatisticsPage(HWND parent,std::filesystem::path database,
                 q=requested_;finished=generation_;cancelled=cancel_query_.get_token();
             }
             auto result=read_statistics(database_,q.from,q.to,q.history_limit,q.uptime_limit,
-                q.limit,q.system,cancelled);
+                q.limit,q.uptime_from,q.uptime_to,q.system,cancelled);
             if(stop.stop_requested()) break;
             {
                 std::lock_guard lock(mutex_);
@@ -246,6 +246,15 @@ void StatisticsPage::make_controls() {
     auto today=local_time(now_ms());
     SendMessageW(from_,DTM_SETSYSTEMTIME,GDT_VALID,reinterpret_cast<LPARAM>(&today));
     SendMessageW(to_,DTM_SETSYSTEMTIME,GDT_VALID,reinterpret_cast<LPARAM>(&today));
+    // Uptime has an independent time range; the history calendar never filters the table.
+    uptime_period_=add(L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP|WS_VSCROLL,uptime_period_id);
+    for(const auto* text:{L"За 24 часа",L"За 7 дней",L"Свой период"})
+        SendMessageW(uptime_period_,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(text));
+    SendMessageW(uptime_period_,CB_SETCURSEL,0,0);
+    uptime_from_=add(DATETIMEPICK_CLASSW,L"",DTS_SHORTDATEFORMAT|WS_TABSTOP,uptime_from_id);
+    uptime_to_=add(DATETIMEPICK_CLASSW,L"",DTS_SHORTDATEFORMAT|WS_TABSTOP,uptime_to_id);
+    SendMessageW(uptime_from_,DTM_SETSYSTEMTIME,GDT_VALID,reinterpret_cast<LPARAM>(&today));
+    SendMessageW(uptime_to_,DTM_SETSYSTEMTIME,GDT_VALID,reinterpret_cast<LPARAM>(&today));
     show_system_=add(L"BUTTON",L"Показывать системные приложения",BS_AUTOCHECKBOX|WS_TABSTOP,system_id);
     SendMessageW(show_system_,BM_SETCHECK,system_?BST_CHECKED:BST_UNCHECKED,0);
     limit_label_=add(L"STATIC",L"Приложений в статистике",0,0);
@@ -295,26 +304,30 @@ void StatisticsPage::layout() {
     const auto put=[&](HWND w,int x,int y,int width,int height){
         MoveWindow(w,sx(x),sy(y),sx(width),sy(height),TRUE);
     };
-    // A shared rhythm keeps captions, axes and controls from overlapping.
-    put(period_,18,56,165,230);
-    put(from_,210,57,150,27);
-    put(to_,385,57,150,27);
-    put(first_label_,18,102,724,27);
-    put(popout_live_,596,151,140,28);
-    put(auto_live_,441,151,148,28);
-    put(popout_history_,596,367,140,28);
-    put(auto_history_,441,367,148,28);
-    // Same limit as overlay for live series; historical chart and uptime are independent.
-    put(limit_label_,18,17,315,27);
-    put(limit_slider_,344,11,394,35);
-    put(show_system_,18,104,335,29);
-    // Between the history axis labels (ends ~568) and the uptime heading (634).
-    put(history_limit_label_,18,577,137,27);
-    put(history_limit_slider_,155,574,249,32);
-    put(uptime_limit_label_,411,577,134,27);
-    put(uptime_limit_slider_,546,574,190,32);
-    put(table_,18,662,716,182);
-    put(popout_table_,596,621,140,28);
+    // Every section has its own heading, controls, then plot/list.
+    // Live chart: share this trackbar's value with overlay's "Количество приложений".
+    put(show_system_,412,5,326,30);
+    put(limit_label_,18,43,189,27);
+    put(limit_slider_,209,40,192,35);
+    put(auto_live_,441,41,148,29);
+    put(popout_live_,596,41,140,29);
+    // Historical AutoScore: independent limit and calendar immediately above chart.
+    put(history_limit_label_,18,296,147,27);
+    put(history_limit_slider_,166,292,231,35);
+    put(auto_history_,441,294,148,29);
+    put(popout_history_,596,294,140,29);
+    put(period_,18,345,165,230);
+    put(from_,210,346,150,27);
+    put(to_,385,346,150,27);
+    put(first_label_,18,379,724,20);
+    // Uptime: own application limit, own date range, detached-table action.
+    put(uptime_limit_label_,18,611,147,27);
+    put(uptime_limit_slider_,166,607,231,35);
+    put(popout_table_,596,568,140,29);
+    put(uptime_period_,18,650,165,190);
+    put(uptime_from_,210,651,150,27);
+    put(uptime_to_,385,651,150,27);
+    put(table_,18,702,716,144);
     ListView_SetColumnWidth(table_,0,sx(307));
     ListView_SetColumnWidth(table_,1,sx(140));
     ListView_SetColumnWidth(table_,2,sx(255));
@@ -326,9 +339,10 @@ void StatisticsPage::layout() {
             DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
         if(replacement) {stale_font=font_;font_=replacement;controls_font_dpi_=current_dpi;}
     }
-    for(auto child:{period_,from_,to_,first_label_,show_system_,limit_label_,limit_slider_,
-        history_limit_label_,history_limit_slider_,uptime_limit_label_,uptime_limit_slider_,
-        table_,popout_live_,popout_history_,popout_table_,auto_live_,auto_history_})
+    for(auto child:{period_,from_,to_,uptime_period_,uptime_from_,uptime_to_,first_label_,
+        show_system_,limit_label_,limit_slider_,history_limit_label_,history_limit_slider_,
+        uptime_limit_label_,uptime_limit_slider_,table_,popout_live_,popout_history_,
+        popout_table_,auto_live_,auto_history_})
         SendMessageW(child,WM_SETFONT,reinterpret_cast<WPARAM>(font_),TRUE);
     if(stale_font) DeleteObject(stale_font);
     ListView_SetBkColor(table_,GetSysColor(COLOR_WINDOW));
@@ -397,32 +411,38 @@ void StatisticsPage::request() {
     diagnostics::write(diagnostics::Level::trace,"ui.statistics","statistics query requested");
     if(!active_ && !popups_[0].window && !popups_[1].window && !table_window_) return;
     const auto now=now_ms();
-    std::int64_t from=period_index_==0?now-86400000:now-604800000;
-    std::int64_t to=now+1000;
-    if(period_index_==2) {
-        from=custom_timestamp(from_,false);
-        to=custom_timestamp(to_,true);
-    }
-    if(first_record_) from=std::max(from,first_record_);
-    to=std::min(to,now+86400000);
-    if(to<=from) { SetWindowTextW(first_label_,L"Период пуст: выберите более позднюю дату окончания");return; }
+    const auto range=[&](int index,HWND begin_picker,HWND end_picker){
+        std::int64_t begin=index==0?now-86400000:now-604800000;
+        std::int64_t end=now+1000;
+        if(index==2) {
+            begin=custom_timestamp(begin_picker,false);
+            end=custom_timestamp(end_picker,true);
+        }
+        if(first_record_) begin=std::max(begin,first_record_);
+        end=std::min(end,now+86400000);
+        return std::pair<std::int64_t,std::int64_t>{begin,end};
+    };
+    const auto [from,to]=range(period_index_,from_,to_);
+    const auto [uptime_from,uptime_to]=range(uptime_period_index_,uptime_from_,uptime_to_);
+    // A date range may be empty independently; do not disable the other section.
     window_from_=from;window_to_=to;
     {
         std::lock_guard lock(mutex_);
         cancel_query_.request_stop();cancel_query_=std::stop_source{};
-        requested_={from,to,limit_,history_limit_,uptime_limit_,system_,++generation_};
+        requested_={from,to,uptime_from,uptime_to,limit_,history_limit_,uptime_limit_,system_,++generation_};
     }
     wake_.notify_all();
     last_history_refresh_=now;
 }
 void StatisticsPage::update_dates() {
     const bool custom=period_index_==2;
+    const bool uptime_custom=uptime_period_index_==2;
     EnableWindow(from_,custom);EnableWindow(to_,custom);
+    EnableWindow(uptime_from_,uptime_custom);EnableWindow(uptime_to_,uptime_custom);
     if(first_record_) {
         SYSTEMTIME bounds[2]{local_time(first_record_),local_time(now_ms())};
-        SendMessageW(from_,DTM_SETRANGE,GDTR_MIN|GDTR_MAX,reinterpret_cast<LPARAM>(bounds));
-        SendMessageW(to_,DTM_SETRANGE,GDTR_MIN|GDTR_MAX,reinterpret_cast<LPARAM>(bounds));
-        // No user-facing implementation details; the calendar is still range-limited.
+        for(HWND picker:{from_,to_,uptime_from_,uptime_to_})
+            SendMessageW(picker,DTM_SETRANGE,GDTR_MIN|GDTR_MAX,reinterpret_cast<LPARAM>(bounds));
         SetWindowTextW(first_label_,L"");
     }
 }
@@ -870,10 +890,13 @@ void StatisticsPage::draw(HDC dc) {
     const auto now=last_live_timestamp_>0?last_live_timestamp_:now_ms();
     const double live_zoom=auto_scale_[0]?cached_auto_zoom_[0]:1.0;
     const double history_zoom=auto_scale_[1]?cached_auto_zoom_[1]:1.0;
-    draw_graph(dc,one_minute,live_apps_,now-60000,now,L"ПОСЛЕДНЯЯ МИНУТА · AutoScore",true,live_zoom);
-    draw_graph(dc,history_chart,history_.history,window_from_,window_to_,L"ИСТОРИЯ · СРЕДНИЙ БАЛЛ AutoScore",false,history_zoom);
-    if(!history_.error.empty()) label(dc,history_.error.c_str(),18,567,RGB(162,50,40));
-    label(dc,L"НАБЛЮДАЕМЫЙ АПТАЙМ ПРИЛОЖЕНИЙ",18,634);
+    // Titles sit ABOVE each section's controls; charts no longer own their heading rows.
+    label(dc,L"ПОСЛЕДНЯЯ МИНУТА · AutoScore",18,14);
+    label(dc,L"ИСТОРИЯ · СРЕДНИЙ БАЛЛ AutoScore",18,263);
+    label(dc,L"НАБЛЮДАЕМЫЙ АПТАЙМ ПРИЛОЖЕНИЙ",18,575);
+    draw_graph(dc,one_minute,live_apps_,now-60000,now,L"",true,live_zoom);
+    draw_graph(dc,history_chart,history_.history,window_from_,window_to_,L"",false,history_zoom);
+    if(!history_.error.empty()) label(dc,history_.error.c_str(),18,552,RGB(162,50,40));
     // Tooltip is a topmost popup, never painted underneath native controls.
     SelectObject(dc,old_font);
 }
@@ -1126,6 +1149,10 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
             period_index_=static_cast<int>(SendMessageW(period_,CB_GETCURSEL,0,0));
             update_dates();request();return 0;
         }
+        if(LOWORD(wp)==uptime_period_id && HIWORD(wp)==CBN_SELCHANGE) {
+            uptime_period_index_=static_cast<int>(SendMessageW(uptime_period_,CB_GETCURSEL,0,0));
+            update_dates();request();return 0;
+        }
         if(LOWORD(wp)==system_id && HIWORD(wp)==BN_CLICKED) {
             system_=SendMessageW(show_system_,BM_GETCHECK,0,0)==BST_CHECKED;
             WritePrivateProfileStringW(L"overlay",L"stats_show_system",system_?L"1":L"0",settings_.c_str());
@@ -1134,8 +1161,11 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
         break;
     case WM_NOTIFY: {
         const auto* hdr=reinterpret_cast<NMHDR*>(lp);
-        if((hdr->idFrom==from_id || hdr->idFrom==to_id) && hdr->code==DTN_DATETIMECHANGE
-           && period_index_==2) {request();return 0;}
+        if(hdr->code==DTN_DATETIMECHANGE &&
+            (((hdr->idFrom==from_id || hdr->idFrom==to_id) && period_index_==2) ||
+             ((hdr->idFrom==uptime_from_id || hdr->idFrom==uptime_to_id) && uptime_period_index_==2))) {
+            request();return 0;
+        }
         break;
     }
     }

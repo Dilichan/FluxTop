@@ -107,8 +107,13 @@ private:
     unsigned animation_duration_ms_{1000};
     std::int64_t last_live_timestamp_{};
     struct LiveEvent { std::int64_t time{}; std::wstring name,path; double score{}; };
-    struct Query { std::int64_t from{},to{}; unsigned limit{},history_limit{},uptime_limit{}; bool system{}; unsigned serial{}; };
-    HWND hwnd_{},period_{},from_{},to_{},show_system_{},first_label_{},table_{},limit_label_{},limit_slider_{};
+    struct Query {
+        std::int64_t from{},to{},uptime_from{},uptime_to{};
+        unsigned limit{},history_limit{},uptime_limit{};
+        bool system{}; unsigned serial{};
+    };
+    HWND hwnd_{},period_{},from_{},to_{},uptime_period_{},uptime_from_{},uptime_to_{},
+        show_system_{},first_label_{},table_{},limit_label_{},limit_slider_{};
     HWND history_limit_label_{},history_limit_slider_{},uptime_limit_label_{},uptime_limit_slider_{};
     HIMAGELIST image_list_{};
     HFONT font_{};
@@ -122,7 +127,7 @@ private:
     std::wstring settings_;
     unsigned limit_{},history_limit_{},uptime_limit_{};
     bool active_{},system_{};
-    int period_index_{};
+    int period_index_{},uptime_period_index_{};
     std::int64_t first_record_{};
     std::int64_t last_history_refresh_{};
     std::int64_t window_from_{},window_to_{};

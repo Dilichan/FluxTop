@@ -37,6 +37,12 @@ StatisticsHistory read_statistics(const std::filesystem::path& file,
 StatisticsHistory read_statistics(const std::filesystem::path& file,
     std::int64_t from_ms,std::int64_t to_ms,unsigned history_limit,
     unsigned uptime_limit,unsigned live_limit,bool include_system,std::stop_token stop);
+// Uptime uses an independent time window; history/recent keep their own windows.
+StatisticsHistory read_statistics(const std::filesystem::path& file,
+    std::int64_t from_ms,std::int64_t to_ms,unsigned history_limit,
+    unsigned uptime_limit,unsigned live_limit,
+    std::int64_t uptime_from_ms,std::int64_t uptime_to_ms,
+    bool include_system,std::stop_token stop);
 // Use the real Windows directory, not a hard-coded system-drive assumption.
 bool statistics_is_system(std::wstring_view name,std::wstring_view path);
 }

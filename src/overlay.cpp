@@ -33,7 +33,7 @@ constexpr UINT foreground_update_message = WM_APP + 13;
 constexpr int toggle_hotkey = 1, client_hotkey = 2;
 enum Control : UINT { open_client = 100, toggle_table, quit_app, top_label, top_control, sort_control, font_control,
     alpha_control, visible_control, move_control, icons_control, stats_control, startup_control,
-    alpha_label, interval_control, summary_control, header_colors_control, row_colors_control, animation_control, metric_control = 200, tab_control = 450 };
+    alpha_label, interval_control, summary_control, header_colors_control, row_colors_control, animation_control, metric_control = 200, tab_control = 450, font_label = 500, interval_label = 501 };
 constexpr unsigned all_metrics = 31; // Five resource columns; FPS is in the application heading.
 constexpr unsigned default_metrics = 31;
 constexpr int load_band(double x) { return x < 50.0 ? 0 : x < 70.0 ? 1 : 2; }
@@ -205,6 +205,8 @@ private:
     ULONGLONG row_animation_started_{};
     unsigned row_animation_duration_ms_{650};
     float row_animation_last_painted_progress_{};
+    ULONGLONG row_animation_next_frame_tick_{};
+    bool row_animation_slow_frame_reported_{};
     bool row_animation_active_{};
     // D2D bitmaps are render-target resources: reuse until the icon or target changes.
     struct CachedBitmap {
@@ -404,14 +406,12 @@ void Overlay::init_client() {
     const auto sort = control(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, sort_control, 290, 102, 268, 160);
     for (const auto label : {L"CPU", L"RAM", L"GPU", L"Память GPU", L"Авто — рейтинг и всплески", L"Rx — приём", L"Tx — передача", L"Rx/Tx — суммарный трафик"}) SendMessageW(sort, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
     SendMessageW(sort, CB_SETCURSEL, static_cast<WPARAM>(options_.sort), 0);
-    control(L"STATIC", L"Размер текста, px (5–42)", 0, 0, 22, 150, 250, 24);
-    const auto font = control(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL,
-        font_control, 290, 146, 268, 360);
-    for (unsigned size=5; size<=42; ++size) {
-        const auto label=std::to_wstring(size);
-        SendMessageW(font, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
-    }
-    SendMessageW(font, CB_SETCURSEL, static_cast<WPARAM>(options_.font_size-5), 0);
+    control(L"STATIC", (L"Размер текста: " + std::to_wstring(options_.font_size) + L" px (5–42)").c_str(),
+        0, font_label, 22, 150, 260, 24);
+    const auto font = control(TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP,
+        font_control, 290, 146, 268, 32);
+    SendMessageW(font, TBM_SETRANGE, TRUE, MAKELPARAM(5,42));
+    SendMessageW(font, TBM_SETPOS, TRUE, static_cast<LPARAM>(options_.font_size));
     control(L"STATIC", (L"Непрозрачность: " + std::to_wstring(opacity_) + L"%").c_str(), 0, alpha_label, 22, 194, 260, 24);
     const auto alpha = control(TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, alpha_control, 290, 190, 268, 32);
     SendMessageW(alpha, TBM_SETRANGE, TRUE, MAKELPARAM(1,100));
@@ -424,10 +424,12 @@ void Overlay::init_client() {
     SendMessageW(move, BM_SETCHECK, moving_ ? BST_CHECKED : BST_UNCHECKED, 0);
     const auto startup = control(L"BUTTON", L"Автозапуск при входе в Windows (с запросом UAC)", BS_AUTOCHECKBOX | WS_TABSTOP, startup_control, 22, 337, 536, 26);
     SendMessageW(startup, BM_SETCHECK, autostart_enabled() ? BST_CHECKED : BST_UNCHECKED, 0);
-    control(L"STATIC", L"Сбор и обновление, секунд (1–10)", 0, 0, 22, 382, 260, 24);
-    const auto interval = control(L"EDIT", std::to_wstring(std::clamp(options_.interval_ms/1000, 1U, 10U)).c_str(),
-        WS_BORDER | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, interval_control, 290, 378, 268, 29);
-    SendMessageW(interval, EM_SETLIMITTEXT, 2, 0);
+    control(L"STATIC", (L"Сбор и обновление: " + std::to_wstring(options_.interval_ms/1000) + L" с (1–10)").c_str(),
+        0, interval_label, 22, 382, 260, 24);
+    const auto interval = control(TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP,
+        interval_control, 290, 378, 268, 32);
+    SendMessageW(interval, TBM_SETRANGE, TRUE, MAKELPARAM(1,10));
+    SendMessageW(interval, TBM_SETPOS, TRUE, static_cast<LPARAM>(options_.interval_ms/1000));
     control(L"STATIC", L"Показывать показатели:", 0, 0, 22, 422, 536, 24);
     for (unsigned i=0;i<metric_names.size();++i) {
         const auto box = control(L"BUTTON", metric_names[i], BS_AUTOCHECKBOX | WS_TABSTOP,
@@ -481,23 +483,24 @@ void Overlay::layout_client() {
 }
 void Overlay::apply_client() {
     const auto old_font_size = options_.font_size;
-    BOOL valid_interval{};
-    const auto selected_font = SendDlgItemMessageW(client_,font_control,CB_GETCURSEL,0,0);
+    const auto selected_font = SendDlgItemMessageW(client_,font_control,TBM_GETPOS,0,0);
     const auto top = SendDlgItemMessageW(client_,top_control,TBM_GETPOS,0,0);
     const auto selected_sort = SendDlgItemMessageW(client_, sort_control, CB_GETCURSEL, 0, 0);
-    const auto seconds = GetDlgItemInt(client_, interval_control, &valid_interval, FALSE);
+    const auto seconds = SendDlgItemMessageW(client_,interval_control,TBM_GETPOS,0,0);
     const auto alpha = SendDlgItemMessageW(client_, alpha_control, TBM_GETPOS, 0, 0);
     if (alpha < 1 || alpha > 100 || selected_sort < 0 || selected_sort > 7) return;
     if (top >= 1 && top <= 100) options_.top = static_cast<unsigned>(top);
-    if (selected_font >= 0 && selected_font <= 37) options_.font_size = static_cast<unsigned>(selected_font + 5);
+    if (selected_font >= 5 && selected_font <= 42) options_.font_size = static_cast<unsigned>(selected_font);
     if (options_.gpu || (selected_sort != 2 && selected_sort != 3)) options_.sort = static_cast<Sort>(selected_sort);
     else SendDlgItemMessageW(client_, sort_control, CB_SETCURSEL, static_cast<WPARAM>(options_.sort), 0);
-    if (valid_interval && seconds >= 1 && seconds <= 10 && seconds*1000 != options_.interval_ms) {
-        options_.interval_ms = seconds*1000; worker_.set_interval(options_.interval_ms);
+    if (seconds >= 1 && seconds <= 10 && seconds*1000 != options_.interval_ms) {
+        options_.interval_ms = static_cast<unsigned>(seconds*1000); worker_.set_interval(options_.interval_ms);
     }
     opacity_ = static_cast<unsigned>(alpha); show_icons_ = SendDlgItemMessageW(client_, icons_control, BM_GETCHECK, 0, 0) == BST_CHECKED;
     SetDlgItemTextW(client_, alpha_label, (L"Непрозрачность: " + std::to_wstring(opacity_) + L"%").c_str());
     SetDlgItemTextW(client_, top_label, (L"Количество приложений: " + std::to_wstring(options_.top) + L" / 100").c_str());
+    SetDlgItemTextW(client_, font_label, (L"Размер текста: " + std::to_wstring(options_.font_size) + L" px (5–42)").c_str());
+    SetDlgItemTextW(client_, interval_label, (L"Сбор и обновление: " + std::to_wstring(options_.interval_ms/1000) + L" с (1–10)").c_str());
     if(statistics_) statistics_->set_limit(options_.top);
     metrics_ = 0;
     for (unsigned i=0;i<metric_names.size();++i) {
@@ -664,14 +667,20 @@ void Overlay::update_view() {
             previous_rows_=std::move(rows_);
             rows_=std::move(next);
             row_motion_.clear();row_motion_.reserve(rows_.size());
+            // Pair PID with its creation stamp: a reused PID must not inherit old motion.
+            // Hash lookup replaces quadratic matching for 100-row reorderings.
+            std::unordered_multimap<std::uint32_t,std::size_t> previous_by_pid;
+            previous_by_pid.reserve(previous_rows_.size());
+            for(std::size_t j=0;j<previous_rows_.size();++j)
+                previous_by_pid.emplace(previous_rows_[j].pid,j);
             const bool pinned=options_.sort==Sort::automatic && focused_pid_
                 && rows_.front().pid==focused_pid_;
             for(std::size_t i=0;i<rows_.size();++i) {
                 int old=-1;
-                for(std::size_t j=0;j<previous_rows_.size();++j) {
-                    if(rows_[i].pid==previous_rows_[j].pid &&
-                        rows_[i].created==previous_rows_[j].created) {
-                        old=static_cast<int>(j);break;
+                const auto [first,last]=previous_by_pid.equal_range(rows_[i].pid);
+                for(auto it=first;it!=last;++it) {
+                    if(rows_[i].created==previous_rows_[it->second].created) {
+                        old=static_cast<int>(it->second);break;
                     }
                 }
                 float from=old>=0?previous_positions[static_cast<std::size_t>(old)]
@@ -685,7 +694,11 @@ void Overlay::update_view() {
             previous_rows_.clear();
             // A newly inserted/replaced row at the same slot needs no animation.
             bool has_motion=false;
-            for(std::size_t i=0;i<row_motion_.size();++i) {
+            RECT viewport{};GetClientRect(hwnd_,&viewport);
+            const auto visible_count=visible_rows(dip(std::max<LONG>(0,viewport.bottom)));
+            const auto first_visible=std::min(scroll_,row_motion_.size());
+            const auto last_visible=std::min(row_motion_.size(),first_visible+visible_count);
+            for(std::size_t i=first_visible;i<last_visible;++i) {
                 if(std::abs(row_motion_[i].start_slot-static_cast<float>(i))>0.01f) {
                     has_motion=true;break;
                 }
@@ -695,10 +708,12 @@ void Overlay::update_view() {
             row_animation_duration_ms_=std::clamp(
                 static_cast<unsigned>(options_.interval_ms*0.65),350U,1600U);
             row_animation_last_painted_progress_=0.0f;
+            row_animation_next_frame_tick_=0;
+            row_animation_slow_frame_reported_=false;
             row_animation_active_=has_motion;
-            // 25 FPS for tiny tables; 16 FPS for default 10 rows; lower cost for large tables.
+            // Large software-rendered layered windows must not monopolize the UI thread.
             const UINT frame_ms=rows_.size()<=5?40U:rows_.size()<=15?60U:
-                rows_.size()<=40?75U:90U;
+                rows_.size()<=40?75U:rows_.size()<=70?90U:120U;
             if(has_motion) {
                 if(!SetTimer(hwnd_,overlay_animation_timer,frame_ms,nullptr)) {
                     row_animation_active_=false;
@@ -853,17 +868,49 @@ void Overlay::paint(bool animation_only) {
     if(!target_ || bitmap_size_.cx!=std::max<LONG>(1,client.right) ||
         bitmap_size_.cy!=std::max<LONG>(1,client.bottom)) animation_only=false;
     surface();target_->BeginDraw();
-    // Clear with the identity transform: the clipped body begins at the exact
-    // physical header boundary, even if the window is horizontally scaled.
+    const auto count=visible_rows(dip(bitmap_size_.cy));
+    scroll_=std::min(scroll_,rows_.size()>count?rows_.size()-count:0);
+    const float progress=row_animation_active_ && row_animation_duration_ms_
+        ?overlay_smoothstep(static_cast<float>(GetTickCount64()-row_animation_started_)
+            /static_cast<float>(row_animation_duration_ms_)):1.0f;
+    // On an animation tick, find the Y-band occupied by changing positions in
+    // the previous and current frame. Static rows outside this band are reused.
+    const float body_top=row_height()+1;
+    float dirty_top=body_top,dirty_bottom=dip(bitmap_size_.cy);
+    bool partial_body=false;
+    if(animation_only && dip(bitmap_size_.cy)>body_top && row_animation_active_ && !row_motion_.empty()) {
+        float low=dirty_bottom,high=body_top;
+        const bool fixed_focus=options_.sort==Sort::automatic && focused_pid_
+            && !rows_.empty() && rows_.front().pid==focused_pid_;
+        for(std::size_t i=0;i<count && i+scroll_<rows_.size();++i) {
+            const auto index=(fixed_focus && i==0)?0:i+scroll_;
+            if(index>=row_motion_.size() || (fixed_focus && i==0))continue;
+            const float from=row_motion_[index].start_slot-static_cast<float>(scroll_);
+            const float target_slot=static_cast<float>(i);
+            const float previous=from+(target_slot-from)*row_animation_last_painted_progress_;
+            const float current=from+(target_slot-from)*progress;
+            if(std::abs(previous-current)<0.005f)continue;
+            low=std::min(low,1+(std::min(previous,current)+1)*row_height()-3.0f);
+            high=std::max(high,1+(std::max(previous,current)+2)*row_height()+3.0f);
+        }
+        if(high>low) {
+            dirty_top=std::clamp(low,body_top,dirty_bottom);
+            dirty_bottom=std::clamp(high,body_top,dip(bitmap_size_.cy));
+            partial_body=dirty_bottom>dirty_top;
+        }
+    }
+    // Clear with the identity transform: preserve the header and any still
+    // valid row pixels; never use opacity/fade to hide stale content.
     target_->SetTransform(D2D1::Matrix3x2F::Identity());
     const auto background=D2D1::ColorF(0,0,0,moving_ ? 1.0f/255.0f : 0);
-    if(animation_only && dip(bitmap_size_.cy)>row_height()+1) {
-        target_->PushAxisAlignedClip(D2D1::RectF(0,row_height()+1,
-            dip(bitmap_size_.cx),dip(bitmap_size_.cy)),D2D1_ANTIALIAS_MODE_ALIASED);
+    if(animation_only && dip(bitmap_size_.cy)>body_top) {
+        target_->PushAxisAlignedClip(D2D1::RectF(0,dirty_top,
+            dip(bitmap_size_.cx),dirty_bottom),D2D1_ANTIALIAS_MODE_ALIASED);
         target_->Clear(background);
         target_->PopAxisAlignedClip();
     } else {
         animation_only=false;
+        partial_body=false;
         target_->Clear(background);
     }
     const auto scale=std::min(1.0f,dip(bitmap_size_.cx)/table_width());
@@ -919,14 +966,12 @@ void Overlay::paint(bool animation_only) {
             metric==0U && snapshot_ && snapshot_->cpu_temperature_board);
     }
     } // Header values and layout stay untouched during animation-only frames.
-    const auto count=visible_rows(dip(bitmap_size_.cy));
-    scroll_=std::min(scroll_,rows_.size()>count?rows_.size()-count:0);
-    const float progress=row_animation_active_ && row_animation_duration_ms_
-        ?overlay_smoothstep(static_cast<float>(GetTickCount64()-row_animation_started_)
-            /static_cast<float>(row_animation_duration_ms_)):1.0f;
     // The header never moves or gets covered by transitioning rows.
     target_->PushAxisAlignedClip(D2D1::RectF(0,row_height()+1,table_width(),
         dip(bitmap_size_.cy)),D2D1_ANTIALIAS_MODE_ALIASED);
+    if(partial_body)
+        target_->PushAxisAlignedClip(D2D1::RectF(0,dirty_top,table_width(),dirty_bottom),
+            D2D1_ANTIALIAS_MODE_ALIASED);
     for (std::size_t i=0;i<count && i+scroll_<rows_.size();++i) {
         // Row zero remains visible while the remaining auto-ranked rows scroll.
         const bool fixed_focus = options_.sort == Sort::automatic && focused_pid_
@@ -943,6 +988,8 @@ void Overlay::paint(bool animation_only) {
         }
         const float opacity=1.0f; // Never fade newly appearing rows or their icons.
         const float y=1+(slot+1.0f)*row_height();
+        // Do not issue hundreds of DirectWrite draws for untouched static rows.
+        if(partial_body && (y+row_height()+2<dirty_top || y-2>dirty_bottom))continue;
         const auto cells=row_cells(y);
         if (show_icons_ && icons_) if (const auto icon = icons_->get(row.pid,row.created)) {
             auto found=icon_bitmaps_.find(row.pid);
@@ -981,6 +1028,7 @@ void Overlay::paint(bool animation_only) {
         // Resource readings update immediately; only vertical row position moves.
         paint_values(row,1.0f);
     }
+    if(partial_body)target_->PopAxisAlignedClip();
     target_->PopAxisAlignedClip();
     const auto result=target_->EndDraw();
     if (result == D2DERR_RECREATE_TARGET) { release_surface(); return; }
@@ -1074,6 +1122,20 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         return 0;
     }
     case WM_HSCROLL:
+        if (reinterpret_cast<HWND>(lp)==GetDlgItem(window,font_control) ||
+            reinterpret_cast<HWND>(lp)==GetDlgItem(window,interval_control)) {
+            const bool is_font=reinterpret_cast<HWND>(lp)==GetDlgItem(window,font_control);
+            const unsigned selected=static_cast<unsigned>(SendMessageW(reinterpret_cast<HWND>(lp),TBM_GETPOS,0,0));
+            if(is_font)
+                SetDlgItemTextW(window,font_label,(L"Размер текста: "+std::to_wstring(selected)+L" px (5–42)").c_str());
+            else
+                SetDlgItemTextW(window,interval_label,(L"Сбор и обновление: "+std::to_wstring(selected)+L" с (1–10)").c_str());
+            if(LOWORD(wp)==TB_ENDTRACK || LOWORD(wp)==TB_THUMBPOSITION) {
+                KillTimer(window,settings_timer);
+                apply_client();
+            } else SetTimer(window,settings_timer,150,nullptr);
+            return 0;
+        }
         if (reinterpret_cast<HWND>(lp)==GetDlgItem(window,top_control)) {
             const auto selected=static_cast<unsigned>(SendDlgItemMessageW(window,top_control,TBM_GETPOS,0,0));
             SetDlgItemTextW(window,top_label,(L"Количество приложений: " + std::to_wstring(selected) + L" / 100").c_str());
@@ -1100,18 +1162,6 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         if (initializing_client_) return 0;
         diagnostics::write(diagnostics::Level::trace,"ui.command",
             "control_id="+std::to_string(LOWORD(wp))+" notification="+std::to_string(HIWORD(wp)));
-        if (LOWORD(wp)==interval_control && HIWORD(wp)==EN_CHANGE) {
-            SetTimer(window,settings_timer,300,nullptr); return 0;
-        }
-        if (LOWORD(wp)==interval_control && HIWORD(wp)==EN_KILLFOCUS) {
-            KillTimer(window,settings_timer); apply_client();
-            initializing_client_=true;
-            SetDlgItemInt(window,interval_control,std::clamp(options_.interval_ms/1000,1U,10U),FALSE);
-            initializing_client_=false; return 0;
-        }
-        if (LOWORD(wp)==font_control && HIWORD(wp)==CBN_SELCHANGE) {
-            apply_client(); return 0;
-        }
         if (LOWORD(wp)==sort_control && HIWORD(wp)==CBN_SELCHANGE) {
             apply_client(); return 0;
         }
@@ -1154,8 +1204,11 @@ LRESULT Overlay::message(UINT msg,WPARAM wp,LPARAM lp) {
     case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
     case WM_TIMER:
         if(wp==overlay_animation_timer) {
-            const auto elapsed=GetTickCount64()-row_animation_started_;
+            const auto now=GetTickCount64();
+            const auto elapsed=now-row_animation_started_;
             const bool finished=!row_animation_active_ || elapsed>=row_animation_duration_ms_;
+            // Keep handling messages if the previous software frame was expensive.
+            if(!finished && now<row_animation_next_frame_tick_) return 0;
             const float progress=finished?1.0f:overlay_smoothstep(
                 static_cast<float>(elapsed)/static_cast<float>(row_animation_duration_ms_));
             // Don't render sub-pixel movements. Ease-in/out otherwise wastes frames
@@ -1175,7 +1228,21 @@ LRESULT Overlay::message(UINT msg,WPARAM wp,LPARAM lp) {
             // WM_PAINT from fresh readings/settings takes precedence over a row-only
             // frame. Both execute on the UI thread, so no shared bitmap races.
             if(visible_ && (finished || largest_pixel_shift>=0.85f) &&
-                !GetUpdateRect(hwnd_,nullptr,FALSE)) paint(true);
+                !GetUpdateRect(hwnd_,nullptr,FALSE)) {
+                const auto started=GetTickCount64();
+                paint(true);
+                const auto frame_cost=GetTickCount64()-started;
+                // Adaptive backpressure: do not queue more full bitmap uploads than
+                // the single-threaded software renderer can sustainably complete.
+                row_animation_next_frame_tick_=GetTickCount64()+
+                    std::clamp<ULONGLONG>(frame_cost*2,40ULL,280ULL);
+                if(frame_cost>=45 && !row_animation_slow_frame_reported_) {
+                    row_animation_slow_frame_reported_=true;
+                    diagnostics::write(diagnostics::Level::warning,"overlay.animation_slow",
+                        "render_ms="+std::to_string(frame_cost)+" rows="+std::to_string(rows_.size())+
+                        " visible="+std::to_string(visible_rows(dip(bitmap_size_.cy))));
+                }
+            }
             return 0;
         }
         break;

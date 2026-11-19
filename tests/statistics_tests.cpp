@@ -56,6 +56,16 @@ int main(int argc,char** argv){
             1,2,1,true,{});
         require(separated.error.empty() && separated.uptime.size()==2 &&
             separated.history.size()==1,"Independent history/uptime SQL limits");
+        // The uptime calendar can inspect an earlier day without changing
+        // the history chart's more recent date range.
+        const auto split=fluxtop::read_statistics(path,
+            base+3*fluxtop::history_day_ms,base+4*fluxtop::history_day_ms,
+            10,10,10,base+10*fluxtop::history_hour_ms,
+            base+11*fluxtop::history_hour_ms,false,{});
+        require(split.error.empty() && split.uptime.size()==1 && split.history.size()==1,
+            "Independent uptime calendar must not alter history graph");
+        require(std::abs(split.uptime[0].observed_seconds-4.0)<0.0001,
+            "Uptime range must exclude observations outside its selection");
         std::filesystem::remove_all(root);
         std::cout<<"Compacted AutoScore graph, uptime, multi-process dedup, system toggle passed\n";
         return 0;

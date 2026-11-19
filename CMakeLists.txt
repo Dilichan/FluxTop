@@ -99,6 +99,8 @@ if(BUILD_TESTING)
         -File "${PROJECT_SOURCE_DIR}/tests/statistics_tooltip_axis_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
     add_test(NAME overlay_animation_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
         -File "${PROJECT_SOURCE_DIR}/tests/overlay_animation_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
+    add_test(NAME overlay_settings_animation_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+        -File "${PROJECT_SOURCE_DIR}/tests/overlay_settings_animation_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
     add_test(NAME fps_header_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
         -File "${PROJECT_SOURCE_DIR}/tests/fps_header_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
     set_tests_properties(history PROPERTIES TIMEOUT 20)
