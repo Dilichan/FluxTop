@@ -19,7 +19,7 @@ $checks = [ordered]@{
     'No numeric crossfade' = (-not $code.Contains('paint_values(*previous,1.0f-progress)'))
     'No icon fade' = $code.Contains('const float opacity=1.0f; // Never fade newly appearing rows or their icons.')
     'No transient burst blink in rows' = (-not $code.Contains('auto_metric_has_burst(p,static_cast<AutoMetric>(j+1))'))
-    'No metric pulse color' = $code.Contains('true,false,displayed.loads[column],alpha')
+    'No metric pulse color' = ($code.Contains('const unsigned metric=metric_visual_to_storage[position];') -and $code.Contains('true,false,displayed.loads[metric],alpha);') -and -not $code.Contains('true,true,displayed.loads[metric],alpha)'))
     'Duration uses the sampling interval' = $code.Contains('options_.interval_ms*0.65')
 }
 $failed = @($checks.GetEnumerator() | Where-Object { -not $_.Value } | ForEach-Object {$_.Key})

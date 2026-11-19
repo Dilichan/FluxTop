@@ -412,38 +412,48 @@ void overlay_geometry_tests() {
     using fluxtop::calculate_overlay_columns;
     const auto& config = fluxtop::overlay_layout;
     constexpr float font = 16.0f;
-    const auto all = calculate_overlay_columns(font, 31U, false, true);
+    const auto all = calculate_overlay_columns(font, 63U, false, true);
     check(std::abs(all.left[0] - (config.left_padding + config.icon_width * font)) < .001f,
         "icon reservation comes from the centralized geometry settings");
     check(std::abs(all.right[0] - all.left[0] - config.application_width * font) < .001f,
         "application-name width comes from the centralized settings");
-    for (unsigned index = 0; index < 5; ++index) {
+    for (unsigned index = 0; index < 6; ++index) {
         check(std::abs((all.right[index+1] - all.left[index+1]) - config.metric_widths[index]*font) < .001f,
             "a metric's width is exact, without an undocumented minimum");
         check(std::abs(all.left[index+1] - all.right[index] - config.column_gap*font) < .001f,
             "all inter-column gaps use the same coefficient");
     }
-    check(std::abs(all.total_width - all.right[5] - config.right_padding) < .001f,
+    check(std::abs(all.total_width - all.right[6] - config.right_padding) < .001f,
         "overlay width matches the last visible column exactly");
 
-    const auto noIcons = calculate_overlay_columns(font, 31U, false, false);
+    const auto noIcons = calculate_overlay_columns(font, 63U, false, false);
     check(std::abs((all.total_width - noIcons.total_width) - config.icon_width*font) < .001f,
         "hiding icons reduces table width by the configured icon slot");
 
     const auto hidden = calculate_overlay_columns(font, (1U<<0) | (1U<<3), false, false);
-    check(hidden.right[2] == 0.0f && hidden.right[3] == 0.0f && hidden.right[5] == 0.0f,
+    // Visual slots: FPS, CPU, RAM, GPU, GPU RAM, Rx/Tx. Here only CPU and GPU RAM show.
+    check(hidden.right[1] == 0.0f && hidden.right[3] == 0.0f &&
+        hidden.right[4] == 0.0f && hidden.right[6] == 0.0f,
         "hidden metrics have no allocated geometry");
-    check(std::abs(hidden.left[4] - hidden.right[1] - config.column_gap*font) < .001f,
+    check(std::abs(hidden.left[5] - hidden.right[2] - config.column_gap*font) < .001f,
         "hidden metric columns do not introduce extra gaps");
-    check(std::abs(hidden.total_width - hidden.right[4] - config.right_padding) < .001f,
+    check(std::abs(hidden.total_width - hidden.right[5] - config.right_padding) < .001f,
         "table width uses the last active metric rather than a fixed template");
 
-    const auto summary = calculate_overlay_columns(font, 31U, true, true);
+    const auto noFps = calculate_overlay_columns(font, 31U, false, true);
+    check(noFps.right[1] == 0.0f && noFps.right[2] > 0.0f,
+        "FPS is opt-in while the old CPU bit still enables CPU");
+    const auto fpsOnly = calculate_overlay_columns(font, (1U<<5), false, false);
+    check(std::abs(fpsOnly.right[1]-fpsOnly.left[1] - config.metric_widths[0]*font) < .001f &&
+        fpsOnly.right[2] == 0.0f && fpsOnly.right[6] == 0.0f,
+        "FPS is visually first and retains its original setting bit");
+
+    const auto summary = calculate_overlay_columns(font, 63U, true, true);
     check(summary.left[0] == 0.0f && summary.right[0] == 0.0f,
         "summary-only view has no application column");
     check(std::abs(summary.left[1] - config.left_padding) < .001f,
         "summary-only view starts at the left padding without an unnecessary gap");
-    check(std::abs(summary.total_width - summary.right[5] - config.right_padding) < .001f,
+    check(std::abs(summary.total_width - summary.right[6] - config.right_padding) < .001f,
         "summary-only width is produced by the same layout calculation");
 }
 int main() {

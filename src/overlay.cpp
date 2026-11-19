@@ -424,9 +424,10 @@ void Overlay::init_client() {
     SendMessageW(interval, EM_SETLIMITTEXT, 2, 0);
     control(L"STATIC", L"Показывать показатели:", 0, 0, 22, 422, 536, 24);
     for (unsigned i=0;i<metric_names.size();++i) {
-        const auto box = control(L"BUTTON", metric_names[i], BS_AUTOCHECKBOX | WS_TABSTOP,
+        const unsigned metric=metric_visual_to_storage[i];
+        const auto box = control(L"BUTTON", metric_names[metric], BS_AUTOCHECKBOX | WS_TABSTOP,
             metric_control+i, 22+static_cast<int>(i)*104, 451, 98, 26);
-        SendMessageW(box, BM_SETCHECK, (metrics_ & (1U<<i)) ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(box, BM_SETCHECK, (metrics_ & (1U<<metric)) ? BST_CHECKED : BST_UNCHECKED, 0);
     }
     const auto summary = control(L"BUTTON", L"Только общие показатели (без списка приложений)", BS_AUTOCHECKBOX | WS_TABSTOP,
         summary_control, 22, 487, 536, 26);
@@ -492,7 +493,11 @@ void Overlay::apply_client() {
     SetDlgItemTextW(client_, alpha_label, (L"Непрозрачность: " + std::to_wstring(opacity_) + L"%").c_str());
     SetDlgItemTextW(client_, top_label, (L"Количество приложений: " + std::to_wstring(options_.top) + L" / 100").c_str());
     metrics_ = 0;
-    for (unsigned i=0;i<metric_names.size();++i) if (SendDlgItemMessageW(client_,metric_control+i,BM_GETCHECK,0,0)==BST_CHECKED) metrics_ |= 1U<<i;
+    for (unsigned i=0;i<metric_names.size();++i) {
+        const unsigned metric=metric_visual_to_storage[i];
+        if (SendDlgItemMessageW(client_,metric_control+i,BM_GETCHECK,0,0)==BST_CHECKED)
+            metrics_ |= 1U<<metric;
+    }
     summary_ = SendDlgItemMessageW(client_,summary_control,BM_GETCHECK,0,0)==BST_CHECKED;
     header_colors_ = SendDlgItemMessageW(client_,header_colors_control,BM_GETCHECK,0,0)==BST_CHECKED;
     row_colors_ = SendDlgItemMessageW(client_,row_colors_control,BM_GETCHECK,0,0)==BST_CHECKED;
@@ -861,7 +866,7 @@ void Overlay::paint(bool animation_only) {
     const auto geometry=calculate_overlay_columns(text_size(),active_metrics(),summary_only(),show_icons_);
     const float height=row_height();
     const auto row_cells=[&](float y) {
-        std::array<D2D1_RECT_F,6> cells{};
+        std::array<D2D1_RECT_F,7> cells{}; // application + six metrics; index 6 is FPS/RxTx
         for(std::size_t column=0;column<cells.size();++column)
             cells[column]=D2D1::RectF(geometry.left[column],y,geometry.right[column],y+height);
         return cells;
@@ -894,11 +899,13 @@ void Overlay::paint(bool animation_only) {
         cpu_temperature = s.cpu_temperature_c;
         gpu_temperature = s.gpu_temperature_c;
     }
-    for (std::size_t i=1;i<header.size();++i) if (active_metrics() & (1U<<(i-1))) {
-        if (i==6) draw_text(L"FPS",header[i],number_font_.Get());
-        else draw_header_metric(static_cast<unsigned>(i-1),totals[i-1],load[i-1],
-            i==1 ? cpu_temperature : i==3 ? gpu_temperature : std::optional<double>{},header[i],
-            i==1 && snapshot_ && snapshot_->cpu_temperature_board);
+    for (std::size_t i=1;i<header.size();++i) {
+        const unsigned metric=metric_visual_to_storage[i-1];
+        if (!(active_metrics() & (1U<<metric))) continue;
+        if (metric==5U) draw_text(L"FPS",header[i],number_font_.Get());
+        else draw_header_metric(metric,totals[metric],load[metric],
+            metric==0U ? cpu_temperature : metric==2U ? gpu_temperature : std::optional<double>{},header[i],
+            metric==0U && snapshot_ && snapshot_->cpu_temperature_board);
     }
     } // Header values and layout stay untouched during animation-only frames.
     const auto count=visible_rows(dip(bitmap_size_.cy));
@@ -952,12 +959,13 @@ void Overlay::paint(bool animation_only) {
         const auto paint_values=[&](const Row& displayed,float alpha) {
             const std::array<std::wstring_view,6> values{
                 displayed.cpu,displayed.ram,displayed.gpu,displayed.vram,displayed.network,displayed.fps};
-            for(std::size_t column=0;column<metric_names.size();++column) {
-                if(!(active_metrics() & (1U<<column))) continue;
-                if(column==4 || column==5) draw_text(values[column],cells[column+1],number_font_.Get(),
+            for(std::size_t position=0;position<metric_names.size();++position) {
+                const unsigned metric=metric_visual_to_storage[position];
+                if(!(active_metrics() & (1U<<metric))) continue;
+                if(metric==4U || metric==5U) draw_text(values[metric],cells[position+1],number_font_.Get(),
                     false,false,std::nullopt,alpha);
-                else draw_text(values[column],cells[column+1],number_font_.Get(),
-                    true,false,displayed.loads[column],alpha);
+                else draw_text(values[metric],cells[position+1],number_font_.Get(),
+                    true,false,displayed.loads[metric],alpha);
             }
         };
         // Resource readings update immediately; only vertical row position moves.
