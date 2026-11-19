@@ -5,51 +5,29 @@
 #include <iostream>
 
 namespace fluxtop {
-Sampler::Sampler(bool gpu, bool network, bool foreground_fps)
-    : privileges_(initialize_privileges()), gpu_allowed_(gpu), network_allowed_(network),
-      overlay_mode_(foreground_fps), fps_enabled_(foreground_fps),
-      origin_(std::chrono::steady_clock::now()) {
+Sampler::Sampler(bool gpu, bool network, bool foreground_fps) : privileges_(initialize_privileges()), gpu_(gpu), network_(network), fps_enabled_(foreground_fps), origin_(std::chrono::steady_clock::now()) {
     if (privileges_.elevated.value_or(false) && !privileges_.debug_enabled)
         std::cerr << "FluxTop: SeDebugPrivilege unavailable; collecting accessible process metrics.\n";
-    // CLI keeps its previous full collection behaviour; the overlay is demand driven.
-    if (!overlay_mode_ && gpu_allowed_) gpu_ = std::make_unique<GpuCollector>(true);
-    if (!overlay_mode_ && network_allowed_) network_ = std::make_unique<NetworkCollector>(true);
     auto baseline = processes_.collect();
-    if (gpu_) gpu_->collect(baseline);
-    if (network_) network_->collect(baseline);
+    gpu_.collect(baseline);
+    network_.collect(baseline);
     previous_ = std::chrono::steady_clock::now();
 }
 
 void Sampler::set_fps_targets(std::vector<std::uint32_t> targets) { fps_targets_ = std::move(targets); }
-void Sampler::set_demand(unsigned flags) noexcept { demand_ = flags & 15U; }
 
 Snapshot Sampler::collect() {
     const auto start = std::chrono::steady_clock::now();
     auto snapshot = processes_.collect();
     snapshot.elevated = privileges_.elevated;
     snapshot.debug_privilege_enabled = privileges_.debug_enabled;
-    const bool need_gpu = gpu_allowed_ && (!overlay_mode_ || (demand_ & 1U));
-    const bool need_network = network_allowed_ && (!overlay_mode_ || (demand_ & 2U));
-    if (need_gpu && !gpu_) gpu_ = std::make_unique<GpuCollector>(true);
-    if (!need_gpu) gpu_.reset();
-    if (gpu_) gpu_->collect(snapshot);
-    else snapshot.gpu_status = "disabled";
+    gpu_.collect(snapshot);
     if (fps_enabled_) fps_.collect(snapshot.processes, fps_targets_);
-    // CPU WMI never runs solely to service a GPU-temperature request.
-    if (!overlay_mode_ || (demand_ & 12U)) {
-        const auto hwtemps = (!overlay_mode_ || (demand_ & 4U))
-            ? read_hardware_temperatures() : read_hwinfo_temperatures();
-        if (!overlay_mode_ || (demand_ & 4U)) {
-            snapshot.cpu_temperature_c = hwtemps.cpu_c;
-            snapshot.cpu_temperature_board = hwtemps.cpu_from_board;
-        }
-        if ((!overlay_mode_ || (demand_ & 8U)) && !snapshot.gpu_temperature_c)
-            snapshot.gpu_temperature_c = hwtemps.gpu_c;
-    }
-    if (need_network && !network_) network_ = std::make_unique<NetworkCollector>(true);
-    if (!need_network) network_.reset();
-    if (network_) network_->collect(snapshot);
-    else snapshot.network_status = "disabled";
+    const auto hwtemps = read_hardware_temperatures();
+    snapshot.cpu_temperature_c = hwtemps.cpu_c;
+    snapshot.cpu_temperature_board = hwtemps.cpu_from_board;
+    if (!snapshot.gpu_temperature_c) snapshot.gpu_temperature_c = hwtemps.gpu_c;
+    network_.collect(snapshot);
     spikes_.update(snapshot.processes, snapshot.total_ram_capacity, snapshot.total_gpu_memory_capacity);
     PROCESS_MEMORY_COUNTERS_EX memory{};
     memory.cb = sizeof(memory);
@@ -66,13 +44,7 @@ Snapshot Sampler::collect() {
         std::chrono::system_clock::now().time_since_epoch()).count();
     snapshot.interval_ms = std::chrono::duration<double, std::milli>(start - previous_).count();
     previous_ = start;
-    snapshot.process_count = snapshot.processes.size();
-    if (overlay_mode_) snapshot.grouped_processes = aggregate_application_processes(snapshot.processes);
-    history_.append(snapshot); // SQLite consumes the raw per-PID measurements first.
-    if (overlay_mode_) {
-        // Keep only the compact grouped view in the UI mailbox. Free raw capacity now.
-        std::vector<Process>().swap(snapshot.processes);
-    }
+    history_.append(snapshot);
     return snapshot;
 }
 
@@ -85,7 +57,6 @@ void SamplingWorker::set_fps_targets(std::vector<std::uint32_t> targets) {
     std::lock_guard lock(mutex_);
     fps_targets_ = std::move(targets);
 }
-void SamplingWorker::set_demand(unsigned flags) noexcept { demand_.store(flags & 15U, std::memory_order_relaxed); }
 void SamplingWorker::pause(bool paused) { paused_ = paused; wake_.notify_all(); }
 void SamplingWorker::stop() {
     if (thread_.joinable()) { thread_.request_stop(); wake_.notify_all(); thread_.join(); }
@@ -117,7 +88,6 @@ void SamplingWorker::start(Options options, Notify notify) {
                     std::vector<std::uint32_t> targets;
                     { std::lock_guard targets_lock(mutex_); targets=fps_targets_; }
                     sampler.set_fps_targets(std::move(targets));
-                    sampler.set_demand(demand_.load(std::memory_order_relaxed));
                     auto snapshot = sampler.collect();
                     const bool finished = options.samples && ++emitted >= options.samples;
                     notify(std::move(snapshot), {}, finished);

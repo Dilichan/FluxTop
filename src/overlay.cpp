@@ -138,7 +138,6 @@ private:
     void movement();
     void receive();
     void update_view();
-    void update_sampling_demand();
     void fit_table();
     void release_surface();
     void surface();
@@ -455,7 +454,6 @@ void Overlay::switch_page(unsigned page) {
     // Statistics gets a readable workspace; Settings retains its compact dimensions.
     layout_client();
     if(statistics_) statistics_->activate(client_page_==1);
-    update_sampling_demand();
 }
 void Overlay::layout_client() {
     if (!client_) return;
@@ -519,7 +517,7 @@ void Overlay::client_stats() {
     if (!error_.empty()) info = L"Ошибка сбора: " + wide(error_);
     else if (snapshot_) {
         const auto& s = *snapshot_;
-        info = L"Процессов: " + std::to_wstring(s.process_count) + L"   ·   Недоступно: " + std::to_wstring(s.inaccessible)
+        info = L"Процессов: " + std::to_wstring(s.processes.size()) + L"   ·   Недоступно: " + std::to_wstring(s.inaccessible)
             + L"\r\nМонитор: CPU " + percent(s.self_cpu_percent) + L"   ·   RAM " + memory(s.self_working_set)
             + L"\r\nДоступ: " + (s.elevated.value_or(false) ? std::wstring(L"администратор") : std::wstring(L"обычный"))
             + L"   ·   GPU: " + wide(s.gpu_status) + L"   ·   Время сбора: " + decimal(s.collection_ms) + L" мс";
@@ -542,7 +540,6 @@ void Overlay::set_visible(bool visible) {
     if (visible == visible_) return;
     if (!visible && !tray_ && !toggle_key_ && !client_) return;
     visible_ = visible;
-    update_sampling_demand();
     if (!visible) {
         KillTimer(hwnd_,overlay_animation_timer);
         row_animation_active_=false;
@@ -563,8 +560,8 @@ void Overlay::receive() {
         pending_.reset(); pending_finished_ = false; posted_ = false;
     }
     if (received_snapshot && snapshot_) {
-        // The sampler already grouped and persisted the raw processes once.
-        grouped_processes_ = std::move(snapshot_->grouped_processes);
+        // Keep process-level history untouched. Aggregate only the displayed family rows.
+        grouped_processes_=aggregate_application_processes(snapshot_->processes);
         grouped_spikes_.update(grouped_processes_,snapshot_->total_ram_capacity,
             snapshot_->total_gpu_memory_capacity);
         if(statistics_) statistics_->on_snapshot(snapshot_->timestamp_ms,grouped_processes_,options_.interval_ms);
@@ -580,25 +577,7 @@ void Overlay::receive() {
         DestroyWindow(hwnd_);
     }
 }
-void Overlay::update_sampling_demand() {
-    // Hidden fields must not activate expensive collectors unless used by sorting
-    // or by the open statistics workspace. CPU/RAM remain in the base collector.
-    unsigned flags = 0;
-    if (client_ && client_page_ == 1) flags |= 3U;
-    if (visible_) {
-        const unsigned mask = active_metrics();
-        const bool auto_sort = options_.sort == Sort::automatic;
-        const bool gpu_sort = options_.sort == Sort::gpu || options_.sort == Sort::vram;
-        const bool network_sort = options_.sort == Sort::rx || options_.sort == Sort::tx || options_.sort == Sort::network;
-        if ((mask & ((1U<<2)|(1U<<3))) || gpu_sort || (auto_sort && (mask & 12U))) flags |= 1U;
-        if ((mask & (1U<<4)) || network_sort || (auto_sort && (mask & (1U<<4)))) flags |= 2U;
-        if (mask & (1U<<0)) flags |= 4U; // CPU-temperature header.
-        if (mask & (1U<<2)) flags |= 8U; // GPU-temperature header (no CPU WMI).
-    }
-    worker_.set_demand(flags);
-}
 void Overlay::update_view() {
-    update_sampling_demand();
     if (!snapshot_) return;
     const auto& s = *snapshot_;
     // Foreground changes only reorder borrowed pointers, not full Process trees.
@@ -1029,7 +1008,6 @@ int Overlay::run() {
         nullptr,foreground_changed,0,0,WINEVENT_OUTOFCONTEXT);
     // If the hook is unavailable, the regular snapshot still updates focused PID.
     if (inspect && !options_.tray) show_client();
-    update_sampling_demand(); // Configure collectors before the first sample.
     worker_.start(options_,[this](std::optional<Snapshot> snapshot,std::string error,bool finished) {
         std::lock_guard lock(mailbox_mutex_); pending_=std::move(snapshot); pending_error_=std::move(error); pending_finished_=finished;
         if (!posted_) posted_=PostMessageW(hwnd_,sample_message,0,0)!=FALSE;
@@ -1134,7 +1112,7 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         break;
     case WM_CLOSE: KillTimer(window,settings_timer); apply_client(); DestroyWindow(window); return 0;
     case WM_DESTROY:
-        statistics_.reset(); tabs_=nullptr; client_=nullptr; controls_.clear(); if (client_font_) { DeleteObject(client_font_); client_font_=nullptr; } update_sampling_demand(); activity(); return 0;
+        statistics_.reset(); tabs_=nullptr; client_=nullptr; controls_.clear(); if (client_font_) { DeleteObject(client_font_); client_font_=nullptr; } activity(); return 0;
     }
     return DefWindowProcW(window,msg,wp,lp);
 }

@@ -152,16 +152,11 @@ struct HistoryWriter::Impl {
         if (lookup.step() != SQLITE_ROW) throw std::runtime_error("History process missing");
         return sqlite3_column_int64(lookup.value, 0);
     }
-    void append(Snapshot& snapshot) {
+    void append(const Snapshot& snapshot) {
         execute(db, "BEGIN IMMEDIATE");
-        // Reuse the groups prepared for the UI. CLI still aggregates transiently.
-        std::vector<Process> cli_groups;
-        auto* groups = &snapshot.grouped_processes;
-        if (groups->empty() && !snapshot.processes.empty()) {
-            cli_groups = aggregate_application_processes(snapshot.processes);
-            groups = &cli_groups;
-        }
-        score_tracker.update(*groups,snapshot.total_ram_capacity,snapshot.total_gpu_memory_capacity);
+        // Identical aggregate + AutoRank heuristic as the live Auto overlay.
+        auto groups=aggregate_application_processes(snapshot.processes);
+        score_tracker.update(groups,snapshot.total_ram_capacity,snapshot.total_gpu_memory_capacity);
         auto& sample = *sample_insert; sample.reset();
         sample.integer(1, static_cast<std::uint64_t>(snapshot.timestamp_ms)); sample.optional(2, std::optional(snapshot.interval_ms));
         sample.optional(3, snapshot.total_cpu_percent); sample.optional(4, snapshot.total_ram_used); sample.optional(5, snapshot.total_ram_capacity);
@@ -180,7 +175,7 @@ struct HistoryWriter::Impl {
             insert.optional(8, row.rx_bytes_per_second); insert.optional(9, row.tx_bytes_per_second); insert.step();
             next.emplace(row.pid, ProcessId{row.creation_time, instance});
         }
-        for (const auto& group: *groups) {
+        for (const auto& group: groups) {
             const auto identity=group.exe_path ? "path:"+*group.exe_path : "name:"+group.name;
             const auto cached = application_ids.find(identity);
             if (cached == application_ids.end())
