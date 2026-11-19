@@ -145,7 +145,8 @@ bool statistics_is_system(std::wstring_view name,std::wstring_view path){
     return false;
 }
 StatisticsHistory read_statistics(const std::filesystem::path& file,
-    std::int64_t from_ms,std::int64_t to_ms,unsigned limit,bool include_system,std::stop_token stop){
+    std::int64_t from_ms,std::int64_t to_ms,unsigned history_limit,unsigned uptime_limit,
+    unsigned live_limit,bool include_system,std::stop_token stop){
     StatisticsHistory out;
     diagnostics::write(diagnostics::Level::trace,"statistics.read","query started");
     if(stop.stop_requested() || file.empty() || !std::filesystem::exists(file))return out;
@@ -164,16 +165,18 @@ StatisticsHistory read_statistics(const std::filesystem::path& file,
         from_ms=std::max(from_ms,out.first_record_ms);
         if(to_ms<=from_ms)return out;
         out.scores_available=true;
-        limit=std::clamp(limit,1U,100U);
-        out.uptime=top_apps(connection.db,from_ms,to_ms,limit,include_system,false,stop);
+        history_limit=std::clamp(history_limit,1U,100U);
+        uptime_limit=std::clamp(uptime_limit,1U,100U);
+        live_limit=std::clamp(live_limit,1U,100U);
+        out.uptime=top_apps(connection.db,from_ms,to_ms,uptime_limit,include_system,false,stop);
         if(stop.stop_requested())return out;
         const auto bucket=std::max<std::int64_t>(history_minute_ms,(to_ms-from_ms+479)/480);
-        auto ranked=top_apps(connection.db,from_ms,to_ms,limit,include_system,true,stop);
+        auto ranked=top_apps(connection.db,from_ms,to_ms,history_limit,include_system,true,stop);
         out.history=graph(connection.db,ranked,from_ms,to_ms,bucket,stop);
         const auto now=std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
         const auto start=std::max(out.first_record_ms,now-history_minute_ms);
-        ranked=top_apps(connection.db,start,now+1000,limit,include_system,true,stop);
+        ranked=top_apps(connection.db,start,now+1000,live_limit,include_system,true,stop);
         out.recent=graph(connection.db,ranked,start,now+1000,1000,stop);
         diagnostics::write(diagnostics::Level::trace,"statistics.result",
             "uptime="+std::to_string(out.uptime.size())+" history="+std::to_string(out.history.size()));
@@ -182,5 +185,9 @@ StatisticsHistory read_statistics(const std::filesystem::path& file,
         if(!stop.stop_requested())out.error=utf16(reinterpret_cast<const unsigned char*>(err.what()));
     }
     return out;
+}
+StatisticsHistory read_statistics(const std::filesystem::path& file,
+    std::int64_t from_ms,std::int64_t to_ms,unsigned limit,bool include_system,std::stop_token stop){
+    return read_statistics(file,from_ms,to_ms,limit,limit,limit,include_system,stop);
 }
 }

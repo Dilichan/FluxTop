@@ -1,5 +1,6 @@
 #include "fluxtop/diagnostics.hpp"
 #include "fluxtop/statistics_page.hpp"
+#include "fluxtop/statistics_axis.hpp"
 #include "fluxtop/windows.hpp"
 #include <commctrl.h>
 #include <shellapi.h>
@@ -24,7 +25,7 @@ constexpr wchar_t hover_class[]=L"FluxTop.Statistics.HoverTooltip.v1";
 constexpr wchar_t table_class[]=L"FluxTop.Statistics.DetachedTable.v1";
 constexpr UINT ready_message=WM_APP+201;
 constexpr UINT_PTR animate_message=2201;
-enum : int { period_id=1001,from_id,to_id,system_id,table_id,stats_limit_id,popout_live_id,popout_history_id,popout_table_id };
+enum : int { period_id=1001,from_id,to_id,system_id,table_id,stats_limit_id,popout_live_id,popout_history_id,popout_table_id,history_limit_id,uptime_limit_id };
 // Logical page dimensions; chart labels and Win32 controls share the same grid.
 constexpr int page_width=760, page_height=860;
 constexpr int auto_live_id=1201, auto_history_id=1202, popup_auto_id=1203;
@@ -87,21 +88,10 @@ double pixel_hue(int r,int g,int b) {
     double hue=hi==r?60.0*(g-b)/delta:hi==g?60.0*(b-r)/delta+120:60.0*(r-g)/delta+240;
     return hue<0?hue+360:hue;
 }
-// Pick a readable 0..Y scale from the values actually visible in this chart.
-// E.g. a peak of 29 -> 35, peak of 7 -> 9; preserve 0..100 for empty data.
+// The Y-axis must include clipped/interpolated segments, not only points.
 double auto_vertical_zoom(const std::vector<StatisticsApplication>& apps,
     std::int64_t from,std::int64_t to) {
-    double peak=0.0;
-    bool found=false;
-    for(const auto& app:apps) for(const auto& point:app.points) {
-        if(point.first<from || point.first>to || !std::isfinite(point.second)) continue;
-        found=true;peak=std::max(peak,std::clamp(point.second,0.0,100.0));
-    }
-    if(!found) return 1.0;
-    const double padded=std::clamp(peak*1.18,2.0,100.0);
-    const double step=padded<=10.0?1.0:padded<=25.0?2.0:padded<=50.0?5.0:10.0;
-    const double ceiling=std::clamp(std::ceil(padded/step)*step,2.0,100.0);
-    return 100.0/ceiling;
+    return statistics_auto_vertical_zoom(apps,from,to);
 }
 // Display the same units as the overlay; unavailable readings remain unknown.
 std::wstring stat_decimal(double value) {
@@ -167,9 +157,12 @@ HDC StatisticsPage::PaintBuffer::prepare(HDC reference,LONG w,LONG h) {
 StatisticsPage::StatisticsPage(HWND parent,std::filesystem::path database,
     std::wstring settings_path,unsigned limit)
     :database_(std::move(database)),settings_(std::move(settings_path)) {
-    // Statistics has its own persistent display limit, independent of overlay rows.
-    limit_=static_cast<unsigned>(std::clamp(GetPrivateProfileIntW(L"overlay",L"stats_top",
-        static_cast<int>(limit),settings_.c_str()),1U,100U));
+    // The live graph uses the SAME limit as overlay rows, across tabs.
+    limit_=std::clamp(limit,1U,100U);
+    history_limit_=static_cast<unsigned>(std::clamp(GetPrivateProfileIntW(L"overlay",L"stats_history_top",
+        static_cast<int>(limit_),settings_.c_str()),1U,100U));
+    uptime_limit_=static_cast<unsigned>(std::clamp(GetPrivateProfileIntW(L"overlay",L"stats_uptime_top",
+        static_cast<int>(limit_),settings_.c_str()),1U,100U));
     system_=GetPrivateProfileIntW(L"overlay",L"stats_show_system",0,settings_.c_str())!=0;
     auto_scale_[0]=GetPrivateProfileIntW(L"overlay",L"stats_auto_live",1,settings_.c_str())!=0;
     auto_scale_[1]=GetPrivateProfileIntW(L"overlay",L"stats_auto_history",1,settings_.c_str())!=0;
@@ -206,7 +199,8 @@ StatisticsPage::StatisticsPage(HWND parent,std::filesystem::path database,
                 if(stop.stop_requested()) break;
                 q=requested_;finished=generation_;cancelled=cancel_query_.get_token();
             }
-            auto result=read_statistics(database_,q.from,q.to,q.limit,q.system,cancelled);
+            auto result=read_statistics(database_,q.from,q.to,q.history_limit,q.uptime_limit,
+                q.limit,q.system,cancelled);
             if(stop.stop_requested()) break;
             {
                 std::lock_guard lock(mutex_);
@@ -258,7 +252,17 @@ void StatisticsPage::make_controls() {
     limit_slider_=add(TRACKBAR_CLASSW,L"",TBS_HORZ|TBS_NOTICKS|WS_TABSTOP,stats_limit_id);
     SendMessageW(limit_slider_,TBM_SETRANGE,TRUE,MAKELPARAM(1,100));
     SendMessageW(limit_slider_,TBM_SETPOS,TRUE,limit_);
-    SetWindowTextW(limit_label_,(L"Приложений в статистике: "+std::to_wstring(limit_)).c_str());
+    SetWindowTextW(limit_label_,(L"Количество приложений: "+std::to_wstring(limit_)+L" / 100").c_str());
+    history_limit_label_=add(L"STATIC",L"История",0,0);
+    history_limit_slider_=add(TRACKBAR_CLASSW,L"",TBS_HORZ|TBS_NOTICKS|WS_TABSTOP,history_limit_id);
+    SendMessageW(history_limit_slider_,TBM_SETRANGE,TRUE,MAKELPARAM(1,100));
+    SendMessageW(history_limit_slider_,TBM_SETPOS,TRUE,history_limit_);
+    SetWindowTextW(history_limit_label_,(L"История: "+std::to_wstring(history_limit_)+L" / 100").c_str());
+    uptime_limit_label_=add(L"STATIC",L"Аптайм",0,0);
+    uptime_limit_slider_=add(TRACKBAR_CLASSW,L"",TBS_HORZ|TBS_NOTICKS|WS_TABSTOP,uptime_limit_id);
+    SendMessageW(uptime_limit_slider_,TBM_SETRANGE,TRUE,MAKELPARAM(1,100));
+    SendMessageW(uptime_limit_slider_,TBM_SETPOS,TRUE,uptime_limit_);
+    SetWindowTextW(uptime_limit_label_,(L"Аптайм: "+std::to_wstring(uptime_limit_)+L" / 100").c_str());
     // Keep the database-bound calendar control, but hide internal storage notes.
     first_label_=add(L"STATIC",L"",0,0);
     ShowWindow(first_label_,SW_HIDE);
@@ -300,10 +304,15 @@ void StatisticsPage::layout() {
     put(auto_live_,441,151,148,28);
     put(popout_history_,596,367,140,28);
     put(auto_history_,441,367,148,28);
-    // The statistics-only limit controls BOTH charts and BOTH uptime tables.
+    // Same limit as overlay for live series; historical chart and uptime are independent.
     put(limit_label_,18,17,315,27);
     put(limit_slider_,344,11,394,35);
-    put(show_system_,18,581,335,29);
+    put(show_system_,18,104,335,29);
+    // Between the history axis labels (ends ~568) and the uptime heading (634).
+    put(history_limit_label_,18,577,137,27);
+    put(history_limit_slider_,155,574,249,32);
+    put(uptime_limit_label_,411,577,134,27);
+    put(uptime_limit_slider_,546,574,190,32);
     put(table_,18,662,716,182);
     put(popout_table_,596,621,140,28);
     ListView_SetColumnWidth(table_,0,sx(307));
@@ -317,7 +326,9 @@ void StatisticsPage::layout() {
             DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
         if(replacement) {stale_font=font_;font_=replacement;controls_font_dpi_=current_dpi;}
     }
-    for(auto child:{period_,from_,to_,first_label_,show_system_,limit_label_,limit_slider_,table_,popout_live_,popout_history_,popout_table_,auto_live_,auto_history_})
+    for(auto child:{period_,from_,to_,first_label_,show_system_,limit_label_,limit_slider_,
+        history_limit_label_,history_limit_slider_,uptime_limit_label_,uptime_limit_slider_,
+        table_,popout_live_,popout_history_,popout_table_,auto_live_,auto_history_})
         SendMessageW(child,WM_SETFONT,reinterpret_cast<WPARAM>(font_),TRUE);
     if(stale_font) DeleteObject(stale_font);
     ListView_SetBkColor(table_,GetSysColor(COLOR_WINDOW));
@@ -337,12 +348,32 @@ void StatisticsPage::set_limit(unsigned limit) {
     if(limit_==limit) return;
     limit_=limit;
     SendMessageW(limit_slider_,TBM_SETPOS,TRUE,limit_);
-    SetWindowTextW(limit_label_,(L"Приложений в статистике: "+std::to_wstring(limit_)).c_str());
-    WritePrivateProfileStringW(L"overlay",L"stats_top",std::to_wstring(limit_).c_str(),settings_.c_str());
+    SetWindowTextW(limit_label_,(L"Количество приложений: "+std::to_wstring(limit_)+L" / 100").c_str());
+    // Overlay::save_settings() owns the shared [overlay] top key.
     rebuild_live_series();
     if(active_) InvalidateRect(hwnd_,nullptr,FALSE);
     for(auto& popup:popups_) if(popup.window) InvalidateRect(popup.window,nullptr,FALSE);
     if(active_ || table_window_ || popups_[0].window || popups_[1].window) request();
+}
+void StatisticsPage::set_history_limit(unsigned value) {
+    value=std::clamp(value,1U,100U);
+    if(value==history_limit_) return;
+    history_limit_=value;
+    SendMessageW(history_limit_slider_,TBM_SETPOS,TRUE,value);
+    SetWindowTextW(history_limit_label_,(L"История: "+std::to_wstring(value)+L" / 100").c_str());
+    WritePrivateProfileStringW(L"overlay",L"stats_history_top",std::to_wstring(value).c_str(),settings_.c_str());
+    diagnostics::write(diagnostics::Level::info,"ui.history_limit","limit="+std::to_string(value));
+    if(active_ || popups_[1].window) request();
+}
+void StatisticsPage::set_uptime_limit(unsigned value) {
+    value=std::clamp(value,1U,100U);
+    if(value==uptime_limit_) return;
+    uptime_limit_=value;
+    SendMessageW(uptime_limit_slider_,TBM_SETPOS,TRUE,value);
+    SetWindowTextW(uptime_limit_label_,(L"Аптайм: "+std::to_wstring(value)+L" / 100").c_str());
+    WritePrivateProfileStringW(L"overlay",L"stats_uptime_top",std::to_wstring(value).c_str(),settings_.c_str());
+    diagnostics::write(diagnostics::Level::info,"ui.uptime_limit","limit="+std::to_string(value));
+    if(active_ || table_window_) request();
 }
 std::int64_t StatisticsPage::custom_timestamp(HWND picker,bool until_end) {
     SYSTEMTIME local{};
@@ -379,7 +410,7 @@ void StatisticsPage::request() {
     {
         std::lock_guard lock(mutex_);
         cancel_query_.request_stop();cancel_query_=std::stop_source{};
-        requested_={from,to,limit_,system_,++generation_};
+        requested_={from,to,limit_,history_limit_,uptime_limit_,system_,++generation_};
     }
     wake_.notify_all();
     last_history_refresh_=now;
@@ -446,7 +477,7 @@ void StatisticsPage::populate_table() {
     fill(table_window_list_,table_image_list_);
     if(table_window_info_) {
         const auto line=L"Наблюдаемый аптайм  ·  "+std::to_wstring(history_.uptime.size())+
-            L" приложений  ·  лимит "+std::to_wstring(limit_);
+            L" приложений  ·  лимит "+std::to_wstring(uptime_limit_);
         SetWindowTextW(table_window_info_,line.c_str());
     }
 }
@@ -867,13 +898,15 @@ void StatisticsPage::mouse(int x,int y) {
     if(to>from) for(std::size_t i=0;i<chart.size();++i) {
         const auto& pts=chart[i].points;
         for(std::size_t j=0;j<pts.size();++j) {
-            const double xpos=area.left+std::clamp(static_cast<double>(pts[j].first-from)/static_cast<double>(to-from),0.0,1.0)*(area.right-area.left);
-            const double ypos=area.bottom-std::clamp(pts[j].second*zoom,0.0,100.0)/100*(area.bottom-area.top);
-            const double dist=(xpos-x)*(xpos-x)+(ypos-y)*(ypos-y);
-            if(dist<best) {best=dist;section=in_live?0:1;selected=i;score=pts[j].second;sample_at=pts[j].first;}
+            const double xpos=area.left+static_cast<double>(pts[j].first-from)/static_cast<double>(to-from)*(area.right-area.left);
+            if(pts[j].first>=from && pts[j].first<=to) {
+                const double ypos=area.bottom-std::clamp(pts[j].second*zoom,0.0,100.0)/100*(area.bottom-area.top);
+                const double dist=(xpos-x)*(xpos-x)+(ypos-y)*(ypos-y);
+                if(dist<best) {best=dist;section=in_live?0:1;selected=i;score=pts[j].second;sample_at=pts[j].first;}
+            }
             if(j==0) continue;
             const auto& prev=pts[j-1];
-            const double old_x=area.left+std::clamp(static_cast<double>(prev.first-from)/static_cast<double>(to-from),0.0,1.0)*(area.right-area.left);
+            const double old_x=area.left+static_cast<double>(prev.first-from)/static_cast<double>(to-from)*(area.right-area.left);
             if(xpos<=old_x || x<old_x || x>xpos) continue;
             const double t=(x-old_x)/(xpos-old_x);
             const double line_score=prev.second+(pts[j].second-prev.second)*t;
@@ -1049,8 +1082,24 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
     case WM_HSCROLL:
         if(reinterpret_cast<HWND>(lp)==limit_slider_) {
             const auto selected=static_cast<unsigned>(SendMessageW(limit_slider_,TBM_GETPOS,0,0));
-            SetWindowTextW(limit_label_,(L"Приложений в статистике: "+std::to_wstring(selected)).c_str());
-            if(LOWORD(wp)!=TB_THUMBTRACK && selected!=limit_) set_limit(selected);
+            SetWindowTextW(limit_label_,(L"Количество приложений: "+std::to_wstring(selected)+L" / 100").c_str());
+            if(LOWORD(wp)!=TB_THUMBTRACK && selected!=limit_) {
+                set_limit(selected);
+                // The parent updates its overlay setting and trackbar on the UI thread.
+                PostMessageW(GetParent(hwnd_),WM_APP+215,selected,0);
+            }
+            return 0;
+        }
+        if(reinterpret_cast<HWND>(lp)==history_limit_slider_) {
+            const auto selected=static_cast<unsigned>(SendMessageW(history_limit_slider_,TBM_GETPOS,0,0));
+            SetWindowTextW(history_limit_label_,(L"История: "+std::to_wstring(selected)+L" / 100").c_str());
+            if(LOWORD(wp)!=TB_THUMBTRACK) set_history_limit(selected);
+            return 0;
+        }
+        if(reinterpret_cast<HWND>(lp)==uptime_limit_slider_) {
+            const auto selected=static_cast<unsigned>(SendMessageW(uptime_limit_slider_,TBM_GETPOS,0,0));
+            SetWindowTextW(uptime_limit_label_,(L"Аптайм: "+std::to_wstring(selected)+L" / 100").c_str());
+            if(LOWORD(wp)!=TB_THUMBTRACK) set_uptime_limit(selected);
             return 0;
         }
         break;

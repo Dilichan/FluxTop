@@ -52,6 +52,10 @@ int main(int argc,char** argv){
             require(at>=base && score>=0 && score<=100,"historical point range");
         auto all=fluxtop::read_statistics(path,base,base+4*fluxtop::history_day_ms,10,true,{});
         require(all.error.empty() && all.uptime.size()==2,"system filter toggle");
+        auto separated=fluxtop::read_statistics(path,base,base+4*fluxtop::history_day_ms,
+            1,2,1,true,{});
+        require(separated.error.empty() && separated.uptime.size()==2 &&
+            separated.history.size()==1,"Independent history/uptime SQL limits");
         std::filesystem::remove_all(root);
         std::cout<<"Compacted AutoScore graph, uptime, multi-process dedup, system toggle passed\n";
         return 0;

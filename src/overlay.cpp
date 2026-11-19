@@ -498,6 +498,7 @@ void Overlay::apply_client() {
     opacity_ = static_cast<unsigned>(alpha); show_icons_ = SendDlgItemMessageW(client_, icons_control, BM_GETCHECK, 0, 0) == BST_CHECKED;
     SetDlgItemTextW(client_, alpha_label, (L"Непрозрачность: " + std::to_wstring(opacity_) + L"%").c_str());
     SetDlgItemTextW(client_, top_label, (L"Количество приложений: " + std::to_wstring(options_.top) + L" / 100").c_str());
+    if(statistics_) statistics_->set_limit(options_.top);
     metrics_ = 0;
     for (unsigned i=0;i<metric_names.size();++i) {
         if (SendDlgItemMessageW(client_,metric_control+i,BM_GETCHECK,0,0)==BST_CHECKED)
@@ -1059,6 +1060,19 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         if (wp==SIZE_MINIMIZED) return 0;
         break;
     case WM_DPICHANGED: { client_dpi_=HIWORD(wp); const auto* r=reinterpret_cast<RECT*>(lp); SetWindowPos(window,nullptr,r->left,r->top,0,0,SWP_NOSIZE|SWP_NOZORDER); layout_client(); return 0; }
+    case WM_APP+215: {
+        // Statistics live-graph slider changed; mirror to overlay without recursion.
+        const auto requested=std::clamp(static_cast<unsigned>(wp),1U,100U);
+        if(options_.top!=requested) {
+            options_.top=requested;
+            SendDlgItemMessageW(window,top_control,TBM_SETPOS,TRUE,requested);
+            SetDlgItemTextW(window,top_label,
+                (L"Количество приложений: "+std::to_wstring(requested)+L" / 100").c_str());
+            fit_table();update_view();save_settings();client_stats();
+            InvalidateRect(hwnd_,nullptr,FALSE);
+        }
+        return 0;
+    }
     case WM_HSCROLL:
         if (reinterpret_cast<HWND>(lp)==GetDlgItem(window,top_control)) {
             const auto selected=static_cast<unsigned>(SendDlgItemMessageW(window,top_control,TBM_GETPOS,0,0));

@@ -33,6 +33,10 @@ struct StatisticsHistory {
 StatisticsHistory read_statistics(const std::filesystem::path& file,
     std::int64_t from_ms,std::int64_t to_ms,unsigned limit,bool include_system,
     std::stop_token stop);
+// Independent result caps for historical graph, uptime list, and live chart.
+StatisticsHistory read_statistics(const std::filesystem::path& file,
+    std::int64_t from_ms,std::int64_t to_ms,unsigned history_limit,
+    unsigned uptime_limit,unsigned live_limit,bool include_system,std::stop_token stop);
 // Use the real Windows directory, not a hard-coded system-drive assumption.
 bool statistics_is_system(std::wstring_view name,std::wstring_view path);
 }

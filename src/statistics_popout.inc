@@ -79,11 +79,13 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
             const auto& pts=apps[i].points;
             for(std::size_t j=0;j<pts.size();++j) {
                 const auto xpos=graph.left+static_cast<double>(pts[j].first-from)*width/static_cast<double>(to-from);
-                if(xpos<graph.left-20 || xpos>graph.right+20) continue;
-                const double ypos=graph.bottom-std::clamp(pts[j].second*vertical_zoom,0.0,100.0)*height/100.0;
-                const double distance=(xpos-popup.cursor.x)*(xpos-popup.cursor.x)
-                    +(ypos-popup.cursor.y)*(ypos-popup.cursor.y);
-                if(distance<best) {best=distance;selected=i;score=pts[j].second;sample_at=pts[j].first;found=true;}
+                if(xpos>=graph.left-20 && xpos<=graph.right+20) {
+                    const double ypos=graph.bottom-std::clamp(pts[j].second*vertical_zoom,0.0,100.0)*height/100.0;
+                    const double distance=(xpos-popup.cursor.x)*(xpos-popup.cursor.x)
+                        +(ypos-popup.cursor.y)*(ypos-popup.cursor.y);
+                    if(distance<best) {best=distance;selected=i;score=pts[j].second;sample_at=pts[j].first;found=true;}
+                }
+                // A line can cross the viewport with both stored points outside it.
                 if(j==0) continue;
                 const auto old_x=graph.left+static_cast<double>(pts[j-1].first-from)*width/static_cast<double>(to-from);
                 if(xpos<=old_x || popup.cursor.x<old_x || popup.cursor.x>xpos) continue;

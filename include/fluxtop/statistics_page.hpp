@@ -31,6 +31,8 @@ private:
     static LRESULT CALLBACK table_dispatch(HWND window,UINT msg,WPARAM wp,LPARAM lp);
     LRESULT message(UINT msg,WPARAM wp,LPARAM lp);
     void make_controls();
+    void set_history_limit(unsigned limit);
+    void set_uptime_limit(unsigned limit);
     void layout();
     void request();
     void accept();
@@ -105,8 +107,9 @@ private:
     unsigned animation_duration_ms_{1000};
     std::int64_t last_live_timestamp_{};
     struct LiveEvent { std::int64_t time{}; std::wstring name,path; double score{}; };
-    struct Query { std::int64_t from{},to{}; unsigned limit{}; bool system{}; unsigned serial{}; };
+    struct Query { std::int64_t from{},to{}; unsigned limit{},history_limit{},uptime_limit{}; bool system{}; unsigned serial{}; };
     HWND hwnd_{},period_{},from_{},to_{},show_system_{},first_label_{},table_{},limit_label_{},limit_slider_{};
+    HWND history_limit_label_{},history_limit_slider_{},uptime_limit_label_{},uptime_limit_slider_{};
     HIMAGELIST image_list_{};
     HFONT font_{};
     UINT controls_font_dpi_{};
@@ -117,7 +120,7 @@ private:
     std::map<COLORREF,HPEN> stroke_pens_,detail_pens_;
     std::filesystem::path database_;
     std::wstring settings_;
-    unsigned limit_{};
+    unsigned limit_{},history_limit_{},uptime_limit_{};
     bool active_{},system_{};
     int period_index_{};
     std::int64_t first_record_{};
