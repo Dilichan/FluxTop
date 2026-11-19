@@ -96,9 +96,9 @@ C++20, Win32, Direct2D/DirectWrite, системная SQLite Windows. Сбор�
 по [MIT](LICENSE), сборки — в [Releases](https://github.com/Dilichan/FluxTop/releases).
 
 - [Архитектура](docs/ARCHITECTURE.md) · [стек](docs/STACK.md) · [требования](docs/REQUIREMENTS.md)
-- [Оверлей и клиент](docs/OVERLAY.md) · [аппаратная совместимость](docs/HARDWARE_COMPATIBILITY.md) · [хранение истории](docs/HISTORY.md)
-- [Автозапуск](docs/AUTOSTART.md) · [публикация релизов](docs/PUBLISHING.md)
-- [План разработки](docs/ROADMAP.md) · [методика замеров](docs/PERFORMANCE.md) · [ранние CLI-замеры](docs/INITIAL_RESULTS.md)
+- [Оверлей и клиент](docs/OVERLAY.md) · [хранение истории](docs/HISTORY.md) · [статистика](docs/STATISTICS.md)
+- [Обновления и автозапуск](docs/UPDATING.md) · [публикация релизов](docs/PUBLISHING.md)
+- [План разработки](docs/ROADMAP.md) · [методика замеров](docs/PERFORMANCE.md) · [архитектурные решения](docs/decisions/0001-independent-updater.md)
 
 Для работы из checkout остаётся `.\fluxtop.cmd --overlay`: независимый Git-launcher
 обновляет исходники, собирает и проверяет новую версию. Для скачиваемого EXE
