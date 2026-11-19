@@ -30,14 +30,22 @@ jobs:
       - name: Validate JSONL contract
         shell: pwsh
         run: |
-          $env:FLUXTOP_HISTORY_DB = Join-Path $env:GITHUB_WORKSPACE 'build/ci-history.db'
+          $dbPath = Join-Path $env:GITHUB_WORKSPACE 'build/ci-fluxtop.db'
+          $env:FLUXTOP_DATA_DB = $dbPath
+          $env:FLUXTOP_LOG_PATH = Join-Path $env:GITHUB_WORKSPACE 'build/ci-activity.log'
           $lines = & ./build/Release/fluxtop.exe --samples 2 --interval-ms 250 --no-gpu --jsonl
           if ($LASTEXITCODE -ne 0 -or $lines.Count -ne 2) { throw 'Collector failed or wrong sample count' }
           foreach ($line in $lines) {
             $sample = $line | ConvertFrom-Json
             if ($sample.schema_version -ne 1 -or $sample.gpu_status -ne 'disabled') { throw 'Invalid schema/status' }
             if ($sample.process_count -lt 1 -or $sample.self.working_set_bytes -le 0) { throw 'Missing live metrics' }
-            if ($sample.history_records -lt $sample.process_count -or $sample.history_error) { throw 'History write failed' }
+            if ($sample.history_error) { throw "History accumulator error: $($sample.history_error)" }
+          }
+          # Writes are buffered by minute. The worker flushes its pending minute at shutdown.
+          # CTest separately verifies schema, graph, icons and mathematical rollups.
+          if (-not (Test-Path -LiteralPath $dbPath -PathType Leaf) -or
+              (Get-Item -LiteralPath $dbPath).Length -eq 0) {
+            throw 'History was not persisted on graceful shutdown'
           }
       - name: Package downloadable EXE
         shell: pwsh
