@@ -35,9 +35,22 @@ Require-Contains 'visible range start' 'first_visible=std::min(scroll_,row_motio
 Require-Contains 'visible range end' 'last_visible=std::min(row_motion_.size(),first_visible+visible_count)'
 Require-Contains 'render frame backpressure' 'row_animation_next_frame_tick_'
 Require-Contains 'slow frame diagnostics' 'overlay.animation_slow'
-Require-Contains 'adaptive render budget' 'frame_cost*2'
+Require-Contains 'adaptive render budget' 'frame_cost+6ULL,25ULL,140ULL'
 Require-Contains 'dirty region' 'bool partial_body=false;'
 Require-Contains 'skip untouched rows' 'if(partial_body && (y+row_height()+2<dirty_top || y-2>dirty_bottom))continue;'
 Require-Contains 'no animation fade' 'const float opacity=1.0f; // Never fade newly appearing rows or their icons.'
+
+# Auto-first dropdown regression checks (PowerShell 5.1 compatible).
+# Use .NET regex Unicode escapes so this test file stays ASCII-only.
+if (-not [regex]::IsMatch($script:overlay, 'for \(const auto label : \{L"\u0410\u0432\u0442\u043e", L"CPU", L"RAM", L"GPU"')) {
+    throw 'Sorting policy failed: Auto must be the first dropdown entry.'
+}
+if ([regex]::IsMatch($script:overlay, 'L"\u0410\u0432\u0442\u043e\s*[\u2014-]')) {
+    throw 'Sorting policy failed: the old Auto caption is still present.'
+}
+Require-Contains 'explicit sort mapping' 'sort_ui_values{Sort::automatic, Sort::cpu, Sort::ram, Sort::gpu'
+Require-Contains 'initial selection mapped' 'sort_ui_index(options_.sort)'
+Require-Contains 'selected item mapped' 'sort_ui_values[static_cast<std::size_t>(selected_sort)]'
+Require-Contains 'GPU restriction based on mode' 'new_sort != Sort::gpu && new_sort != Sort::vram'
 
 'Overlay settings/animation policy passed'

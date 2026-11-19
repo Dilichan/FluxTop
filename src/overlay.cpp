@@ -36,6 +36,15 @@ enum Control : UINT { open_client = 100, toggle_table, quit_app, top_label, top_
     alpha_label, interval_control, summary_control, header_colors_control, row_colors_control, animation_control, metric_control = 200, tab_control = 450, font_label = 500, interval_label = 501 };
 constexpr unsigned all_metrics = 31; // Five resource columns; FPS is in the application heading.
 constexpr unsigned default_metrics = 31;
+constexpr std::array<Sort, 8> sort_ui_values{Sort::automatic, Sort::cpu, Sort::ram, Sort::gpu,
+    Sort::vram, Sort::rx, Sort::tx, Sort::network};
+constexpr std::size_t sort_ui_index(Sort value) noexcept {
+    for (std::size_t index = 0; index < sort_ui_values.size(); ++index)
+        if (sort_ui_values[index] == value) return index;
+    return 0;
+}
+static_assert(sort_ui_index(Sort::automatic) == 0 && sort_ui_index(Sort::cpu) == 1 &&
+    sort_ui_index(Sort::gpu) == 3 && sort_ui_index(Sort::network) == 7);
 constexpr int load_band(double x) { return x < 50.0 ? 0 : x < 70.0 ? 1 : 2; }
 constexpr int temperature_band(double x) { return x < 65.0 ? 0 : x <= 80.0 ? 1 : 2; }
 static_assert(load_band(49.9) == 0 && load_band(50.0) == 1 && load_band(70.0) == 2);
@@ -43,6 +52,15 @@ static_assert(temperature_band(64.9) == 0 && temperature_band(65.0) == 1
     && temperature_band(80.0) == 1 && temperature_band(80.1) == 2);
 constexpr UINT_PTR settings_timer = 1;
 constexpr UINT_PTR overlay_animation_timer = 2;
+// Timer wakes are cheap; paint scheduling uses actual frame cost and elapsed time.
+constexpr UINT overlay_animation_timer_ms = 16;
+constexpr unsigned overlay_transition_duration_ms(float slot_travel) noexcept {
+    return static_cast<unsigned>(std::clamp(280.0f +
+        6.0f*std::clamp(slot_travel,0.0f,100.0f),280.0f,520.0f));
+}
+static_assert(overlay_transition_duration_ms(0.0f)==280 &&
+    overlay_transition_duration_ms(10.0f)==340 &&
+    overlay_transition_duration_ms(100.0f)==520);
 // Animated display only: sampling cadence and AutoScore are unchanged.
 constexpr float overlay_smoothstep(float value) noexcept {
     const float t=std::clamp(value,0.0f,1.0f);
@@ -150,6 +168,9 @@ private:
     void draw_header_metric(unsigned column, const std::wstring& reading, std::optional<double> load,
         std::optional<double> temperature, D2D1_RECT_F rect, bool cpu_board = false);
     void draw_network_text(const Row& row, D2D1_RECT_F rect, float opacity = 1.0f);
+    void draw_cached_row_text(const Row& row, unsigned column, std::wstring_view value,
+        D2D1_RECT_F rect, IDWriteTextFormat* font, bool highlight = false,
+        std::optional<double> load = std::nullopt);
     std::array<D2D1_RECT_F,6> columns(float y, float height) const;
     float text_size() const { return static_cast<float>(options_.font_size); }
     float row_height() const { return text_size() * 1.6f; }
@@ -217,6 +238,17 @@ private:
     };
     std::unordered_map<std::uint32_t,CachedBitmap> icon_bitmaps_;
     std::uint64_t icon_bitmap_clock_{};
+    struct CachedRowTextLayouts {
+        std::optional<std::uint64_t> created;
+        std::array<std::wstring,6> values;
+        std::array<float,6> widths{};
+        std::array<float,6> heights{};
+        std::array<ComPtr<IDWriteTextLayout>,6> layouts;
+        std::uint64_t used{};
+    };
+    // A bounded number of visible applications * 6 layouts, evicted by LRU.
+    std::unordered_map<std::uint32_t,CachedRowTextLayouts> row_text_cache_;
+    std::uint64_t row_text_clock_{};
     ComPtr<ID2D1Factory> factory_;
     ComPtr<IDWriteFactory> write_factory_;
     ComPtr<IDWriteTextFormat> body_font_, number_font_;
@@ -301,6 +333,8 @@ void Overlay::load_icons() {
     }
 }
 void Overlay::fonts() {
+    // Layouts hold the old format; release them before changing font size.
+    row_text_cache_.clear();
     body_font_.Reset(); number_font_.Reset();
     const auto font = [&](const wchar_t* family, ComPtr<IDWriteTextFormat>& output) {
         require_hr(write_factory_->CreateTextFormat(family, nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL,
@@ -404,8 +438,8 @@ void Overlay::init_client() {
     SendMessageW(top, TBM_SETPOS, TRUE, static_cast<LPARAM>(options_.top));
     control(L"STATIC", L"Сортировка", 0, 0, 22, 106, 230, 24);
     const auto sort = control(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, sort_control, 290, 102, 268, 160);
-    for (const auto label : {L"CPU", L"RAM", L"GPU", L"Память GPU", L"Авто — рейтинг и всплески", L"Rx — приём", L"Tx — передача", L"Rx/Tx — суммарный трафик"}) SendMessageW(sort, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
-    SendMessageW(sort, CB_SETCURSEL, static_cast<WPARAM>(options_.sort), 0);
+    for (const auto label : {L"Авто", L"CPU", L"RAM", L"GPU", L"Память GPU", L"Rx — приём", L"Tx — передача", L"Rx/Tx — суммарный трафик"}) SendMessageW(sort, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
+    SendMessageW(sort, CB_SETCURSEL, static_cast<WPARAM>(sort_ui_index(options_.sort)), 0);
     control(L"STATIC", (L"Размер текста: " + std::to_wstring(options_.font_size) + L" px (5–42)").c_str(),
         0, font_label, 22, 150, 260, 24);
     const auto font = control(TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP,
@@ -488,11 +522,12 @@ void Overlay::apply_client() {
     const auto selected_sort = SendDlgItemMessageW(client_, sort_control, CB_GETCURSEL, 0, 0);
     const auto seconds = SendDlgItemMessageW(client_,interval_control,TBM_GETPOS,0,0);
     const auto alpha = SendDlgItemMessageW(client_, alpha_control, TBM_GETPOS, 0, 0);
-    if (alpha < 1 || alpha > 100 || selected_sort < 0 || selected_sort > 7) return;
+    if (alpha < 1 || alpha > 100 || selected_sort < 0 || selected_sort >= static_cast<LRESULT>(sort_ui_values.size())) return;
     if (top >= 1 && top <= 100) options_.top = static_cast<unsigned>(top);
     if (selected_font >= 5 && selected_font <= 42) options_.font_size = static_cast<unsigned>(selected_font);
-    if (options_.gpu || (selected_sort != 2 && selected_sort != 3)) options_.sort = static_cast<Sort>(selected_sort);
-    else SendDlgItemMessageW(client_, sort_control, CB_SETCURSEL, static_cast<WPARAM>(options_.sort), 0);
+    const auto new_sort = sort_ui_values[static_cast<std::size_t>(selected_sort)];
+    if (options_.gpu || (new_sort != Sort::gpu && new_sort != Sort::vram)) options_.sort = new_sort;
+    else SendDlgItemMessageW(client_, sort_control, CB_SETCURSEL, static_cast<WPARAM>(sort_ui_index(options_.sort)), 0);
     if (seconds >= 1 && seconds <= 10 && seconds*1000 != options_.interval_ms) {
         options_.interval_ms = static_cast<unsigned>(seconds*1000); worker_.set_interval(options_.interval_ms);
     }
@@ -560,6 +595,7 @@ void Overlay::set_visible(bool visible) {
         previous_rows_.clear();row_motion_.clear();
         worker_.set_fps_targets({});
         ShowWindow(hwnd_, SW_HIDE); release_surface(); icons_.reset();
+        row_text_cache_.clear(); // Hidden overlays should not keep text layout buffers.
     }
     else { ShowWindow(hwnd_, SW_SHOWNOACTIVATE); update_view(); InvalidateRect(hwnd_, nullptr, FALSE); }
     if (client_) SendDlgItemMessageW(client_, visible_control, BM_SETCHECK, visible ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -694,28 +730,27 @@ void Overlay::update_view() {
             previous_rows_.clear();
             // A newly inserted/replaced row at the same slot needs no animation.
             bool has_motion=false;
+            float max_slot_travel=0.0f;
             RECT viewport{};GetClientRect(hwnd_,&viewport);
             const auto visible_count=visible_rows(dip(std::max<LONG>(0,viewport.bottom)));
             const auto first_visible=std::min(scroll_,row_motion_.size());
             const auto last_visible=std::min(row_motion_.size(),first_visible+visible_count);
             for(std::size_t i=first_visible;i<last_visible;++i) {
-                if(std::abs(row_motion_[i].start_slot-static_cast<float>(i))>0.01f) {
-                    has_motion=true;break;
-                }
+                const float travel=std::abs(row_motion_[i].start_slot-static_cast<float>(i));
+                max_slot_travel=std::max(max_slot_travel,travel);
+                if(travel>0.01f) has_motion=true;
             }
             row_animation_started_=tick;
-            // Sampling controls the transition duration, never the renderer's FPS.
-            row_animation_duration_ms_=std::clamp(
-                static_cast<unsigned>(options_.interval_ms*0.65),350U,1600U);
+            // Distance-aware 280-520ms motion. Sampling interval never drags animations out.
+            row_animation_duration_ms_=overlay_transition_duration_ms(max_slot_travel);
             row_animation_last_painted_progress_=0.0f;
             row_animation_next_frame_tick_=0;
             row_animation_slow_frame_reported_=false;
             row_animation_active_=has_motion;
-            // Large software-rendered layered windows must not monopolize the UI thread.
-            const UINT frame_ms=rows_.size()<=5?40U:rows_.size()<=15?60U:
-                rows_.size()<=40?75U:rows_.size()<=70?90U:120U;
+            // One lightweight timer cadence for every row count. Actual paints are
+            // throttled below according to render cost, not row count.
             if(has_motion) {
-                if(!SetTimer(hwnd_,overlay_animation_timer,frame_ms,nullptr)) {
+                if(!SetTimer(hwnd_,overlay_animation_timer,overlay_animation_timer_ms,nullptr)) {
                     row_animation_active_=false;
                     row_motion_.clear();
                 }
@@ -735,6 +770,7 @@ void Overlay::update_view() {
 
 void Overlay::release_surface() {
     icon_bitmaps_.clear(); // D2D bitmaps belong to this render target.
+    // DWrite layouts are device-independent and stay cached across target recreation.
     brush_.Reset(); target_.Reset();
     if (dc_) { if (old_bitmap_) SelectObject(dc_, old_bitmap_); DeleteDC(dc_); }
     if (bitmap_) DeleteObject(bitmap_);
@@ -775,6 +811,52 @@ void Overlay::draw_text(std::wstring_view value, D2D1_RECT_F rect, IDWriteTextFo
     }
     brush_->SetColor(color);
     target_->DrawText(value.data(),static_cast<UINT32>(value.size()),font,rect,brush_.Get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
+}
+
+// Shape a cell only when its value, geometry, font, or application identity changes.
+// Render both shadow and foreground with one immutable layout, without fading.
+void Overlay::draw_cached_row_text(const Row& row, unsigned column, std::wstring_view value,
+    D2D1_RECT_F rect, IDWriteTextFormat* font, bool highlight, std::optional<double> load) {
+    if (value.empty()) return;
+    auto found = row_text_cache_.find(row.pid);
+    if (found == row_text_cache_.end()) {
+        const std::size_t cache_capacity = std::clamp<std::size_t>(
+            static_cast<std::size_t>(options_.top)+8,24,100);
+        if (row_text_cache_.size() >= cache_capacity) {
+            const auto oldest = std::min_element(row_text_cache_.begin(),row_text_cache_.end(),
+                [](const auto& a,const auto& b){return a.second.used < b.second.used;});
+            if (oldest != row_text_cache_.end()) row_text_cache_.erase(oldest);
+        }
+        found = row_text_cache_.try_emplace(row.pid).first;
+    }
+    auto& entry = found->second;
+    if (entry.created != row.created) {
+        entry = CachedRowTextLayouts{};
+        entry.created = row.created;
+    }
+    entry.used = ++row_text_clock_;
+    auto& layout = entry.layouts[column];
+    auto& cached_text = entry.values[column];
+    const float width = std::max(1.0f,rect.right-rect.left);
+    const float height = std::max(1.0f,rect.bottom-rect.top);
+    if (!layout || cached_text != value || entry.widths[column] != width || entry.heights[column] != height) {
+        cached_text.assign(value.data(),value.size());
+        entry.widths[column] = width;
+        entry.heights[column] = height;
+        layout.Reset();
+        require_hr(write_factory_->CreateTextLayout(cached_text.c_str(),static_cast<UINT32>(cached_text.size()),
+            font,width,height,&layout),"Overlay cached row text");
+    }
+    brush_->SetColor(D2D1::ColorF(0,0,0,0.8f));
+    target_->DrawTextLayout(D2D1::Point2F(rect.left+1,rect.top+1),layout.Get(),brush_.Get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    D2D1_COLOR_F color = D2D1::ColorF(1,1,1,1);
+    if (row_colors_ && highlight && load && std::isfinite(*load) && *load >= 0.0) {
+        color = load_band(*load)==0 ? D2D1::ColorF(0.25f,0.92f,0.35f,1)
+            : load_band(*load)==1 ? D2D1::ColorF(1.0f,0.80f,0.13f,1)
+            : D2D1::ColorF(1.0f,0.22f,0.22f,1);
+    }
+    brush_->SetColor(color);
+    target_->DrawTextLayout(D2D1::Point2F(rect.left,rect.top),layout.Get(),brush_.Get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
 void Overlay::draw_network_text(const Row& row, D2D1_RECT_F rect, float opacity) {
@@ -1013,20 +1095,20 @@ void Overlay::paint(bool animation_only) {
             const float side=text_size()*1.3f, top=y+(row_height()-side)/2;
             target_->DrawBitmap(found->second.bitmap.Get(),D2D1::RectF(2,top,2+side,top+side),opacity);
         }
-        draw_text(row.name,cells[0],body_font_.Get(),false,false,std::nullopt,opacity);
-        const auto paint_values=[&](const Row& displayed,float alpha) {
+        draw_cached_row_text(row,0,row.name,cells[0],body_font_.Get());
+        const auto paint_values=[&](const Row& displayed) {
             const std::array<std::wstring_view,5> values{
                 displayed.cpu,displayed.ram,displayed.gpu,displayed.vram,displayed.network};
             for(std::size_t metric=0;metric<metric_names.size();++metric) {
                 if(!(active_metrics() & (1U<<metric))) continue;
-                if(metric==4U) draw_text(values[metric],cells[metric+1],number_font_.Get(),
-                    false,false,std::nullopt,alpha);
-                else draw_text(values[metric],cells[metric+1],number_font_.Get(),
-                    true,false,displayed.loads[metric],alpha);
+                if(metric==4U) draw_cached_row_text(row,static_cast<unsigned>(metric+1),
+                    values[metric],cells[metric+1],number_font_.Get());
+                else draw_cached_row_text(row,static_cast<unsigned>(metric+1),
+                    values[metric],cells[metric+1],number_font_.Get(),true,displayed.loads[metric]);
             }
         };
         // Resource readings update immediately; only vertical row position moves.
-        paint_values(row,1.0f);
+        paint_values(row);
     }
     if(partial_body)target_->PopAxisAlignedClip();
     target_->PopAxisAlignedClip();
@@ -1214,11 +1296,17 @@ LRESULT Overlay::message(UINT msg,WPARAM wp,LPARAM lp) {
             // Don't render sub-pixel movements. Ease-in/out otherwise wastes frames
             // while the rows have not visibly moved since their last paint.
             float largest_pixel_shift=0.0f;
-            if(!finished) for(std::size_t i=0;i<row_motion_.size();++i) {
-                const float travel=std::abs(static_cast<float>(i)-row_motion_[i].start_slot);
-                const float shift=travel*std::abs(progress-row_animation_last_painted_progress_)
-                    *row_height()*static_cast<float>(dpi_)/96.0f;
-                largest_pixel_shift=std::max(largest_pixel_shift,shift);
+            if(!finished) {
+                RECT viewport{};GetClientRect(hwnd_,&viewport);
+                const auto first_visible=std::min(scroll_,row_motion_.size());
+                const auto last_visible=std::min(row_motion_.size(),
+                    first_visible+visible_rows(dip(std::max<LONG>(0,viewport.bottom))));
+                for(std::size_t i=first_visible;i<last_visible;++i) {
+                    const float travel=std::abs(static_cast<float>(i)-row_motion_[i].start_slot);
+                    const float shift=travel*std::abs(progress-row_animation_last_painted_progress_)
+                        *row_height()*static_cast<float>(dpi_)/96.0f;
+                    largest_pixel_shift=std::max(largest_pixel_shift,shift);
+                }
             }
             if(finished) {
                 KillTimer(hwnd_,overlay_animation_timer);
@@ -1232,10 +1320,10 @@ LRESULT Overlay::message(UINT msg,WPARAM wp,LPARAM lp) {
                 const auto started=GetTickCount64();
                 paint(true);
                 const auto frame_cost=GetTickCount64()-started;
-                // Adaptive backpressure: do not queue more full bitmap uploads than
-                // the single-threaded software renderer can sustainably complete.
+                // Aim for about 30-40 FPS when affordable. Respect the observed
+                // cost of software rendering instead of doubling its delay.
                 row_animation_next_frame_tick_=GetTickCount64()+
-                    std::clamp<ULONGLONG>(frame_cost*2,40ULL,280ULL);
+                    std::clamp<ULONGLONG>(frame_cost+6ULL,25ULL,140ULL);
                 if(frame_cost>=45 && !row_animation_slow_frame_reported_) {
                     row_animation_slow_frame_reported_=true;
                     diagnostics::write(diagnostics::Level::warning,"overlay.animation_slow",

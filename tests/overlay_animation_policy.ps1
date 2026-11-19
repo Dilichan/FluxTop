@@ -7,7 +7,9 @@ $checks = [ordered]@{
     'Checkbox wired to settings' = ($code.Contains('animation_control, 22, 556, 536, 26') -and $code.Contains('case animation_control:'))
     'Focus row stays fixed in Auto' = $code.Contains('if(pinned) from=i==0?0.0f:std::max(1.0f,from);')
     'Header remains static' = $code.Contains('target_->PushAxisAlignedClip(D2D1::RectF(0,row_height()+1,table_width(),')
-    'Adaptive animation timer' = ($code.Contains('const UINT frame_ms=rows_.size()<=5?40U:rows_.size()<=15?60U:') -and $code.Contains('SetTimer(hwnd_,overlay_animation_timer,frame_ms,nullptr)') -and $code.Contains('order_changed'))
+    'Uniform animation timer' = ($code.Contains('constexpr UINT overlay_animation_timer_ms = 16;') -and $code.Contains('SetTimer(hwnd_,overlay_animation_timer,overlay_animation_timer_ms,nullptr)') -and $code.Contains('order_changed'))
+    'Bounded cached text layouts' = ($code.Contains('struct CachedRowTextLayouts {') -and $code.Contains('cache_capacity = std::clamp') -and $code.Contains('DrawTextLayout(') -and $code.Contains('row_text_cache_.clear();'))
+    'Cheap rendering of moving data' = ($code.Contains('draw_cached_row_text(row,0,row.name') -and $code.Contains('draw_cached_row_text(row,static_cast<unsigned>(metric+1)'))
     'No needless replacement animation' = ($code.Contains('row_animation_active_=has_motion;') -and $code.Contains('if(has_motion) {'))
     'Free old rows before animation' = $code.Contains('previous_rows_.clear();')
     'Pixel movement throttling' = ($code.Contains('largest_pixel_shift>=0.85f') -and $code.Contains('row_animation_last_painted_progress_'))
@@ -19,8 +21,9 @@ $checks = [ordered]@{
     'No numeric crossfade' = (-not $code.Contains('paint_values(*previous,1.0f-progress)'))
     'No icon fade' = $code.Contains('const float opacity=1.0f; // Never fade newly appearing rows or their icons.')
     'No transient burst blink in rows' = (-not $code.Contains('auto_metric_has_burst(p,static_cast<AutoMetric>(j+1))'))
-    'No metric pulse color' = ($code.Contains('for(std::size_t metric=0;metric<metric_names.size();++metric) {') -and $code.Contains('true,false,displayed.loads[metric],alpha);') -and -not $code.Contains('true,true,displayed.loads[metric],alpha)'))
-    'Duration uses the sampling interval' = $code.Contains('options_.interval_ms*0.65')
+    'No metric pulse color' = ($code.Contains('draw_cached_row_text(row,static_cast<unsigned>(metric+1)') -and -not $code.Contains('true,true,displayed.loads[metric],alpha)'))
+    'Duration follows movement, not sampling' = ($code.Contains('overlay_transition_duration_ms(max_slot_travel)') -and -not $code.Contains('options_.interval_ms*0.65'))
+    'Adaptive frame budget does not double paint cost' = ($code.Contains('frame_cost+6ULL,25ULL,140ULL') -and -not $code.Contains('frame_cost*2'))
 }
 $failed = @($checks.GetEnumerator() | Where-Object { -not $_.Value } | ForEach-Object {$_.Key})
 if ($failed.Count) { throw ('Overlay motion policy failed: ' + ($failed -join '; ')) }
