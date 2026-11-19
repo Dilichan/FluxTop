@@ -1,55 +1,59 @@
 #include "fluxtop/history.hpp"
+#include "fluxtop/history_math.hpp"
 #include "fluxtop/statistics_history.hpp"
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
 
 namespace {
-void require(bool ok,const char* why) {if(!ok) throw std::runtime_error(why);}
+void require(bool condition,const char* message){if(!condition)throw std::runtime_error(message);}
 }
-int main(int argc,char** argv) {
+int main(int argc,char** argv){
     try {
-        require(argc==2,"fixture directory is required");
-        const auto directory=std::filesystem::path(argv[1])/
-            ("stats-test-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-        std::filesystem::create_directories(directory);
-        const auto db=directory/L"statistics.db";
-        fluxtop::Process app,child,system;
-        app.pid=3301;app.creation_time=10;app.name="UserApp.exe";app.exe_path="C:\\Apps\\UserApp.exe";
-        app.cpu_percent=20;app.working_set=1'048'576;
-        child=app;child.pid=3302;child.creation_time=11;child.parent_pid=3301;
-        child.cpu_percent=10;
-        system.pid=3801;system.creation_time=20;system.name="svchost.exe";
-        system.exe_path="C:\\Windows\\System32\\svchost.exe";system.cpu_percent=70;
-        fluxtop::Snapshot sample;
-        sample.timestamp_ms=1'900'000'000'000LL;sample.interval_ms=1000;
-        sample.total_ram_capacity=16ULL*1024*1024*1024;
-        sample.total_gpu_memory_capacity=8ULL*1024*1024*1024;
-        sample.processes={app,child,system};
+        require(argc==2,"fixture directory required");
+        const auto root=std::filesystem::path(argv[1])/
+            ("stats-v10-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(root);
+        const auto path=root/L"statistics.db";
+        const auto base=fluxtop::history_floor(1'900'000'000'000LL,fluxtop::history_day_ms);
+        fluxtop::Process game,child,system;
+        game.pid=1001;game.creation_time=101;game.name="UserGame.exe";game.exe_path="C:\\Games\\UserGame.exe";
+        game.cpu_percent=12.0;game.working_set=12'000'000;
+        child=game;child.pid=1002;child.creation_time=102;child.parent_pid=1001;
+        system.pid=2001;system.creation_time=201;system.name="svchost.exe";
+        system.exe_path="C:\\Windows\\System32\\svchost.exe";system.cpu_percent=65.0;
         {
-            fluxtop::HistoryWriter writer(db);
-            for(int n=0;n<3;++n) {
-                sample.timestamp_ms+=1000;
+            fluxtop::HistoryWriter writer(path);
+            for(int i=0;i<4;++i){
+                fluxtop::Snapshot sample;
+                sample.timestamp_ms=base+10*fluxtop::history_hour_ms+i*1000;
+                sample.interval_ms=1000;
+                sample.total_ram_capacity=16ULL*1024*1024*1024;
+                sample.total_gpu_memory_capacity=8ULL*1024*1024*1024;
+                sample.processes={game,child,system};
                 writer.append(sample);
-                require(sample.history_error.empty(),"history writer rejected scored sample");
+                require(sample.history_error.empty(),"writer error");
             }
+            fluxtop::Snapshot future;
+            future.timestamp_ms=base+3*fluxtop::history_day_ms+1'000;
+            future.interval_ms=1000;
+            future.processes={game,child,system};
+            writer.append(future);
         }
-        const auto range=fluxtop::read_statistics(db,1'900'000'000'000LL,
-            1'900'000'010'000LL,10,false,{});
-        require(range.first_record_ms==1'900'000'001'000LL,"incorrect first historical sample");
-        require(range.scores_available,"AutoScore table missing");
-        require(range.uptime.size()==1,"system filter or app deduplication failed");
-        require(range.uptime[0].observed_seconds>=2.9 && range.uptime[0].observed_seconds<=3.1,
-            "multi-process uptime counted more than once per sample");
-        require(range.history.size()==1 && range.history[0].points.size()==3,
-            "historical AutoScore chart lacks persistent samples");
-        for(const auto& [time,score]:range.history[0].points)
-            require(time>0 && score>=0 && score<=100,"AutoScore is out of bounds");
-        const auto all=fluxtop::read_statistics(db,1'900'000'000'000LL,
-            1'900'000'010'000LL,10,true,{});
-        require(all.uptime.size()==2,"including system applications failed");
-        std::cout<<"Persistent AutoScore, uptime dedup, history filtering and optional system rows passed\n";
+        auto history=fluxtop::read_statistics(path,base,base+4*fluxtop::history_day_ms,10,false,{});
+        require(history.error.empty(),"reader returned error");
+        require(history.scores_available,"historical scores available");
+        require(history.uptime.size()==1,"system filter or app dedup failed");
+        require(std::abs(history.uptime[0].observed_seconds-5.0)<0.0001,"one uptime per application, not per PID");
+        require(history.history.size()==1 && !history.history[0].points.empty(),"historical graph survives compaction");
+        for(const auto& [at,score]:history.history[0].points)
+            require(at>=base && score>=0 && score<=100,"historical point range");
+        auto all=fluxtop::read_statistics(path,base,base+4*fluxtop::history_day_ms,10,true,{});
+        require(all.error.empty() && all.uptime.size()==2,"system filter toggle");
+        std::filesystem::remove_all(root);
+        std::cout<<"Compacted AutoScore graph, uptime, multi-process dedup, system toggle passed\n";
         return 0;
-    } catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
+    }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

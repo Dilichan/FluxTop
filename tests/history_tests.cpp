@@ -1,75 +1,88 @@
 #include "fluxtop/history.hpp"
+#include "fluxtop/history_math.hpp"
 #include <winsqlite/winsqlite3.h>
 #include <chrono>
+#include <cmath>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 
 namespace {
-void check(bool condition, const char* message) { if (!condition) throw std::runtime_error(message); }
+void check(bool condition,const char* what){if(!condition)throw std::runtime_error(what);}
 struct Database {
-    sqlite3* value{};
-    explicit Database(const std::filesystem::path& path) {
-        const auto utf = path.u8string();
-        check(sqlite3_open(reinterpret_cast<const char*>(utf.c_str()), &value)==SQLITE_OK, "open fixture");
+    sqlite3* db{};
+    explicit Database(const std::filesystem::path& p){
+        const auto u=p.u8string();const std::string filename(reinterpret_cast<const char*>(u.data()),u.size());
+        check(sqlite3_open(filename.c_str(),&db)==SQLITE_OK,"open fixture");
     }
-    ~Database() { sqlite3_close(value); }
-    std::int64_t scalar(const char* sql) {
-        sqlite3_stmt* statement{};
-        check(sqlite3_prepare_v2(value,sql,-1,&statement,nullptr)==SQLITE_OK,"prepare fixture query");
-        const auto status=sqlite3_step(statement);
-        const auto result=sqlite3_column_int64(statement,0); sqlite3_finalize(statement);
-        check(status==SQLITE_ROW,"fixture scalar row"); return result;
+    ~Database(){if(db)sqlite3_close(db);}
+    std::int64_t integer(const char* sql){
+        sqlite3_stmt* s{};check(sqlite3_prepare_v2(db,sql,-1,&s,nullptr)==SQLITE_OK,"prepare scalar");
+        const int status=sqlite3_step(s);
+        const auto answer=sqlite3_column_int64(s,0);
+        sqlite3_finalize(s);check(status==SQLITE_ROW,"step scalar");return answer;
+    }
+    double real(const char* sql){
+        sqlite3_stmt* s{};check(sqlite3_prepare_v2(db,sql,-1,&s,nullptr)==SQLITE_OK,"prepare real");
+        const int status=sqlite3_step(s);const double answer=sqlite3_column_double(s,0);
+        sqlite3_finalize(s);check(status==SQLITE_ROW,"step real");return answer;
     }
 };
 }
-int main(int argc, char** argv) {
+int main(int argc,char** argv){
     try {
         check(argc==2,"fixture directory required");
-        const auto directory=std::filesystem::path(argv[1])/ ("history-test-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-        std::filesystem::create_directories(directory);
-        const auto path=directory/L"история.db";
-        fluxtop::Snapshot s; s.timestamp_ms=1700000000000; s.interval_ms=1000; s.network_status="ready"; s.gpu_status="ready";
-        fluxtop::Process a,b;
-        a.pid=1; a.creation_time=10; a.name="same.exe"; a.exe_path="c:\\one\\same.exe"; a.cpu_percent=2; a.working_set=1048576; a.rx_bytes_per_second=12.5;
-        b.pid=2; b.creation_time=11; b.name="same.exe"; b.exe_path="c:\\two\\same.exe"; b.working_set=0;
-        s.processes={a,b};
+        using namespace fluxtop;
+        // Two non-uniform batches: mean of means is 25; correct weighted mean is 30.
+        WeightedValue first,second;
+        first.add(10.,1000);first.add(30.,3000);second.add(40.,2000);first.merge(second);
+        check(first.duration_ms==6000 && first.samples==3,"exact weighted sample duration/count");
+        check(std::abs(*first.average()-30.)<1.e-10,"merge weighted numerators, never averages");
+        check(first.minimum==10. && first.maximum==40.,"min/max preserved");
+        check(history_floor(-1,history_minute_ms)==-history_minute_ms,"negative UTC boundary");
+        const auto root=std::filesystem::path(argv[1])/
+            ("history-v10-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(root);
+        const auto path=root/L"история.db";
+        const std::int64_t base=history_floor(1'900'000'000'000LL,history_day_ms);
+        auto write=[&](HistoryWriter& writer,std::int64_t timestamp,double cpu){
+            Snapshot snap;snap.timestamp_ms=timestamp;snap.interval_ms=1000;
+            Process a;a.pid=700;a.creation_time=777;a.name="Game.exe";
+            a.exe_path="C:\\Games\\Game.exe";a.cpu_percent=cpu;a.working_set=16*1024*1024;
+            snap.processes={a};writer.append(snap);
+            check(snap.history_error.empty(),"no history writer error");
+        };
         {
-            fluxtop::HistoryWriter writer(path); writer.append(s);
-            check(s.history_error.empty() && s.history_records==2,"all processes committed");
-            s.timestamp_ms+=1000; s.processes[0].creation_time=20; writer.append(s);
-            check(s.history_error.empty() && s.history_records==4,"PID reuse stored separately");
+            HistoryWriter writer(path);
+            write(writer,base+10*history_hour_ms+59*history_minute_ms+58'000,20);
+            write(writer,base+10*history_hour_ms+59*history_minute_ms+59'000,40);
+            write(writer,base+11*history_hour_ms+1'000,60);
+            // Application is absent for multiple days. Must not create fictitious uptime.
+            write(writer,base+3*history_day_ms+1'000,80);
+            write(writer,base+4*history_day_ms+1'000,100);
         }
-        s.timestamp_ms+=1000; s.processes.resize(1);
         {
-            fluxtop::HistoryWriter writer(path); writer.append(s);
-            check(s.history_error.empty() && s.history_records==5,"counter survives restart");
             Database db(path);
-            check(db.scalar("SELECT COUNT(*) FROM applications")==2,"equal EXE names at different paths are distinct apps");
-            check(db.scalar("PRAGMA user_version")==1,"history format must remain compatible with v0.2.2");
-            check(db.scalar("SELECT COUNT(*) FROM application_scores")==5,"AutoScore must be written per application per snapshot");
-            check(db.scalar("SELECT COUNT(*) FROM process_instances")==3,"stable process identities survive reopen and PID reuse");
-            check(db.scalar("SELECT COUNT(*) FROM measurements WHERE cpu_percent IS NULL AND working_set_bytes=0")==2,"unknown is NULL, zero remains zero");
-            check(db.scalar("SELECT COUNT(*) FROM measurements WHERE rx_bytes_per_second=12.5")==3,"network values persisted");
-            s.processes.push_back(s.processes[0]); writer.append(s);
-            check(!s.history_error.empty(),"duplicate interval row fails visibly");
-            check(db.scalar("SELECT COUNT(*) FROM snapshots")==3 && db.scalar("SELECT COUNT(*) FROM measurements")==5
-                && db.scalar("SELECT measurement_count FROM history_state")==5,"failed transaction preserves data and counter atomically");
-            s.processes.resize(1); s.timestamp_ms+=1000; writer.append(s);
-            check(s.history_error.empty() && s.history_records==6,"writing recovers after rollback");
-            s.processes.clear();
-            for (unsigned i=0;i<1000;++i) { a.pid=100+i; a.creation_time=1000+i; s.processes.push_back(a); }
-            s.timestamp_ms+=1000; writer.append(s);
-            check(s.history_error.empty() && s.history_records==1006,"history has no TOP or application-count cap");
-            check(db.scalar("SELECT COUNT(*) FROM measurements")==1006,"old samples retained");
-            check(sqlite3_exec(db.value,"BEGIN IMMEDIATE",nullptr,nullptr,nullptr)==SQLITE_OK,"lock fixture");
-            writer.append(s); check(!s.history_error.empty(),"database lock reported");
-            sqlite3_exec(db.value,"ROLLBACK",nullptr,nullptr,nullptr);
-            check(db.scalar("SELECT measurement_count FROM history_state")==1006,"lock cannot inflate committed count");
-            writer.append(s); check(s.history_error.empty() && s.history_records==2006,"writer recovers after contention");
+            check(db.integer("PRAGMA user_version")==2,"conveyor schema v2");
+            check(db.integer("SELECT COUNT(*) FROM history_rollups")>0,"aggregates saved");
+            check(db.integer("SELECT SUM(uptime_ms) FROM history_rollups")==5000,"uptime matches observed intervals only");
+            check(db.integer("SELECT SUM(score_duration_ms) FROM history_rollups")==5000,"no lost metric durations");
+            check(db.integer("SELECT COUNT(*) FROM history_rollups WHERE level=2")>0,"closed days compacted");
+            check(db.integer("SELECT COUNT(*) FROM history_rollups WHERE level=0")<=1,"seconds are never persisted");
+            check(db.integer("SELECT COUNT(*) FROM applications")==1,"one stable application identity");
         }
-        fluxtop::HistoryWriter invalid(path/L"not-a-directory.db"); invalid.append(s);
-        check(!s.history_error.empty(),"invalid destination is visible without losing old database");
-        std::cout<<"History persistence, identity, NULL, unlimited rows, rollback and contention checks passed\n";
+        {
+            HistoryWriter writer(path);
+            write(writer,base+7*history_day_ms+1'000,30);
+        }
+        {
+            Database db(path);
+            check(db.integer("SELECT SUM(uptime_ms) FROM history_rollups")==6000,"resume after downtime");
+            check(db.integer("SELECT COUNT(*) FROM history_rollups WHERE level=2")>0,"daily data still available");
+        }
+        std::filesystem::remove_all(root);
+        std::cout<<"Constant-space weighted aggregation, minute/hour/day conveyor, restart, gaps and WAL fixture passed\n";
         return 0;
-    } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
+    }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

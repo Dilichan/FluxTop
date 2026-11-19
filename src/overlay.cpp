@@ -525,7 +525,7 @@ void Overlay::client_stats() {
             + L"   ·   GPU: " + wide(s.gpu_status) + L"   ·   Время сбора: " + decimal(s.collection_ms) + L" мс";
         info += L"\r\nИконок в памяти: " + std::to_wstring(icons_ ? icons_->stats().entries : 0) + L" / " + std::to_wstring(icons_ ? icons_->stats().capacity : std::clamp<std::size_t>(static_cast<std::size_t>(options_.top)+16,32,128));
         info += L"   ·   Сеть: " + wide(s.network_status);
-        info += L"\r\nЗаписей показателей в БД: " + (s.history_records ? std::to_wstring(*s.history_records) : L"—");
+        info += L"\r\nЗаписано агрегатов за сеанс: " + (s.history_records ? std::to_wstring(*s.history_records) : L"—");
         if (!s.history_error.empty()) info += L"\r\nОшибка записи истории: " + wide(s.history_error);
     } else info = L"Ожидание первого снимка…";
     SetDlgItemTextW(client_, stats_control, info.c_str());
