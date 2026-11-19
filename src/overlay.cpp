@@ -33,8 +33,8 @@ constexpr int toggle_hotkey = 1, client_hotkey = 2;
 enum Control : UINT { open_client = 100, toggle_table, quit_app, top_label, top_control, sort_control, font_control,
     alpha_control, visible_control, move_control, icons_control, stats_control, startup_control,
     alpha_label, interval_control, summary_control, header_colors_control, row_colors_control, animation_control, metric_control = 200, tab_control = 450 };
-constexpr unsigned all_metrics = 63; // All six visible columns, including optional FPS.
-constexpr unsigned default_metrics = 31; // FPS is opt-in to keep idle overhead low.
+constexpr unsigned all_metrics = 31; // Five resource columns; FPS is in the application heading.
+constexpr unsigned default_metrics = 31;
 constexpr int load_band(double x) { return x < 50.0 ? 0 : x < 70.0 ? 1 : 2; }
 constexpr int temperature_band(double x) { return x < 65.0 ? 0 : x <= 80.0 ? 1 : 2; }
 static_assert(load_band(49.9) == 0 && load_band(50.0) == 1 && load_band(70.0) == 2);
@@ -103,7 +103,7 @@ std::filesystem::path local_file(const wchar_t* override_name, const wchar_t* fi
 struct Row {
     std::uint32_t pid{};
     std::optional<std::uint64_t> created;
-    std::wstring name, cpu, ram, gpu, vram, network, fps;
+    std::wstring name, cpu, ram, gpu, vram, network;
     // Each visible numeric cell has its own utilization and burst color.
     std::array<std::optional<double>,4> loads{}; // CPU / RAM / GPU / GPU RAM
     std::array<bool,6> bursts{};                 // CPU / RAM / GPU / GPU RAM / Rx / Tx
@@ -149,7 +149,7 @@ private:
     void draw_header_metric(unsigned column, const std::wstring& reading, std::optional<double> load,
         std::optional<double> temperature, D2D1_RECT_F rect, bool cpu_board = false);
     void draw_network_text(const Row& row, D2D1_RECT_F rect, float opacity = 1.0f);
-    std::array<D2D1_RECT_F,7> columns(float y, float height) const;
+    std::array<D2D1_RECT_F,6> columns(float y, float height) const;
     float text_size() const { return static_cast<float>(options_.font_size); }
     float row_height() const { return text_size() * 1.6f; }
     bool summary_only() const { return summary_ || !metrics_; }
@@ -169,7 +169,9 @@ private:
     std::unique_ptr<StatisticsPage> statistics_;
     HICON icon_{}, large_icon_{};
     HWINEVENTHOOK foreground_hook_{};
-    DWORD focused_pid_{};
+    DWORD focused_pid_{}; // Auto-ranked pinned application.
+    DWORD foreground_pid_{}; // Actual active window PID (any sorting mode).
+    std::optional<double> foreground_fps_; // Only the currently focused PID.
     HFONT client_font_{};
     UINT dpi_ = 96, client_dpi_ = 96, taskbar_created_{};
     bool tray_ = false, toggle_key_ = false, client_key_ = false, visible_ = true;
@@ -244,6 +246,8 @@ void Overlay::load_settings() {
     const auto saved_metrics = static_cast<unsigned>(read(L"metrics", default_metrics));
     metrics_ = read(L"layout_version", 0) >= 3 ? saved_metrics & all_metrics
         : (saved_metrics & 15U) | ((saved_metrics & 48U) ? 16U : 0U);
+    // If the user previously enabled only the removed FPS checkbox, restore the standard metric set.
+    if (metrics_ == 0 && (saved_metrics & (1U<<5))) metrics_ = default_metrics;
     summary_ = read(L"summary_only", 0) != 0;
     header_colors_ = read(L"header_colors", 1) != 0;
     row_colors_ = read(L"row_colors", 1) != 0;
@@ -424,10 +428,9 @@ void Overlay::init_client() {
     SendMessageW(interval, EM_SETLIMITTEXT, 2, 0);
     control(L"STATIC", L"Показывать показатели:", 0, 0, 22, 422, 536, 24);
     for (unsigned i=0;i<metric_names.size();++i) {
-        const unsigned metric=metric_visual_to_storage[i];
-        const auto box = control(L"BUTTON", metric_names[metric], BS_AUTOCHECKBOX | WS_TABSTOP,
+        const auto box = control(L"BUTTON", metric_names[i], BS_AUTOCHECKBOX | WS_TABSTOP,
             metric_control+i, 22+static_cast<int>(i)*104, 451, 98, 26);
-        SendMessageW(box, BM_SETCHECK, (metrics_ & (1U<<metric)) ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(box, BM_SETCHECK, (metrics_ & (1U<<i)) ? BST_CHECKED : BST_UNCHECKED, 0);
     }
     const auto summary = control(L"BUTTON", L"Только общие показатели (без списка приложений)", BS_AUTOCHECKBOX | WS_TABSTOP,
         summary_control, 22, 487, 536, 26);
@@ -494,9 +497,8 @@ void Overlay::apply_client() {
     SetDlgItemTextW(client_, top_label, (L"Количество приложений: " + std::to_wstring(options_.top) + L" / 100").c_str());
     metrics_ = 0;
     for (unsigned i=0;i<metric_names.size();++i) {
-        const unsigned metric=metric_visual_to_storage[i];
         if (SendDlgItemMessageW(client_,metric_control+i,BM_GETCHECK,0,0)==BST_CHECKED)
-            metrics_ |= 1U<<metric;
+            metrics_ |= 1U<<i;
     }
     summary_ = SendDlgItemMessageW(client_,summary_control,BM_GETCHECK,0,0)==BST_CHECKED;
     header_colors_ = SendDlgItemMessageW(client_,header_colors_control,BM_GETCHECK,0,0)==BST_CHECKED;
@@ -585,15 +587,21 @@ void Overlay::update_view() {
     display.reserve(grouped_processes_.size());
     for (const auto& process : grouped_processes_) display.push_back(&process);
     sort_process_refs(display, options_.sort, active_metrics());
-    focused_pid_ = 0;
-    if (options_.sort == Sort::automatic) {
-        DWORD foreground_pid{};
-        if (const HWND foreground_window = GetForegroundWindow())
-            GetWindowThreadProcessId(foreground_window,&foreground_pid);
-        // A missing or unsampled process must not displace the normal ranking.
-        if (foreground_pid && prioritize_focused_process(display,foreground_pid))
-            focused_pid_ = display.front()->pid; // May be a child PID inside a grouped family.
+    foreground_pid_ = 0;
+    if (const HWND active_window = GetForegroundWindow())
+        GetWindowThreadProcessId(active_window, &foreground_pid_);
+    foreground_fps_.reset();
+    // The FPS reading belongs to this exact PID, never to a grouped app or old foreground.
+    for (const auto& process : s.processes) {
+        if (process.pid != foreground_pid_) continue;
+        if (process.presented_fps && std::isfinite(*process.presented_fps))
+            foreground_fps_ = process.presented_fps;
+        break;
     }
+    focused_pid_ = 0;
+    if (options_.sort == Sort::automatic && foreground_pid_ &&
+        prioritize_focused_process(display,foreground_pid_))
+        focused_pid_ = display.front()->pid; // May be a child PID inside a grouped family.
     std::vector<Row> next;
     for (std::size_t i = 0; !summary_only() && i < std::min(display.size(), static_cast<std::size_t>(options_.top)); ++i) {
         const auto& p = *display[i];
@@ -604,27 +612,13 @@ void Overlay::update_view() {
                 s.total_ram_capacity,s.total_gpu_memory_capacity);
         // No blink/flash effects in the overlay. AutoScore still uses burst data for ranking.
         std::array<bool,6> bursts{};
-        std::wstring fps=L"—";
-        if (p.presented_fps && std::isfinite(*p.presented_fps))
-            fps=std::to_wstring(static_cast<unsigned>(std::lround(*p.presented_fps)));
         next.push_back({p.pid,p.creation_time,std::move(name),percent(p.cpu_percent),
             memory(p.working_set),percent(p.gpu_percent),memory(p.dedicated_gpu_bytes),
-            network_rate(p.rx_bytes_per_second,p.tx_bytes_per_second),std::move(fps),loads,bursts});    }
-    // Track only the currently displayed PID families. FPS is optional and off by default.
-    std::vector<std::uint32_t> fps_targets;
-    if (visible_ && !summary_only() && (metrics_ & (1U<<5))) {
-        fps_targets.reserve(128);
-        const auto visible_count=std::min(display.size(),static_cast<std::size_t>(options_.top));
-        // First track one PID per visible application so a large svchost family
-        // cannot monopolize the entire 128-PID budget.
-        for (std::size_t i=0;i<visible_count;++i) fps_targets.push_back(display[i]->pid);
-        for (std::size_t i=0;i<visible_count && fps_targets.size()<128;++i) {
-            for (const auto pid : display[i]->member_pids) {
-                if (fps_targets.size()==128) break;
-                if (pid!=display[i]->pid) fps_targets.push_back(pid);
-            }
-        }
+            network_rate(p.rx_bytes_per_second,p.tx_bytes_per_second),loads,bursts});
     }
+    // A single PresentMon target: the actual foreground window, regardless of table sorting.
+    std::vector<std::uint32_t> fps_targets;
+    if (visible_ && !summary_only() && foreground_pid_) fps_targets.push_back(foreground_pid_);
     worker_.set_fps_targets(std::move(fps_targets));
     if (visible_ && show_icons_ && !summary_only()) {
         if (!icons_) icons_ = std::make_unique<AppIconCache>(local_file(L"FLUXTOP_ICON_DB", L"icons.db"), [this] {
@@ -832,9 +826,9 @@ void Overlay::draw_header_metric(unsigned column, const std::wstring& reading, s
         tint(temp_from,temp_length,color);
     }
 }
-std::array<D2D1_RECT_F,7> Overlay::columns(float y, float height) const {
+std::array<D2D1_RECT_F,6> Overlay::columns(float y, float height) const {
     const auto layout = calculate_overlay_columns(text_size(), active_metrics(), summary_only(), show_icons_);
-    std::array<D2D1_RECT_F,7> rects{};
+    std::array<D2D1_RECT_F,6> rects{};
     for (std::size_t index = 0; index < rects.size(); ++index) {
         rects[index] = D2D1::RectF(layout.left[index], y, layout.right[index], y + height);
     }
@@ -866,7 +860,7 @@ void Overlay::paint(bool animation_only) {
     const auto geometry=calculate_overlay_columns(text_size(),active_metrics(),summary_only(),show_icons_);
     const float height=row_height();
     const auto row_cells=[&](float y) {
-        std::array<D2D1_RECT_F,7> cells{}; // application + six metrics; index 6 is FPS/RxTx
+        std::array<D2D1_RECT_F,6> cells{}; // Application + five resource metrics.
         for(std::size_t column=0;column<cells.size();++column)
             cells[column]=D2D1::RectF(geometry.left[column],y,geometry.right[column],y+height);
         return cells;
@@ -874,7 +868,13 @@ void Overlay::paint(bool animation_only) {
     if(!animation_only) {
     auto header = row_cells(1);
     header[0].left = 2; // The heading starts at the table edge, above the icon column.
-    if (!summary_only()) draw_text(L"Приложение",header[0],body_font_.Get());
+    if (!summary_only()) {
+        std::wstring title = L"Приложение  FPS: ";
+        if (foreground_fps_)
+            title += std::to_wstring(static_cast<unsigned>(std::lround(*foreground_fps_)));
+        else title += L"—"; // Never guess frames when the source is unavailable.
+        draw_text(title,header[0],body_font_.Get());
+    }
     std::array<std::wstring,5> totals{L"—",L"—",L"—",L"—",L"— / —"};
     if (snapshot_) {
         const auto& s = *snapshot_;
@@ -900,10 +900,9 @@ void Overlay::paint(bool animation_only) {
         gpu_temperature = s.gpu_temperature_c;
     }
     for (std::size_t i=1;i<header.size();++i) {
-        const unsigned metric=metric_visual_to_storage[i-1];
+        const unsigned metric=static_cast<unsigned>(i-1);
         if (!(active_metrics() & (1U<<metric))) continue;
-        if (metric==5U) draw_text(L"FPS",header[i],number_font_.Get());
-        else draw_header_metric(metric,totals[metric],load[metric],
+        draw_header_metric(metric,totals[metric],load[metric],
             metric==0U ? cpu_temperature : metric==2U ? gpu_temperature : std::optional<double>{},header[i],
             metric==0U && snapshot_ && snapshot_->cpu_temperature_board);
     }
@@ -957,14 +956,13 @@ void Overlay::paint(bool animation_only) {
         }
         draw_text(row.name,cells[0],body_font_.Get(),false,false,std::nullopt,opacity);
         const auto paint_values=[&](const Row& displayed,float alpha) {
-            const std::array<std::wstring_view,6> values{
-                displayed.cpu,displayed.ram,displayed.gpu,displayed.vram,displayed.network,displayed.fps};
-            for(std::size_t position=0;position<metric_names.size();++position) {
-                const unsigned metric=metric_visual_to_storage[position];
+            const std::array<std::wstring_view,5> values{
+                displayed.cpu,displayed.ram,displayed.gpu,displayed.vram,displayed.network};
+            for(std::size_t metric=0;metric<metric_names.size();++metric) {
                 if(!(active_metrics() & (1U<<metric))) continue;
-                if(metric==4U || metric==5U) draw_text(values[metric],cells[position+1],number_font_.Get(),
+                if(metric==4U) draw_text(values[metric],cells[metric+1],number_font_.Get(),
                     false,false,std::nullopt,alpha);
-                else draw_text(values[metric],cells[position+1],number_font_.Get(),
+                else draw_text(values[metric],cells[metric+1],number_font_.Get(),
                     true,false,displayed.loads[metric],alpha);
             }
         };
@@ -1171,7 +1169,10 @@ LRESULT Overlay::message(UINT msg,WPARAM wp,LPARAM lp) {
         if (lp==WM_LBUTTONDBLCLK || lp==NIN_KEYSELECT) show_client(); else if (lp==WM_RBUTTONUP || lp==WM_CONTEXTMENU) tray_menu(); return 0;
     case sample_message: receive(); return 0;
     case foreground_update_message:
-        if (visible_ && options_.sort == Sort::automatic) update_view();
+        if (visible_) {
+            update_view(); // Update FPS target and header in every sorting mode.
+            InvalidateRect(hwnd_,nullptr,FALSE);
+        }
         return 0;
     case icon_message: icon_posted_=false; if (visible_) InvalidateRect(hwnd_,nullptr,FALSE); client_stats(); return 0;
     case WM_CLOSE: DestroyWindow(hwnd_); return 0;

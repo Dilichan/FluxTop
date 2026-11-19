@@ -7,7 +7,7 @@ namespace fluxtop {
 
 struct OverlayLayoutConfig {
     // Width of the application-name column, in font-size units.
-    float application_width = 10.8f;
+    float application_width = 10.8f; // Wider heading accommodates foreground FPS.
     // Space reserved for the application icon, in font-size units.
     float icon_width = 1.7f;
     // Gap between adjacent VISIBLE columns, in font-size units.
@@ -15,23 +15,20 @@ struct OverlayLayoutConfig {
     // Left/right padding, in device-independent pixels (DIP), not font units.
     float left_padding = 2.0f;
     float right_padding = 2.0f;
-    // Display order: FPS, CPU, RAM, GPU, GPU RAM, Rx/Tx. Units: font-size multipliers.
-    std::array<float, 6> metric_widths{5.5f, 8.0f, 5.8f, 8.0f, 9.0f, 12.0f};
+    // CPU, RAM, GPU, GPU RAM, Rx/Tx, in font-size units.
+    std::array<float, 5> metric_widths{8.0f, 5.8f, 8.0f, 9.0f, 12.0f};
 };
 
 // THE SINGLE PLACE TO CHANGE OVERLAY WIDTHS AND GAPS.
 inline constexpr OverlayLayoutConfig overlay_layout{};
-// Persistent setting bits and AutoScore bits remain in historical CPU-first order.
-// Map each visible position to that stable internal metric index.
-inline constexpr std::array<const wchar_t*, 6> metric_names{
-    L"CPU", L"RAM", L"GPU", L"GPU RAM", L"Rx/Tx", L"FPS"
+inline constexpr std::array<const wchar_t*, 5> metric_names{
+    L"CPU", L"RAM", L"GPU", L"GPU RAM", L"Rx/Tx"
 };
-inline constexpr std::array<unsigned, 6> metric_visual_to_storage{5U, 0U, 1U, 2U, 3U, 4U};
 
 struct OverlayColumnPositions {
-    // 0 = application, 1..6 = visible metric slots in metric_visual_to_storage order.
-    std::array<float, 7> left{};
-    std::array<float, 7> right{};
+    // 0 = application, 1..5 = five resource metrics.
+    std::array<float, 6> left{};
+    std::array<float, 6> right{};
     float total_width{};
 };
 
@@ -50,7 +47,7 @@ constexpr OverlayColumnPositions calculate_overlay_columns(
         previous_visible = true;
     }
     for (unsigned index = 0; index < overlay_layout.metric_widths.size(); ++index) {
-        if ((visible_metrics & (1U << metric_visual_to_storage[index])) == 0) continue;
+        if ((visible_metrics & (1U << index)) == 0) continue;
         if (previous_visible) cursor += overlay_layout.column_gap * font_size;
         result.left[index + 1] = cursor;
         cursor += overlay_layout.metric_widths[index] * font_size;
@@ -61,7 +58,7 @@ constexpr OverlayColumnPositions calculate_overlay_columns(
     return result;
 }
 
-static_assert(metric_visual_to_storage[0] == 5U && metric_visual_to_storage[1] == 0U);
+static_assert(metric_names.size() == overlay_layout.metric_widths.size());
 static_assert(overlay_layout.metric_widths[0] > 0.0f);
 static_assert(overlay_layout.metric_widths[3] > 0.0f);
 static_assert(calculate_overlay_columns(16.0f, 31U, false, true).total_width >

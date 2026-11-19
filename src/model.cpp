@@ -283,7 +283,6 @@ std::vector<Process> aggregate_application_processes(const std::vector<Process>&
         add_bytes(combined.working_set,part.working_set);
         add_bytes(combined.private_bytes,part.private_bytes);
         max_gpu(combined.gpu_percent,part.gpu_percent); // Never sum independent WDDM engines.
-        max_gpu(combined.presented_fps,part.presented_fps); // Never sum unrelated FPS streams.
         add_bytes(combined.dedicated_gpu_bytes,part.dedicated_gpu_bytes);
         add_positive(combined.rx_bytes_per_second,part.rx_bytes_per_second);
         add_positive(combined.tx_bytes_per_second,part.tx_bytes_per_second);

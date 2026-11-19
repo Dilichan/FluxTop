@@ -7,6 +7,7 @@
 #include <cwchar>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 namespace fluxtop {
 namespace {
@@ -60,7 +61,18 @@ bool FpsCollector::connect() noexcept {
     const ULONGLONG tick = GetTickCount64();
     if (tick < next_connect_attempt_) return false;
     next_connect_attempt_ = tick + 30000;
-    const auto dll = installed_presentmon_dll();
+    auto dll = installed_presentmon_dll();
+    if (dll.empty()) {
+        // Official optional SDK loader, installed with PresentMon Service.
+        wchar_t program_files[32768]{};
+        const DWORD length=GetEnvironmentVariableW(L"ProgramFiles",program_files,32768);
+        if (length && length < 32768) {
+            std::wstring candidate(program_files,length);
+            candidate += L"\\Intel\\PresentMon\\SDK\\PresentMonAPI2Loader.dll";
+            if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES)
+                dll=std::move(candidate);
+        }
+    }
     if (dll.empty()) return false;
     library_ = LoadLibraryExW(dll.c_str(), nullptr,
         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
@@ -86,7 +98,7 @@ bool FpsCollector::connect() noexcept {
 void FpsCollector::collect(std::vector<Process>& processes,
     const std::vector<std::uint32_t>& targets) noexcept {
     if (targets.empty()) {
-        // No FPS column visible: immediately stop service tracking, keep lazy connection.
+        // No foreground target: stop tracking without polling PresentMon.
         if (session_ && stop_) for (const auto& [pid, created] : tracked_) {
             (void)created;
             stop_(session_, pid);
@@ -100,7 +112,7 @@ void FpsCollector::collect(std::vector<Process>& processes,
         processes_by_pid.reserve(processes.size());
         for (auto& row : processes) processes_by_pid.emplace(row.pid, &row);
 
-        constexpr std::size_t max_tracked_pids = 128;
+        constexpr std::size_t max_tracked_pids = 1; // Only the foreground PID.
         std::unordered_map<std::uint32_t, Process*> desired;
         desired.reserve(std::min(targets.size(), max_tracked_pids));
         for (const auto pid : targets) {
@@ -133,7 +145,8 @@ void FpsCollector::collect(std::vector<Process>& processes,
                 if (const auto failed = retry_after_.find(pid);
                     failed != retry_after_.end() && tick < failed->second) continue;
                 const int status = start_(session_, pid);
-                if (status != 0 && status != 8) {
+                // PresentMon API: 7=ALREADY_TRACKING; 8=UNABLE_TO_CREATE_NSM (error).
+                if (status != 0 && status != 7) {
                     retry_after_[pid] = tick + 15000;
                     continue;
                 }
@@ -149,7 +162,7 @@ void FpsCollector::collect(std::vector<Process>& processes,
                     next_connect_attempt_ = GetTickCount64() + 30000;
                     return;
                 }
-                if (status == 7) { // Invalid/recycled PID; stop tracking it.
+                if (status == 6) { // INVALID_PID: stop tracking a recycled PID.
                     stop_(session_, pid);
                     tracked_.erase(pid);
                     retry_after_[pid] = tick + 15000;
