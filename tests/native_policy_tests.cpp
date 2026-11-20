@@ -95,6 +95,24 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         const auto page=read(root/"src/statistics_page.cpp");
         const auto header=read(root/"include/fluxtop/statistics_page.hpp");
         const auto popup=read(root/"src/statistics_popout.inc");
+        const auto metric=read(root/"include/fluxtop/metric_text.hpp");
+        const auto ini=read(root/"include/fluxtop/overlay_ini.hpp");
+        const auto win=read(root/"include/fluxtop/windows.hpp");
+        need(metric,{"std::wstring decimal(double value,int precision=1)",
+            "std::wstring percent(std::optional<double> value)",
+            "std::wstring memory(std::optional<std::uint64_t> bytes)",
+            "std::wstring network_rate(std::optional<double> rx,std::optional<double> tx)"});
+        need(ini,{"ini_overlay_read(","ini_overlay_read_int(","ini_overlay_write("});
+        need(win,{"utf8_to_wide(","register_window_class("});
+        need(page,{"popup_auto_scale_keys", "metric_text::decimal(value)",
+            "metric_text::network_rate(rx,tx)","ini_overlay_read(settings_", "ini_overlay_write(settings_"});
+        need(overlay,{"using metric_text::decimal;","using metric_text::memory;",
+            "using metric_text::network_rate;","utf8_to_wide(value,true)",
+            "ini_overlay_read_int(settings_", "ini_overlay_write(settings_"});
+        need(popup,{"popup_auto_scale_keys","ini_overlay_read(settings_", "ini_overlay_write(page->settings_"});
+        absent(page,{"GetPrivateProfileIntW(","WritePrivateProfileStringW(","RegisterClassExW("});
+        absent(overlay,{"GetPrivateProfileIntW(","WritePrivateProfileStringW(","RegisterClassExW("});
+        absent(popup,{"GetPrivateProfileIntW(","WritePrivateProfileStringW(","RegisterClassExW("});
         need(header,{"PopupState","target_auto_zoom_","std::array<PopupState,6> popups_",
             "std::array<std::optional<double>,5> values", "fill_enabled_", "smooth_system_end_",
             "frozen_views_", "toggle_section_pause()", "pause_toggle_"});
@@ -130,7 +148,8 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         need(page,{"FluxTop.SystemDashboard.Stage1","system_points_.push_back(point)",
             "stats_selected_section","case WM_LBUTTONUP:","system_popout_id"});
         need(popup,{"popup.kind>=2","draw_system_graph(dc,graph,popup.kind-2",
-            "stats_popup_auto_cpu"});
+            "popup_auto_scale_keys"});
+        need(page,{"popup_auto_scale_keys","stats_popup_auto_cpu"});
         need(page,{"popout_live_id","popout_history_id","rebuild_live_series()",
             "animation_duration_ms_","GetTickCount64()-animation_started_","IntersectClipRect",
             "stats_limit_id","stats_history_top","stats_uptime_top","animate_message",
@@ -151,7 +170,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "draw_metric_tooltip(dc,bounds,source[hover_index_],hover_value_,hover_timestamp_)",
             "hover_timestamp_=sample_at","time.wSecond","local_sample_label(sample_at)",
             "tip_height=MulDiv(198","current_readings_.emplace(color_key(identity)",
-            "stat_decimal(*bytes*8.0/1000000.0)","L\" Mbps\"",
+            "metric_text::network_rate(rx,tx)","L\" Mbps\"",
             "double eased_axis(double current,double target,double elapsed_ms)",
             "popup.cached_auto_zoom=eased_axis(","const bool axis_animating=advance_axes(elapsed);",
             "const bool viewport_animating=advance_time_view(elapsed);",

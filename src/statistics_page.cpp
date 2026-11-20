@@ -2,6 +2,8 @@
 #include "fluxtop/statistics_page.hpp"
 #include "fluxtop/statistics_axis.hpp"
 #include "fluxtop/windows.hpp"
+#include "fluxtop/metric_text.hpp"
+#include "fluxtop/overlay_ini.hpp"
 #include <commctrl.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -32,6 +34,9 @@ constexpr int page_width=1160, page_height=860;
 constexpr int auto_live_id=1201, auto_history_id=1202, popup_auto_id=1203, system_period_id=1210, system_auto_id=1211, system_popout_id=1212;
 constexpr RECT one_minute{310,171,1124,665};
 constexpr RECT history_chart{310,171,1124,665};
+constexpr std::array<const wchar_t*,6> popup_auto_scale_keys{{
+    L"stats_popup_auto_live",L"stats_popup_auto_history",L"stats_popup_auto_cpu",
+    L"stats_popup_auto_ram",L"stats_popup_auto_network",L"stats_popup_auto_gpu"}};
 // Vertical grid markers are tied to UTC timestamps, not fixed chart columns.
 // Advancing the live time window moves the grid and its series by the same pixels.
 void draw_time_grid(HDC dc,const RECT& area,std::int64_t from,std::int64_t to,int columns) {
@@ -128,34 +133,15 @@ double auto_vertical_zoom(const std::vector<StatisticsApplication>& apps,
     std::int64_t from,std::int64_t to) {
     return statistics_auto_vertical_zoom(apps,from,to);
 }
-// Display the same units as the overlay; unavailable readings remain unknown.
-std::wstring stat_decimal(double value) {
-    wchar_t buffer[64]{};
-    swprintf_s(buffer,L"%.1f",value);
-    return buffer;
-}
-std::wstring stat_percent(std::optional<double> value) {
-    return value && std::isfinite(*value) ? stat_decimal(*value)+L"%" : L"—";
-}
-std::wstring stat_memory(std::optional<std::uint64_t> bytes) {
-    if(!bytes) return L"—";
-    const double mib=static_cast<double>(*bytes)/1048576.0;
-    return mib>=1024.0?stat_decimal(mib/1024.0)+L" GiB":stat_decimal(mib)+L" MiB";
-}
+// Compatibility names for existing statistics call sites; formatting lives in
+// metric_text.hpp and UTF-8 conversion in windows.hpp.
+std::wstring stat_decimal(double value) {return metric_text::decimal(value);}
+std::wstring stat_percent(std::optional<double> value) {return metric_text::percent(value);}
+std::wstring stat_memory(std::optional<std::uint64_t> value) {return metric_text::memory(value);}
 std::wstring stat_network(std::optional<double> rx,std::optional<double> tx) {
-    const auto format=[](std::optional<double> bytes)->std::wstring {
-        return bytes && std::isfinite(*bytes)?stat_decimal(*bytes*8.0/1000000.0):L"—";
-    };
-    return format(rx)+L" / "+format(tx)+L" Mbps";
+    return metric_text::network_rate(rx,tx);
 }
-std::wstring stat_wide(std::string_view text) {
-    if(text.empty()) return {};
-    const int count=MultiByteToWideChar(CP_UTF8,0,text.data(),static_cast<int>(text.size()),nullptr,0);
-    if(count<=0) return L"?";
-    std::wstring result(static_cast<std::size_t>(count),L'\0');
-    MultiByteToWideChar(CP_UTF8,0,text.data(),static_cast<int>(text.size()),result.data(),count);
-    return result;
-}
+std::wstring stat_wide(std::string_view text) {return utf8_to_wide(text);}
 // Asymmetric easing: expand to fit new peaks quickly, contract slowly after they leave.
 double eased_axis(double current,double target,double elapsed_ms) {
     if(!std::isfinite(target)) return current;
@@ -194,25 +180,22 @@ StatisticsPage::StatisticsPage(HWND parent,std::filesystem::path database,
     :database_(std::move(database)),settings_(std::move(settings_path)) {
     // The live graph uses the SAME limit as overlay rows, across tabs.
     limit_=std::clamp(limit,1U,100U);
-    history_limit_=static_cast<unsigned>(std::clamp(GetPrivateProfileIntW(L"overlay",L"stats_history_top",
-        static_cast<int>(limit_),settings_.c_str()),1U,100U));
-    uptime_limit_=static_cast<unsigned>(std::clamp(GetPrivateProfileIntW(L"overlay",L"stats_uptime_top",
-        static_cast<int>(limit_),settings_.c_str()),1U,100U));
-    system_=GetPrivateProfileIntW(L"overlay",L"stats_show_system",0,settings_.c_str())!=0;
-    auto_scale_[0]=GetPrivateProfileIntW(L"overlay",L"stats_auto_live",1,settings_.c_str())!=0;
-    auto_scale_[1]=GetPrivateProfileIntW(L"overlay",L"stats_auto_history",1,settings_.c_str())!=0;
-    selected_section_=static_cast<unsigned>(std::clamp(GetPrivateProfileIntW(L"overlay",L"stats_selected_section",0,settings_.c_str()),0U,6U));
-    system_range_=static_cast<unsigned>(std::clamp(GetPrivateProfileIntW(L"overlay",L"stats_system_range",0,settings_.c_str()),0U,2U));
-    system_autoscale_=GetPrivateProfileIntW(L"overlay",L"stats_system_auto",1,settings_.c_str())!=0;
-    fill_enabled_=GetPrivateProfileIntW(L"overlay",L"stats_chart_fill",1,settings_.c_str())!=0;
+    history_limit_=std::clamp(ini_overlay_read(settings_,L"stats_history_top",limit_),1U,100U);
+    uptime_limit_=std::clamp(ini_overlay_read(settings_,L"stats_uptime_top",limit_),1U,100U);
+    system_=ini_overlay_read(settings_,L"stats_show_system",0)!=0;
+    auto_scale_[0]=ini_overlay_read(settings_,L"stats_auto_live",1)!=0;
+    auto_scale_[1]=ini_overlay_read(settings_,L"stats_auto_history",1)!=0;
+    selected_section_=std::clamp(ini_overlay_read(settings_,L"stats_selected_section",0),0U,6U);
+    system_range_=std::clamp(ini_overlay_read(settings_,L"stats_system_range",0),0U,2U);
+    system_autoscale_=ini_overlay_read(settings_,L"stats_system_auto",1)!=0;
+    fill_enabled_=ini_overlay_read(settings_,L"stats_chart_fill",1)!=0;
     for(unsigned kind=0;kind<popups_.size();++kind) {
         popups_[kind].owner=this;popups_[kind].kind=kind;
     }
     WNDCLASSEXW cls{}; cls.cbSize=sizeof(cls);cls.hInstance=GetModuleHandleW(nullptr);
     cls.lpfnWndProc=dispatch;cls.lpszClassName=page_class;cls.hCursor=LoadCursorW(nullptr,IDC_ARROW);
     cls.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_BTNFACE+1);
-    if(!RegisterClassExW(&cls) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)
-        throw windows_error("Register Statistics page");
+    register_window_class(cls,"Register Statistics page");
     hwnd_=CreateWindowExW(WS_EX_CONTROLPARENT,page_class,L"",WS_CHILD|WS_CLIPCHILDREN,
         0,0,page_width,page_height,parent,nullptr,GetModuleHandleW(nullptr),this);
     if(!hwnd_) throw windows_error("Create Statistics page");
@@ -223,8 +206,7 @@ StatisticsPage::StatisticsPage(HWND parent,std::filesystem::path database,
     hover.lpfnWndProc=hover_dispatch;
     hover.lpszClassName=hover_class;
     hover.hCursor=LoadCursorW(nullptr,IDC_ARROW);
-    if(!RegisterClassExW(&hover) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)
-        throw windows_error("Register statistics tooltip");
+    register_window_class(hover,"Register statistics tooltip");
     tooltip_=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_TRANSPARENT,
         hover_class,L"",WS_POPUP,0,0,260,68,GetAncestor(hwnd_,GA_ROOT),nullptr,
         GetModuleHandleW(nullptr),this);
@@ -444,7 +426,7 @@ void StatisticsPage::set_history_limit(unsigned value) {
     history_limit_=value;
     SendMessageW(history_limit_slider_,TBM_SETPOS,TRUE,value);
     SetWindowTextW(history_limit_label_,(L"История: "+std::to_wstring(value)+L" / 100").c_str());
-    WritePrivateProfileStringW(L"overlay",L"stats_history_top",std::to_wstring(value).c_str(),settings_.c_str());
+    ini_overlay_write(settings_,L"stats_history_top",static_cast<int>(value));
     diagnostics::write(diagnostics::Level::info,"ui.history_limit","limit="+std::to_string(value));
     if(active_ || popups_[1].window) request();
 }
@@ -454,7 +436,7 @@ void StatisticsPage::set_uptime_limit(unsigned value) {
     uptime_limit_=value;
     SendMessageW(uptime_limit_slider_,TBM_SETPOS,TRUE,value);
     SetWindowTextW(uptime_limit_label_,(L"Аптайм: "+std::to_wstring(value)+L" / 100").c_str());
-    WritePrivateProfileStringW(L"overlay",L"stats_uptime_top",std::to_wstring(value).c_str(),settings_.c_str());
+    ini_overlay_write(settings_,L"stats_uptime_top",static_cast<int>(value));
     diagnostics::write(diagnostics::Level::info,"ui.uptime_limit","limit="+std::to_string(value));
     if(active_ || table_window_) request();
 }
@@ -595,8 +577,7 @@ void StatisticsPage::open_table() {
     cls.lpszClassName=table_class;
     cls.hCursor=LoadCursorW(nullptr,IDC_ARROW);
     cls.hbrBackground=GetSysColorBrush(COLOR_BTNFACE);
-    if(!RegisterClassExW(&cls) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)
-        throw windows_error("Register detached uptime table");
+    register_window_class(cls,"Register detached uptime table");
     table_window_=CreateWindowExW(0,table_class,L"FluxTop — аптайм приложений",
         WS_OVERLAPPEDWINDOW|WS_VISIBLE,CW_USEDEFAULT,CW_USEDEFAULT,980,560,
         nullptr,nullptr,GetModuleHandleW(nullptr),this);
@@ -698,8 +679,7 @@ void StatisticsPage::select_section(unsigned index) {
     if(index>=7 || index==selected_section_)return;
     selected_section_=index;
     refresh_pause_control();
-    WritePrivateProfileStringW(L"overlay",L"stats_selected_section",
-        std::to_wstring(index).c_str(),settings_.c_str());
+    ini_overlay_write(settings_,L"stats_selected_section",static_cast<int>(index));
     hover_section_=-1;
     system_tip_active_=false;
     if(tooltip_)ShowWindow(tooltip_,SW_HIDE);
@@ -1786,7 +1766,7 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
         }
         if(LOWORD(wp)==system_popout_id+1 && HIWORD(wp)==BN_CLICKED) {
             fill_enabled_=SendMessageW(fill_toggle_,BM_GETCHECK,0,0)==BST_CHECKED;
-            WritePrivateProfileStringW(L"overlay",L"stats_chart_fill",fill_enabled_?L"1":L"0",settings_.c_str());
+            ini_overlay_write(settings_,L"stats_chart_fill",fill_enabled_);
             for(auto& popup:popups_)if(popup.window) {
                 if(popup.fill_toggle)SendMessageW(popup.fill_toggle,BM_SETCHECK,
                     fill_enabled_?BST_CHECKED:BST_UNCHECKED,0);
@@ -1798,8 +1778,8 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
             const unsigned index=LOWORD(wp)==auto_live_id?0U:1U;
             const HWND control=index==0?auto_live_:auto_history_;
             auto_scale_[index]=SendMessageW(control,BM_GETCHECK,0,0)==BST_CHECKED;
-            WritePrivateProfileStringW(L"overlay",index==0?L"stats_auto_live":L"stats_auto_history",
-                auto_scale_[index]?L"1":L"0",settings_.c_str());
+            ini_overlay_write(settings_,index==0?L"stats_auto_live":L"stats_auto_history",
+                auto_scale_[index]);
             InvalidateRect(hwnd_,nullptr,FALSE);
             return 0;
         }
@@ -1809,14 +1789,12 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
         if(LOWORD(wp)==system_period_id && HIWORD(wp)==CBN_SELCHANGE) {
             system_range_=static_cast<unsigned>(std::clamp<int>(
                 static_cast<int>(SendMessageW(system_period_,CB_GETCURSEL,0,0)),0,2));
-            WritePrivateProfileStringW(L"overlay",L"stats_system_range",
-                std::to_wstring(system_range_).c_str(),settings_.c_str());
+            ini_overlay_write(settings_,L"stats_system_range",static_cast<int>(system_range_));
             InvalidateRect(hwnd_,nullptr,FALSE);return 0;
         }
         if(LOWORD(wp)==system_auto_id && HIWORD(wp)==BN_CLICKED) {
             system_autoscale_=SendMessageW(system_auto_,BM_GETCHECK,0,0)==BST_CHECKED;
-            WritePrivateProfileStringW(L"overlay",L"stats_system_auto",
-                system_autoscale_?L"1":L"0",settings_.c_str());
+            ini_overlay_write(settings_,L"stats_system_auto",system_autoscale_);
             InvalidateRect(hwnd_,nullptr,FALSE);return 0;
         }
         if(LOWORD(wp)==system_popout_id && HIWORD(wp)==BN_CLICKED) {
@@ -1832,7 +1810,7 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
         }
         if(LOWORD(wp)==system_id && HIWORD(wp)==BN_CLICKED) {
             system_=SendMessageW(show_system_,BM_GETCHECK,0,0)==BST_CHECKED;
-            WritePrivateProfileStringW(L"overlay",L"stats_show_system",system_?L"1":L"0",settings_.c_str());
+            ini_overlay_write(settings_,L"stats_show_system",system_);
             request(true);return 0; // Requery only uptime; graphs retain their data and positions.
         }
         break;

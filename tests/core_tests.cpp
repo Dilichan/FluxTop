@@ -1,4 +1,5 @@
 #include "fluxtop/model.hpp"
+#include "fluxtop/metric_text.hpp"
 #include "fluxtop/overlay_layout.hpp"
 #include "fluxtop/gpu_process_memory.hpp"
 #include "fluxtop/options.hpp"
@@ -408,6 +409,20 @@ void output_tests() {
 }
 } // namespace
 
+void metric_format_tests() {
+    using namespace fluxtop;
+    check(metric_text::decimal(12.34)==L"12.3","shared decimal precision");
+    check(metric_text::percent(3.2)==L"3.2%","shared CPU percent");
+    check(metric_text::percent({})==L"—","unknown percent");
+    check(metric_text::percent(std::numeric_limits<double>::quiet_NaN())==L"—",
+        "nonfinite percent is unavailable");
+    check(metric_text::memory(1048576ULL)==L"1.0 MiB","memory uses MiB");
+    check(metric_text::memory(1073741824ULL)==L"1.0 GiB","memory uses GiB");
+    check(metric_text::network_rate(125000.0,250000.0)==L"1.0 / 2.0 Mbps",
+        "network units and precision");
+    check(metric_text::network_rate({},{})==L"— / — Mbps",
+        "missing network counters");
+}
 void overlay_geometry_tests() {
     using fluxtop::calculate_overlay_columns;
     const auto& config = fluxtop::overlay_layout;
@@ -451,6 +466,7 @@ void overlay_geometry_tests() {
         "summary-only width is produced by the same layout calculation");
 }
 int main() {
+    metric_format_tests();
     overlay_geometry_tests();
     cpu_tests();
     sort_tests();

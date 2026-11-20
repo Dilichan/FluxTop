@@ -30,13 +30,11 @@ void StatisticsPage::open_popup(unsigned kind) {
     cls.lpszClassName=window_class;
     cls.hCursor=LoadCursorW(nullptr,IDC_ARROW);
     cls.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_WINDOW+1);
-    if(!RegisterClassExW(&cls) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)
-        throw windows_error("Register detached statistics graph");
+    register_window_class(cls,"Register detached statistics graph");
     popup.owner=this;popup.kind=kind;
     popup.zoom_x=1.0;popup.zoom_y=1.0;popup.pan_ms=0;
-    constexpr std::array<const wchar_t*,6> auto_keys{{L"stats_popup_auto_live",L"stats_popup_auto_history",
-        L"stats_popup_auto_cpu",L"stats_popup_auto_ram",L"stats_popup_auto_network",L"stats_popup_auto_gpu"}};
-    popup.auto_scale=GetPrivateProfileIntW(L"overlay",auto_keys[kind],1,settings_.c_str())!=0;
+    const auto& auto_keys=popup_auto_scale_keys;
+    popup.auto_scale=ini_overlay_read(settings_,auto_keys[kind],1)!=0;
     popup.dragging=false;popup.cursor={-1,-1};
     const std::array<const wchar_t*,6> titles{{L"FluxTop — последняя минута (AutoScore)",
         L"FluxTop — история (AutoScore)",L"FluxTop — ЦП",L"FluxTop — память",
@@ -186,8 +184,7 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
         }
         if(LOWORD(wp)==popup_auto_id+1 && HIWORD(wp)==BN_CLICKED) {
             page->fill_enabled_=SendMessageW(popup->fill_toggle,BM_GETCHECK,0,0)==BST_CHECKED;
-            WritePrivateProfileStringW(L"overlay",L"stats_chart_fill",
-                page->fill_enabled_?L"1":L"0",page->settings_.c_str());
+            ini_overlay_write(page->settings_,L"stats_chart_fill",page->fill_enabled_);
             if(page->fill_toggle_)SendMessageW(page->fill_toggle_,BM_SETCHECK,
                 page->fill_enabled_?BST_CHECKED:BST_UNCHECKED,0);
             for(auto& other:page->popups_)if(other.window) {
@@ -200,10 +197,8 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
         if(LOWORD(wp)==popup_auto_id && HIWORD(wp)==BN_CLICKED) {
             popup->auto_scale=SendMessageW(popup->auto_toggle,BM_GETCHECK,0,0)==BST_CHECKED;
             popup->axis_dirty=true;
-            constexpr std::array<const wchar_t*,6> keys{{L"stats_popup_auto_live",L"stats_popup_auto_history",
-                L"stats_popup_auto_cpu",L"stats_popup_auto_ram",L"stats_popup_auto_network",L"stats_popup_auto_gpu"}};
-            WritePrivateProfileStringW(L"overlay",keys[popup->kind],
-                popup->auto_scale?L"1":L"0",page->settings_.c_str());
+            const auto& keys=popup_auto_scale_keys;
+            ini_overlay_write(page->settings_,keys[popup->kind],popup->auto_scale);
             InvalidateRect(window,nullptr,FALSE);
             return 0;
         }
@@ -232,9 +227,8 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
                 } else popup->zoom_y=1.0;
                 popup->auto_scale=false;
                 SendMessageW(popup->auto_toggle,BM_SETCHECK,BST_UNCHECKED,0);
-                constexpr std::array<const wchar_t*,6> keys{{L"stats_popup_auto_live",L"stats_popup_auto_history",
-                    L"stats_popup_auto_cpu",L"stats_popup_auto_ram",L"stats_popup_auto_network",L"stats_popup_auto_gpu"}};
-                WritePrivateProfileStringW(L"overlay",keys[popup->kind],L"0",page->settings_.c_str());
+                const auto& keys=popup_auto_scale_keys;
+                ini_overlay_write(page->settings_,keys[popup->kind],false);
             }
             popup->zoom_y=std::clamp(popup->zoom_y*factor,1.0,100.0);
         } else {
@@ -261,9 +255,8 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
         popup->auto_scale=true;
         popup->axis_dirty=true;
         SendMessageW(popup->auto_toggle,BM_SETCHECK,BST_CHECKED,0);
-        constexpr std::array<const wchar_t*,6> keys{{L"stats_popup_auto_live",L"stats_popup_auto_history",
-            L"stats_popup_auto_cpu",L"stats_popup_auto_ram",L"stats_popup_auto_network",L"stats_popup_auto_gpu"}};
-        WritePrivateProfileStringW(L"overlay",keys[popup->kind],L"1",page->settings_.c_str());
+        const auto& keys=popup_auto_scale_keys;
+        ini_overlay_write(page->settings_,keys[popup->kind],true);
         InvalidateRect(window,nullptr,FALSE);return 0;
     }
     case WM_LBUTTONDOWN:

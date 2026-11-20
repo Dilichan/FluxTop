@@ -6,6 +6,8 @@
 #include "fluxtop/autostart.hpp"
 #include "fluxtop/sampler.hpp"
 #include "fluxtop/windows.hpp"
+#include "fluxtop/metric_text.hpp"
+#include "fluxtop/overlay_ini.hpp"
 #include "fluxtop/resource_ids.h"
 
 #include <windowsx.h>
@@ -76,34 +78,11 @@ void CALLBACK foreground_changed(HWINEVENTHOOK, DWORD event, HWND, LONG, LONG, D
         PostMessageW(foreground_update_target,foreground_update_message,0,0);
 }
 
-std::wstring wide(std::string_view value) {
-    if (value.empty()) return {};
-    const int size = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
-    if (!size) return L"?";
-    std::wstring result(static_cast<std::size_t>(size), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), result.data(), size);
-    for (auto& c : result) if (c < 32) c = L' ';
-    return result;
-}
-std::wstring decimal(double value, int precision = 1) {
-    std::wostringstream out; out.imbue(std::locale::classic());
-    out << std::fixed << std::setprecision(precision) << value; return out.str();
-}
-std::wstring percent(std::optional<double> value) { return value ? decimal(*value) + L"%" : L"—"; }
-std::wstring memory(std::optional<std::uint64_t> value) {
-    if (!value) return L"—";
-    const double mib = static_cast<double>(*value) / 1048576.0;
-    return mib >= 1024 ? decimal(mib / 1024) + L" GiB" : decimal(mib) + L" MiB";
-}
-// Network counters are bytes/second; display decimal megabits/second (1 Mbit = 1,000,000 bits).
-// Keep one fractional digit and a single unit label for predictable Rx/Tx column sizing.
-std::wstring network_rate(std::optional<double> rx, std::optional<double> tx) {
-    const auto format = [](std::optional<double> bytes_per_second) -> std::wstring {
-        if (!bytes_per_second) return L"—";
-        return decimal(*bytes_per_second * 8.0 / 1'000'000.0, 1);
-    };
-    return format(rx) + L" / " + format(tx) + L" Mbps";
-}
+std::wstring wide(std::string_view value) { return utf8_to_wide(value,true); }
+using metric_text::decimal;
+using metric_text::percent;
+using metric_text::memory;
+using metric_text::network_rate;
 void require_hr(HRESULT result, const char* operation) {
     if (FAILED(result)) throw std::runtime_error(std::string(operation) + " failed (HRESULT " + std::to_string(static_cast<unsigned long>(result)) + ")");
 }
@@ -287,7 +266,7 @@ Overlay::~Overlay() {
 void Overlay::load_settings() {
     settings_ = local_file(L"FLUXTOP_OVERLAY_SETTINGS", L"overlay.ini").wstring();
     if (settings_.empty()) return;
-    const auto read = [&](const wchar_t* key, int fallback) { return static_cast<int>(GetPrivateProfileIntW(L"overlay", key, fallback, settings_.c_str())); };
+    const auto read = [&](const wchar_t* key, int fallback) { return ini_overlay_read_int(settings_,key,fallback); };
     x_ = read(L"x", CW_USEDEFAULT); y_ = read(L"y", CW_USEDEFAULT);
     if (read(L"layout_version", 0) >= 2) opacity_ = static_cast<unsigned>(std::clamp(read(L"opacity", 100), 1, 100));
     const auto saved_metrics = static_cast<unsigned>(read(L"metrics", default_metrics));
@@ -314,7 +293,7 @@ void Overlay::save_settings() noexcept {
         std::error_code error; std::filesystem::create_directories(std::filesystem::path(settings_).parent_path(), error);
         if (error) return;
         RECT rect{}; if (!GetWindowRect(hwnd_, &rect)) return;
-        const auto save = [&](const wchar_t* key, int value) { WritePrivateProfileStringW(L"overlay", key, std::to_wstring(value).c_str(), settings_.c_str()); };
+        const auto save = [&](const wchar_t* key, int value) { ini_overlay_write(settings_,key,value); };
         save(L"layout_version", 3); save(L"x", rect.left); save(L"y", rect.top);
         save(L"font_size", static_cast<int>(options_.font_size)); save(L"top", static_cast<int>(options_.top));
         save(L"sort", static_cast<int>(options_.sort)); save(L"opacity", static_cast<int>(opacity_)); save(L"icons", show_icons_ ? 1 : 0);
@@ -1231,9 +1210,9 @@ int Overlay::run() {
     fonts();
     WNDCLASSEXW cls{}; cls.cbSize=sizeof(cls); cls.hInstance=GetModuleHandleW(nullptr); cls.hIcon=large_icon_; cls.hIconSm=icon_;
     cls.hCursor=LoadCursorW(nullptr,IDC_ARROW); cls.lpfnWndProc=dispatch; cls.lpszClassName=overlay_class;
-    if (!RegisterClassExW(&cls) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS) throw windows_error("Register overlay class");
+    register_window_class(cls,"Register overlay class");
     cls.lpfnWndProc=client_dispatch; cls.lpszClassName=client_class; cls.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_BTNFACE+1);
-    if (!RegisterClassExW(&cls) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS) throw windows_error("Register client class");
+    register_window_class(cls,"Register client class");
     if (x_==CW_USEDEFAULT || y_==CW_USEDEFAULT) { RECT area{}; SystemParametersInfoW(SPI_GETWORKAREA,0,&area,0); x_=area.right-pixels(table_width())-pixels(20); y_=area.top+pixels(20); }
     const bool inspect = env(L"FLUXTOP_OVERLAY_INSPECT")==L"1";
     const DWORD style=WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | (inspect ? WS_EX_APPWINDOW : WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
