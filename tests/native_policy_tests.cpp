@@ -122,6 +122,9 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "for(const auto& plot:plots)fill_under(", "for(const auto& plot:plots) {",
             "stats_chart_fill"});
         need(page,{"void extend_recent_line(std::vector<POINT>& line,LONG right,",
+            "void extend_fresh_left_edge(std::vector<POINT>& line,const RECT& area,",
+            "if(is_live)extend_fresh_left_edge(line,area,from,to,animation_duration_ms_);",
+            "extend_fresh_left_edge(points,spark,latest-60000,latest,animation_duration_ms_);",
             "eased_latest_value(double previous,double measured,ULONGLONG animation_start,",
             "extend_recent_line(line,area.right,points.back().first,to,animation_duration_ms_)",
             "extend_recent_line(line,area.right,segment_end,to,animation_duration_ms_)",
@@ -144,7 +147,14 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         if(shared_calls!=3U)
             throw std::runtime_error("Expected exactly three shared chart renderer call sites");
         need(popup,{"popup->fill_toggle", "popup_auto_id+1", "show_system_hover(popup->kind-2",
-            "frozen_system,true"});
+            "frozen_system,true", "WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN",
+            "if(popup->kind<2 || popup->dragging)InvalidateRect(window,nullptr,FALSE);"});
+        need(header,{"PaintBuffer tooltip_buffer_;", "bool position_tooltip(POINT screen,int offset_x,int offset_y);"});
+        need(page,{"bool StatisticsPage::position_tooltip(",
+            "SWP_NOACTIVATE|SWP_NOZORDER|(visible?0U:SWP_SHOWWINDOW)",
+            "page->tooltip_buffer_.prepare(dc,bounds.right,bounds.bottom)",
+            "if(content_changed || newly_shown)InvalidateRect(tooltip_,nullptr,FALSE);",
+            "WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN"});
         need(page,{"FluxTop.SystemDashboard.Stage1","system_points_.push_back(point)",
             "stats_selected_section","case WM_LBUTTONUP:","system_popout_id"});
         need(popup,{"popup.kind>=2","draw_system_graph(dc,graph,popup.kind-2",
@@ -169,7 +179,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         need(page,{"void StatisticsPage::draw_metric_tooltip(",
             "draw_metric_tooltip(dc,bounds,source[hover_index_],hover_value_,hover_timestamp_)",
             "hover_timestamp_=sample_at","time.wSecond","local_sample_label(sample_at)",
-            "tip_height=MulDiv(198","current_readings_.emplace(color_key(identity)",
+            "const int width=MulDiv(420","const int height=MulDiv(198","current_readings_.emplace(color_key(identity)",
             "metric_text::network_rate(rx,tx)","L\" Mbps\"",
             "double eased_axis(double current,double target,double elapsed_ms)",
             "popup.cached_auto_zoom=eased_axis(","const bool axis_animating=advance_axes(elapsed);",

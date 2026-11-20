@@ -40,7 +40,8 @@ void StatisticsPage::open_popup(unsigned kind) {
         L"FluxTop — история (AutoScore)",L"FluxTop — ЦП",L"FluxTop — память",
         L"FluxTop — сеть",L"FluxTop — GPU"}};
     const wchar_t* title=titles[kind];
-    popup.window=CreateWindowExW(0,window_class,title,WS_OVERLAPPEDWINDOW|WS_VISIBLE,
+    popup.window=CreateWindowExW(0,window_class,title,
+        WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,
         CW_USEDEFAULT,CW_USEDEFAULT,1050,590,nullptr,nullptr,GetModuleHandleW(nullptr),&popup);
     if(!popup.window) throw windows_error("Create detached statistics graph");
     ShowWindow(popup.window,SW_SHOW);
@@ -304,7 +305,10 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
             popup->last=current;
             popup->axis_dirty=true;
         }
-        InvalidateRect(window,nullptr,FALSE);return 0;
+        // System popouts use the separate tooltip, so hovering must not
+        // repaint a full chart at mouse-event frequency.
+        if(popup->kind<2 || popup->dragging)InvalidateRect(window,nullptr,FALSE);
+        return 0;
     }
     case WM_MOUSELEAVE:
         popup->cursor={-1,-1};
@@ -312,7 +316,8 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
             page->system_tip_active_=false;
             if(page->tooltip_)ShowWindow(page->tooltip_,SW_HIDE);
         }
-        InvalidateRect(window,nullptr,FALSE);return 0;
+        if(popup->kind<2)InvalidateRect(window,nullptr,FALSE);
+        return 0;
     case WM_GETMINMAXINFO: {
         auto* bounds=reinterpret_cast<MINMAXINFO*>(lp);
         bounds->ptMinTrackSize={460,340};

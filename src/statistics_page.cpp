@@ -62,6 +62,22 @@ void extend_recent_line(std::vector<POINT>& line,LONG right,
     if(view_end-last_sample>grace)return; // Do not hide stalled sampling.
     line.push_back(POINT{right,line.back().y});
 }
+// A rolling live window may start between two samples. Cover only a short
+// sampling-sized gap at its left edge; never extend stale or historical data.
+// This is presentation only: no synthetic sample is stored or exported.
+void extend_fresh_left_edge(std::vector<POINT>& line,const RECT& area,
+    std::int64_t from,std::int64_t to,unsigned interval_ms) {
+    if(line.empty() || to<=from || area.right<=area.left)return;
+    const LONG x=line.front().x;
+    if(x<=area.left || x>=area.right)return;
+    const double gap_ms=static_cast<double>(x-area.left)*static_cast<double>(to-from)/
+        static_cast<double>(area.right-area.left);
+    const double grace=2.0*static_cast<double>(std::clamp(interval_ms,250U,10000U));
+    if(gap_ms<=grace) {
+        const LONG y=line.front().y;
+        line.insert(line.begin(),POINT{area.left,y});
+    }
+}
 // Ease only the newly sampled endpoint; historical points keep their real values.
 double eased_latest_value(double previous,double measured,ULONGLONG animation_start,
     unsigned animation_ms) {
@@ -579,7 +595,7 @@ void StatisticsPage::open_table() {
     cls.hbrBackground=GetSysColorBrush(COLOR_BTNFACE);
     register_window_class(cls,"Register detached uptime table");
     table_window_=CreateWindowExW(0,table_class,L"FluxTop — аптайм приложений",
-        WS_OVERLAPPEDWINDOW|WS_VISIBLE,CW_USEDEFAULT,CW_USEDEFAULT,980,560,
+        WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,980,560,
         nullptr,nullptr,GetModuleHandleW(nullptr),this);
     if(!table_window_) throw windows_error("Create detached uptime table");
     ShowWindow(table_window_,SW_SHOW);
@@ -747,6 +763,9 @@ void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Pro
         current_readings_.emplace(color_key(identity),std::move(values));
         sorted.push_back({&p,auto_rank(p,31U).score});
     }
+    // The bubble keeps showing up-to-date readings even when the cursor rests
+    // on the same sample. One invalidation per real snapshot, not per animation.
+    if(tooltip_ && IsWindowVisible(tooltip_))InvalidateRect(tooltip_,nullptr,FALSE);
     std::stable_sort(sorted.begin(),sorted.end(),[](const Ranked& a,const Ranked& b){
         return a.score>b.score;
     });
@@ -914,7 +933,7 @@ void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<Statis
         const auto& points=apps[i].points;
         if(points.empty())continue;
         std::vector<POINT> line;
-        line.reserve(points.size());
+        line.reserve(points.size()+2);
         const auto lower=std::lower_bound(points.begin(),points.end(),from,
             [](const auto& point,std::int64_t time){return point.first<time;});
         const auto first=lower==points.begin()?lower:std::prev(lower);
@@ -940,6 +959,8 @@ void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<Statis
             line.back().x=previous.x+static_cast<LONG>(std::lround((final.x-previous.x)*t));
             line.back().y=previous.y+static_cast<LONG>(std::lround((final.y-previous.y)*t));
         }
+        // Prevent a one-frame gap when the oldest sample leaves the rolling minute.
+        if(is_live)extend_fresh_left_edge(line,area,from,to,animation_duration_ms_);
         // All current AutoScore series meet the same right edge as the system series.
         if(is_live && !line.empty() && points.back().first==last_live_timestamp_)
             extend_recent_line(line,area.right,points.back().first,to,animation_duration_ms_);
@@ -1188,6 +1209,13 @@ void StatisticsPage::draw_sidebar(HDC dc) {
                 bars.push_back({bar,colors[section]});
             }
         }
+        // Apply the same short-gap rule to live sidebar series; uptime and
+        // historical mini-charts retain their exact data boundaries.
+        if(section<5) {
+            extend_fresh_left_edge(points,spark,latest-60000,latest,animation_duration_ms_);
+            if(section==3)
+                extend_fresh_left_edge(second_gpu_line,spark,latest-60000,latest,animation_duration_ms_);
+        }
         // Mini-charts use the very same renderer, with a white paper and no grid.
         // The GPU pair is passed as two series, so both fills remain below both lines.
         std::vector<ChartStroke> plots;
@@ -1247,8 +1275,11 @@ void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
         std::int64_t segment_end=0;
         const auto finish_segment=[&]() {
             if(line.empty())return;
-            if(!samples.empty() && segment_end==samples.back().time)
-                extend_recent_line(line,area.right,segment_end,to,animation_duration_ms_);
+            if(!frozen) {
+                extend_fresh_left_edge(line,area,from,to,animation_duration_ms_);
+                if(!samples.empty() && segment_end==samples.back().time)
+                    extend_recent_line(line,area.right,segment_end,to,animation_duration_ms_);
+            }
             plots.push_back({std::move(line),ink[index]});
             line.clear();
             previous_measurement.reset();
@@ -1464,25 +1495,15 @@ void StatisticsPage::mouse(int x,int y) {
             if(d<best){best=d;section=in_live?0:1;selected=i;score=line_score;sample_at=prev.first+static_cast<std::int64_t>(static_cast<double>(pts[j].first-prev.first)*t);}
         }
     }
-    if(hover_section_!=section || hover_index_!=selected || hover_at_.x!=x || hover_at_.y!=y || hover_timestamp_!=sample_at) {
+    const bool content_changed=hover_section_!=section || hover_index_!=selected ||
+        hover_timestamp_!=sample_at || std::abs(hover_value_-score)>0.01;
+    if(content_changed || hover_at_.x!=x || hover_at_.y!=y) {
         hover_section_=section;hover_index_=selected;hover_value_=score;hover_timestamp_=sample_at;hover_at_={x,y};
-        if(section<0 && tooltip_) ShowWindow(tooltip_,SW_HIDE);
+        if(section<0 && tooltip_)ShowWindow(tooltip_,SW_HIDE);
         else if(tooltip_) {
-            POINT cursor{};GetCursorPos(&cursor);
-            const UINT dpi=GetDpiForWindow(tooltip_);
-            const int tip_width=MulDiv(420,static_cast<int>(dpi),96);
-            const int tip_height=MulDiv(198,static_cast<int>(dpi),96);
-            int left=cursor.x+MulDiv(18,static_cast<int>(dpi),96);
-            int top=cursor.y+MulDiv(20,static_cast<int>(dpi),96);
-            MONITORINFO monitor{sizeof(monitor)};
-            if(GetMonitorInfoW(MonitorFromPoint(cursor,MONITOR_DEFAULTTONEAREST),&monitor)) {
-                left=std::clamp(left,static_cast<int>(monitor.rcWork.left),
-                    std::max(static_cast<int>(monitor.rcWork.left),static_cast<int>(monitor.rcWork.right)-tip_width));
-                top=std::clamp(top,static_cast<int>(monitor.rcWork.top),
-                    std::max(static_cast<int>(monitor.rcWork.top),static_cast<int>(monitor.rcWork.bottom)-tip_height));
-            }
-            SetWindowPos(tooltip_,HWND_TOPMOST,left,top,tip_width,tip_height,SWP_NOACTIVATE|SWP_SHOWWINDOW);
-            InvalidateRect(tooltip_,nullptr,FALSE);
+            POINT screen{};GetCursorPos(&screen);
+            const bool newly_shown=position_tooltip(screen,18,20);
+            if(content_changed || newly_shown)InvalidateRect(tooltip_,nullptr,FALSE);
         }
     }
 }
@@ -1555,6 +1576,29 @@ void StatisticsPage::draw_metric_tooltip(HDC dc,const RECT& area,const Statistic
     line(L"Rx/Tx: "+values.network,158);
     SelectObject(dc,original);
 }
+bool StatisticsPage::position_tooltip(POINT screen,int offset_x,int offset_y) {
+    if(!tooltip_)return false;
+    const UINT dpi=GetDpiForWindow(tooltip_);
+    const int width=MulDiv(420,static_cast<int>(dpi),96);
+    const int height=MulDiv(198,static_cast<int>(dpi),96);
+    int x=screen.x+MulDiv(offset_x,static_cast<int>(dpi),96);
+    int y=screen.y+MulDiv(offset_y,static_cast<int>(dpi),96);
+    MONITORINFO monitor{sizeof(monitor)};
+    if(GetMonitorInfoW(MonitorFromPoint(screen,MONITOR_DEFAULTTONEAREST),&monitor)) {
+        x=std::clamp(x,static_cast<int>(monitor.rcWork.left),
+            std::max(static_cast<int>(monitor.rcWork.left),static_cast<int>(monitor.rcWork.right)-width));
+        y=std::clamp(y,static_cast<int>(monitor.rcWork.top),
+            std::max(static_cast<int>(monitor.rcWork.top),static_cast<int>(monitor.rcWork.bottom)-height));
+    }
+    const bool visible=IsWindowVisible(tooltip_)!=FALSE;
+    RECT previous{};
+    const bool measured=GetWindowRect(tooltip_,&previous)!=FALSE;
+    if(!visible || !measured || previous.left!=x || previous.top!=y ||
+        previous.right-previous.left!=width || previous.bottom-previous.top!=height)
+        SetWindowPos(tooltip_,HWND_TOPMOST,x,y,width,height,
+            SWP_NOACTIVATE|SWP_NOZORDER|(visible?0U:SWP_SHOWWINDOW));
+    return !visible;
+}
 void StatisticsPage::show_system_hover(unsigned metric,POINT cursor,const RECT& area,
     std::int64_t from,std::int64_t to,const std::deque<SystemPoint>* frozen) {
     if(metric>=5 || cursor.x<area.left || cursor.x>area.right || cursor.y<area.top ||
@@ -1572,21 +1616,12 @@ void StatisticsPage::show_system_hover(unsigned metric,POINT cursor,const RECT& 
         if(!closest || std::abs(sample.time-time)<std::abs(closest->time-time))closest=&sample;
     }
     if(!closest){system_tip_active_=false;ShowWindow(tooltip_,SW_HIDE);return;}
+    const bool content_changed=!system_tip_active_ || system_tip_metric_!=metric ||
+        system_tip_sample_.time!=closest->time || system_tip_sample_.values!=closest->values;
     system_tip_active_=true;system_tip_metric_=metric;system_tip_sample_=*closest;
     POINT screen{};GetCursorPos(&screen);
-    const UINT dpi=GetDpiForWindow(tooltip_);
-    const int width=MulDiv(420,static_cast<int>(dpi),96),height=MulDiv(198,static_cast<int>(dpi),96);
-    int x=screen.x+MulDiv(16,static_cast<int>(dpi),96);
-    int y=screen.y+MulDiv(18,static_cast<int>(dpi),96);
-    MONITORINFO monitor{sizeof(monitor)};
-    if(GetMonitorInfoW(MonitorFromPoint(screen,MONITOR_DEFAULTTONEAREST),&monitor)){
-        x=std::clamp(x,static_cast<int>(monitor.rcWork.left),
-            std::max(static_cast<int>(monitor.rcWork.left),static_cast<int>(monitor.rcWork.right)-width));
-        y=std::clamp(y,static_cast<int>(monitor.rcWork.top),
-            std::max(static_cast<int>(monitor.rcWork.top),static_cast<int>(monitor.rcWork.bottom)-height));
-    }
-    SetWindowPos(tooltip_,HWND_TOPMOST,x,y,width,height,SWP_NOACTIVATE|SWP_SHOWWINDOW);
-    InvalidateRect(tooltip_,nullptr,FALSE);
+    const bool newly_shown=position_tooltip(screen,16,18);
+    if(content_changed || newly_shown)InvalidateRect(tooltip_,nullptr,FALSE);
 }
 void StatisticsPage::draw_system_hover(HDC dc,const RECT& bounds){
     const std::array<COLORREF,5> colors{{RGB(14,132,177),RGB(67,105,181),RGB(184,55,114),RGB(131,54,156),RGB(194,89,178)}};
@@ -1656,7 +1691,17 @@ LRESULT CALLBACK StatisticsPage::hover_dispatch(HWND window,UINT msg,WPARAM wp,L
     case WM_NCHITTEST:return HTTRANSPARENT;
     case WM_PAINT: {
         PAINTSTRUCT ps{};const HDC dc=BeginPaint(window,&ps);
-        page->paint_tooltip(dc);
+        RECT bounds{};GetClientRect(window,&bounds);
+        if(bounds.right>0 && bounds.bottom>0) {
+            if(const HDC buffer=page->tooltip_buffer_.prepare(dc,bounds.right,bounds.bottom)) {
+                FillRect(buffer,&bounds,GetSysColorBrush(COLOR_BTNFACE));
+                page->paint_tooltip(buffer);
+                BitBlt(dc,0,0,bounds.right,bounds.bottom,buffer,0,0,SRCCOPY);
+            } else {
+                FillRect(dc,&bounds,GetSysColorBrush(COLOR_BTNFACE));
+                page->paint_tooltip(dc);
+            }
+        }
         EndPaint(window,&ps);return 0;
     }
     }

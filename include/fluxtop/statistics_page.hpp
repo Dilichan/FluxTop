@@ -104,6 +104,9 @@ private:
     void paint_popup(PopupState& popup,HDC dc);
     COLORREF series_color(const StatisticsApplication& app,std::size_t index) const;
     void mouse(int x,int y);
+    // Position the native hover window without re-showing it on every mouse move.
+    // Returns true only when the window was previously hidden.
+    bool position_tooltip(POINT screen,int offset_x,int offset_y);
     void paint_tooltip(HDC dc);
     void draw_metric_tooltip(HDC dc,const RECT& area,const StatisticsApplication& app,double score,std::int64_t sample_at);
     bool advance_axes(double elapsed_ms);
@@ -140,6 +143,7 @@ private:
         POINT last{},cursor{-1,-1};
     };
     PaintBuffer page_buffer_;
+    PaintBuffer tooltip_buffer_; // Reusable native tooltip double buffer.
     PaintBuffer fill_color_buffer_; // Reused 1x1 bitmap for GDI alpha blending.
     std::array<PopupState,6> popups_{}; // AutoScore live/history, CPU, RAM, network, GPU
     // FluxTop.SystemDashboard.Stage1: bounded, sampler-fed system history.
