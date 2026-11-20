@@ -7,7 +7,7 @@ $checks = [ordered]@{
     'Checkbox wired to settings' = ($code.Contains('animation_control, 22, 556, 536, 26') -and $code.Contains('case animation_control:'))
     'Focus row stays fixed in Auto' = $code.Contains('if(pinned) from=i==0?0.0f:std::max(1.0f,from);')
     'Header remains static' = $code.Contains('target_->PushAxisAlignedClip(D2D1::RectF(0,row_height()+1,table_width(),')
-    'Uniform animation timer' = ($code.Contains('constexpr UINT overlay_animation_timer_ms = 16;') -and $code.Contains('SetTimer(hwnd_,overlay_animation_timer,overlay_animation_timer_ms,nullptr)') -and $code.Contains('order_changed'))
+    'Uniform animation timer' = ($code.Contains('constexpr UINT overlay_animation_timer_ms = 40;') -and $code.Contains('SetTimer(hwnd_,overlay_animation_timer,overlay_animation_timer_ms,nullptr)') -and $code.Contains('order_changed'))
     'Bounded cached text layouts' = ($code.Contains('struct CachedRowTextLayouts {') -and $code.Contains('cache_capacity = std::clamp') -and $code.Contains('DrawTextLayout(') -and $code.Contains('row_text_cache_.clear();'))
     'Cheap rendering of moving data' = ($code.Contains('draw_cached_row_text(row,0,row.name') -and $code.Contains('draw_cached_row_text(row,static_cast<unsigned>(metric+1)'))
     'No needless replacement animation' = ($code.Contains('row_animation_active_=has_motion;') -and $code.Contains('if(has_motion) {'))
@@ -23,7 +23,10 @@ $checks = [ordered]@{
     'No transient burst blink in rows' = (-not $code.Contains('auto_metric_has_burst(p,static_cast<AutoMetric>(j+1))'))
     'No metric pulse color' = ($code.Contains('draw_cached_row_text(row,static_cast<unsigned>(metric+1)') -and -not $code.Contains('true,true,displayed.loads[metric],alpha)'))
     'Duration follows movement, not sampling' = ($code.Contains('overlay_transition_duration_ms(max_slot_travel)') -and -not $code.Contains('options_.interval_ms*0.65'))
-    'Adaptive frame budget does not double paint cost' = ($code.Contains('frame_cost+6ULL,25ULL,140ULL') -and -not $code.Contains('frame_cost*2'))
+    'Adaptive frame budget does not double paint cost' = ($code.Contains('frame_cost+8ULL,40ULL,160ULL') -and -not $code.Contains('frame_cost*2'))
+    'Transient 6MiB raster budget' = ($code.Contains('row_image_budget_bytes = 6U*1024U*1024U') -and $code.Contains('max_builds_per_frame = 6'))
+    'No idle row textures' = ($code.Contains('clear_row_images(); // No animation textures or extra RAM in idle.') -and $code.Contains('row_images_.clear();'))
+    'Offscreen bitmap rendering' = ($code.Contains('CreateCompatibleRenderTarget(') -and $code.Contains('offscreen->GetBitmap(&bitmap)') -and $code.Contains('target_->DrawBitmap(row_bitmap,'))
 }
 $failed = @($checks.GetEnumerator() | Where-Object { -not $_.Value } | ForEach-Object {$_.Key})
 if ($failed.Count) { throw ('Overlay motion policy failed: ' + ($failed -join '; ')) }

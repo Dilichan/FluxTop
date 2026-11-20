@@ -53,7 +53,7 @@ static_assert(temperature_band(64.9) == 0 && temperature_band(65.0) == 1
 constexpr UINT_PTR settings_timer = 1;
 constexpr UINT_PTR overlay_animation_timer = 2;
 // Timer wakes are cheap; paint scheduling uses actual frame cost and elapsed time.
-constexpr UINT overlay_animation_timer_ms = 16;
+constexpr UINT overlay_animation_timer_ms = 40; // 25 FPS maximum; stops at transition end.
 constexpr unsigned overlay_transition_duration_ms(float slot_travel) noexcept {
     return static_cast<unsigned>(std::clamp(280.0f +
         6.0f*std::clamp(slot_travel,0.0f,100.0f),280.0f,520.0f));
@@ -170,7 +170,11 @@ private:
     void draw_network_text(const Row& row, D2D1_RECT_F rect, float opacity = 1.0f);
     void draw_cached_row_text(const Row& row, unsigned column, std::wstring_view value,
         D2D1_RECT_F rect, IDWriteTextFormat* font, bool highlight = false,
-        std::optional<double> load = std::nullopt);
+        std::optional<double> load = std::nullopt, ID2D1RenderTarget* destination = nullptr,
+        ID2D1SolidColorBrush* destination_brush = nullptr);
+    ID2D1Bitmap* cached_row_bitmap(const Row& row, const OverlayColumnPositions& geometry,
+        std::size_t& built_this_frame);
+    void clear_row_images() noexcept;
     std::array<D2D1_RECT_F,6> columns(float y, float height) const;
     float text_size() const { return static_cast<float>(options_.font_size); }
     float row_height() const { return text_size() * 1.6f; }
@@ -249,6 +253,14 @@ private:
     // A bounded number of visible applications * 6 layouts, evicted by LRU.
     std::unordered_map<std::uint32_t,CachedRowTextLayouts> row_text_cache_;
     std::uint64_t row_text_clock_{};
+    struct CachedRowImage {
+        Row content;
+        ComPtr<ID2D1Bitmap> bitmap;
+        std::size_t bytes{};
+    };
+    // Images exist only while rows move; at most 6 MiB, never a permanent 100-row atlas.
+    std::unordered_map<std::uint32_t,CachedRowImage> row_images_;
+    std::size_t row_image_bytes_{};
     ComPtr<ID2D1Factory> factory_;
     ComPtr<IDWriteFactory> write_factory_;
     ComPtr<IDWriteTextFormat> body_font_, number_font_;
@@ -333,7 +345,8 @@ void Overlay::load_icons() {
     }
 }
 void Overlay::fonts() {
-    // Layouts hold the old format; release them before changing font size.
+    // Layouts and rasterized rows use the previous font; release both.
+    clear_row_images();
     row_text_cache_.clear();
     body_font_.Reset(); number_font_.Reset();
     const auto font = [&](const wchar_t* family, ComPtr<IDWriteTextFormat>& output) {
@@ -551,6 +564,7 @@ void Overlay::apply_client() {
         row_animation_active_=false;
         previous_rows_.clear();row_motion_.clear();
     }
+    clear_row_images(); // New metrics, colors, sizes or sorting may invalidate row pixels.
     scroll_ = 0; if (old_font_size != options_.font_size) fonts();
     diagnostics::write(diagnostics::Level::info,"ui.settings",
         "interval_ms="+std::to_string(options_.interval_ms)+" top="+std::to_string(options_.top)+
@@ -590,6 +604,7 @@ void Overlay::set_visible(bool visible) {
     if (!visible && !tray_ && !toggle_key_ && !client_) return;
     visible_ = visible;
     if (!visible) {
+        clear_row_images();
         KillTimer(hwnd_,overlay_animation_timer);
         row_animation_active_=false;
         previous_rows_.clear();row_motion_.clear();
@@ -702,6 +717,7 @@ void Overlay::update_view() {
             }
             previous_rows_=std::move(rows_);
             rows_=std::move(next);
+            clear_row_images(); // Rebuild only the rows used by the new transition.
             row_motion_.clear();row_motion_.reserve(rows_.size());
             // Pair PID with its creation stamp: a reused PID must not inherit old motion.
             // Hash lookup replaces quadratic matching for 100-row reorderings.
@@ -760,6 +776,7 @@ void Overlay::update_view() {
             }
         } else {
             rows_=std::move(next);
+            clear_row_images();
             KillTimer(hwnd_,overlay_animation_timer);
             row_animation_active_=false;
             previous_rows_.clear();row_motion_.clear();
@@ -769,6 +786,7 @@ void Overlay::update_view() {
 }
 
 void Overlay::release_surface() {
+    clear_row_images(); // Target-dependent bitmaps cannot outlive a device/surface reset.
     icon_bitmaps_.clear(); // D2D bitmaps belong to this render target.
     // DWrite layouts are device-independent and stay cached across target recreation.
     brush_.Reset(); target_.Reset();
@@ -816,8 +834,11 @@ void Overlay::draw_text(std::wstring_view value, D2D1_RECT_F rect, IDWriteTextFo
 // Shape a cell only when its value, geometry, font, or application identity changes.
 // Render both shadow and foreground with one immutable layout, without fading.
 void Overlay::draw_cached_row_text(const Row& row, unsigned column, std::wstring_view value,
-    D2D1_RECT_F rect, IDWriteTextFormat* font, bool highlight, std::optional<double> load) {
+    D2D1_RECT_F rect, IDWriteTextFormat* font, bool highlight, std::optional<double> load,
+    ID2D1RenderTarget* destination, ID2D1SolidColorBrush* destination_brush) {
     if (value.empty()) return;
+    ID2D1RenderTarget* renderer = destination ? destination : target_.Get();
+    ID2D1SolidColorBrush* ink = destination_brush ? destination_brush : brush_.Get();
     auto found = row_text_cache_.find(row.pid);
     if (found == row_text_cache_.end()) {
         const std::size_t cache_capacity = std::clamp<std::size_t>(
@@ -847,18 +868,79 @@ void Overlay::draw_cached_row_text(const Row& row, unsigned column, std::wstring
         require_hr(write_factory_->CreateTextLayout(cached_text.c_str(),static_cast<UINT32>(cached_text.size()),
             font,width,height,&layout),"Overlay cached row text");
     }
-    brush_->SetColor(D2D1::ColorF(0,0,0,0.8f));
-    target_->DrawTextLayout(D2D1::Point2F(rect.left+1,rect.top+1),layout.Get(),brush_.Get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    ink->SetColor(D2D1::ColorF(0,0,0,0.8f));
+    renderer->DrawTextLayout(D2D1::Point2F(rect.left+1,rect.top+1),layout.Get(),ink,D2D1_DRAW_TEXT_OPTIONS_CLIP);
     D2D1_COLOR_F color = D2D1::ColorF(1,1,1,1);
     if (row_colors_ && highlight && load && std::isfinite(*load) && *load >= 0.0) {
         color = load_band(*load)==0 ? D2D1::ColorF(0.25f,0.92f,0.35f,1)
             : load_band(*load)==1 ? D2D1::ColorF(1.0f,0.80f,0.13f,1)
             : D2D1::ColorF(1.0f,0.22f,0.22f,1);
     }
-    brush_->SetColor(color);
-    target_->DrawTextLayout(D2D1::Point2F(rect.left,rect.top),layout.Get(),brush_.Get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    ink->SetColor(color);
+    renderer->DrawTextLayout(D2D1::Point2F(rect.left,rect.top),layout.Get(),ink,D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
+void Overlay::clear_row_images() noexcept {
+    row_images_.clear();
+    row_image_bytes_=0;
+}
+
+// Rasterize the text of a moving row once; the icon already has its own D2D bitmap cache.
+// A fixed memory limit and 6 new images per frame avoid startup spikes at 100 rows.
+ID2D1Bitmap* Overlay::cached_row_bitmap(const Row& row,
+    const OverlayColumnPositions& geometry, std::size_t& built_this_frame) {
+    constexpr std::size_t row_image_budget_bytes = 6U*1024U*1024U;
+    constexpr std::size_t max_builds_per_frame = 6;
+    auto found=row_images_.find(row.pid);
+    if(found!=row_images_.end()) {
+        if(found->second.content==row) return found->second.bitmap.Get();
+        row_image_bytes_-=found->second.bytes;
+        row_images_.erase(found);
+    }
+    if(built_this_frame>=max_builds_per_frame || row_images_.size()>=100) return nullptr;
+    const double density=static_cast<double>(dpi_)/96.0;
+    const auto pixel_width=static_cast<std::uint64_t>(std::ceil(geometry.total_width*density));
+    const auto pixel_height=static_cast<std::uint64_t>(std::ceil(row_height()*density));
+    const auto expected_bytes=pixel_width*pixel_height*4ULL;
+    if(!pixel_width || !pixel_height || expected_bytes>row_image_budget_bytes-row_image_bytes_) return nullptr;
+
+    ComPtr<ID2D1BitmapRenderTarget> offscreen;
+    if(FAILED(target_->CreateCompatibleRenderTarget(D2D1::SizeF(geometry.total_width,row_height()),&offscreen)))
+        return nullptr; // Safe fallback: paint the existing cached text layouts.
+    ComPtr<ID2D1SolidColorBrush> ink;
+    if(FAILED(offscreen->CreateSolidColorBrush(D2D1::ColorF(1,1,1,1),&ink))) return nullptr;
+    offscreen->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    offscreen->BeginDraw();
+    offscreen->Clear(D2D1::ColorF(0,0,0,0));
+    const auto cell=[&](std::size_t index) {
+        return D2D1::RectF(geometry.left[index],0,geometry.right[index],row_height());
+    };
+    draw_cached_row_text(row,0,row.name,cell(0),body_font_.Get(),false,std::nullopt,
+        offscreen.Get(),ink.Get());
+    const std::array<std::wstring_view,5> values{
+        row.cpu,row.ram,row.gpu,row.vram,row.network};
+    for(std::size_t metric=0;metric<values.size();++metric) {
+        if(!(active_metrics() & (1U<<metric))) continue;
+        draw_cached_row_text(row,static_cast<unsigned>(metric+1),values[metric],
+            cell(metric+1),number_font_.Get(),metric<4,
+            metric<4 ? row.loads[metric] : std::optional<double>{},offscreen.Get(),ink.Get());
+    }
+    if(FAILED(offscreen->EndDraw())) return nullptr;
+    ComPtr<ID2D1Bitmap> bitmap;
+    if(FAILED(offscreen->GetBitmap(&bitmap))) return nullptr;
+    const auto physical=bitmap->GetPixelSize();
+    const auto bytes=static_cast<std::uint64_t>(physical.width)*physical.height*4ULL;
+    if(bytes>row_image_budget_bytes-row_image_bytes_) return nullptr;
+    CachedRowImage cached;
+    cached.content=row;
+    cached.bytes=static_cast<std::size_t>(bytes);
+    cached.bitmap=std::move(bitmap);
+    auto [position,inserted]=row_images_.try_emplace(row.pid,std::move(cached));
+    if(!inserted) return nullptr;
+    row_image_bytes_+=position->second.bytes;
+    ++built_this_frame;
+    return position->second.bitmap.Get();
+}
 void Overlay::draw_network_text(const Row& row, D2D1_RECT_F rect, float opacity) {
     draw_text(row.network,rect,number_font_.Get(),false,false,std::nullopt,opacity);
     // No defined link-capacity percentage for Rx/Tx. They stay white unless
@@ -1054,6 +1136,7 @@ void Overlay::paint(bool animation_only) {
     if(partial_body)
         target_->PushAxisAlignedClip(D2D1::RectF(0,dirty_top,table_width(),dirty_bottom),
             D2D1_ANTIALIAS_MODE_ALIASED);
+    std::size_t row_bitmap_builds=0;
     for (std::size_t i=0;i<count && i+scroll_<rows_.size();++i) {
         // Row zero remains visible while the remaining auto-ranked rows scroll.
         const bool fixed_focus = options_.sort == Sort::automatic && focused_pid_
@@ -1095,20 +1178,29 @@ void Overlay::paint(bool animation_only) {
             const float side=text_size()*1.3f, top=y+(row_height()-side)/2;
             target_->DrawBitmap(found->second.bitmap.Get(),D2D1::RectF(2,top,2+side,top+side),opacity);
         }
-        draw_cached_row_text(row,0,row.name,cells[0],body_font_.Get());
-        const auto paint_values=[&](const Row& displayed) {
-            const std::array<std::wstring_view,5> values{
-                displayed.cpu,displayed.ram,displayed.gpu,displayed.vram,displayed.network};
-            for(std::size_t metric=0;metric<metric_names.size();++metric) {
-                if(!(active_metrics() & (1U<<metric))) continue;
-                if(metric==4U) draw_cached_row_text(row,static_cast<unsigned>(metric+1),
-                    values[metric],cells[metric+1],number_font_.Get());
-                else draw_cached_row_text(row,static_cast<unsigned>(metric+1),
-                    values[metric],cells[metric+1],number_font_.Get(),true,displayed.loads[metric]);
-            }
-        };
-        // Resource readings update immediately; only vertical row position moves.
-        paint_values(row);
+        // During reordering, move already-rasterized text. Stationary rows outside
+        // the dirty Y-band have already been skipped; no repeated text shaping.
+        ID2D1Bitmap* row_bitmap = row_animation_active_
+            ? cached_row_bitmap(row,geometry,row_bitmap_builds) : nullptr;
+        if(row_bitmap) {
+            target_->DrawBitmap(row_bitmap,D2D1::RectF(0,y,geometry.total_width,y+height),
+                1.0f,D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        } else {
+            // Low-memory / no-animation fallback uses the existing layout cache.
+            draw_cached_row_text(row,0,row.name,cells[0],body_font_.Get());
+            const auto paint_values=[&](const Row& displayed) {
+                const std::array<std::wstring_view,5> values{
+                    displayed.cpu,displayed.ram,displayed.gpu,displayed.vram,displayed.network};
+                for(std::size_t metric=0;metric<metric_names.size();++metric) {
+                    if(!(active_metrics() & (1U<<metric))) continue;
+                    if(metric==4U) draw_cached_row_text(row,static_cast<unsigned>(metric+1),
+                        values[metric],cells[metric+1],number_font_.Get());
+                    else draw_cached_row_text(row,static_cast<unsigned>(metric+1),
+                        values[metric],cells[metric+1],number_font_.Get(),true,displayed.loads[metric]);
+                }
+            };
+            paint_values(row);
+        }
     }
     if(partial_body)target_->PopAxisAlignedClip();
     target_->PopAxisAlignedClip();
@@ -1312,6 +1404,7 @@ LRESULT Overlay::message(UINT msg,WPARAM wp,LPARAM lp) {
                 KillTimer(hwnd_,overlay_animation_timer);
                 row_animation_active_=false;
                 previous_rows_.clear();row_motion_.clear();
+                clear_row_images(); // No animation textures or extra RAM in idle.
             }
             // WM_PAINT from fresh readings/settings takes precedence over a row-only
             // frame. Both execute on the UI thread, so no shared bitmap races.
@@ -1320,10 +1413,10 @@ LRESULT Overlay::message(UINT msg,WPARAM wp,LPARAM lp) {
                 const auto started=GetTickCount64();
                 paint(true);
                 const auto frame_cost=GetTickCount64()-started;
-                // Aim for about 30-40 FPS when affordable. Respect the observed
-                // cost of software rendering instead of doubling its delay.
-                row_animation_next_frame_tick_=GetTickCount64()+
-                    std::clamp<ULONGLONG>(frame_cost+6ULL,25ULL,140ULL);
+                // At most 25 FPS (40 ms between frame starts). Skip late frames
+                // when software drawing/UpdateLayeredWindow exceeds the budget.
+                row_animation_next_frame_tick_=started+
+                    std::clamp<ULONGLONG>(frame_cost+8ULL,40ULL,160ULL);
                 if(frame_cost>=45 && !row_animation_slow_frame_reported_) {
                     row_animation_slow_frame_reported_=true;
                     diagnostics::write(diagnostics::Level::warning,"overlay.animation_slow",
@@ -1376,6 +1469,7 @@ LRESULT Overlay::message(UINT msg,WPARAM wp,LPARAM lp) {
         KillTimer(hwnd_,overlay_animation_timer);
         row_animation_active_=false;
         previous_rows_.clear();row_motion_.clear();
+        clear_row_images();
         stopping_=true; save_settings(); worker_.stop(); icons_.reset();
         if (client_) DestroyWindow(client_);
         NOTIFYICONDATAW data{}; data.cbSize=sizeof(data); data.hWnd=hwnd_; data.uID=1;
