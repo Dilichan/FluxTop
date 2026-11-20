@@ -16,8 +16,9 @@ jobs:
         run: cmake --preset windows
       - name: Build Release
         run: cmake --build --preset release
-      - name: Test
-        run: ctest --preset release
+      - name: Test including native JSONL and installer fixtures
+        run: ctest --preset release --output-on-failure
+      # Git source-launcher remains PowerShell in stage 1; do not drop its integration coverage.
       - name: Test Git updater with local repositories
         shell: powershell
         run: ./tests/update_tests.ps1
@@ -27,29 +28,9 @@ jobs:
       - name: Test elevation policy without opening UAC
         shell: powershell
         run: ./tests/elevation_tests.ps1
-      - name: Validate JSONL contract
-        shell: pwsh
-        run: |
-          $dbPath = Join-Path $env:GITHUB_WORKSPACE 'build/ci-fluxtop.db'
-          $env:FLUXTOP_DATA_DB = $dbPath
-          $env:FLUXTOP_LOG_PATH = Join-Path $env:GITHUB_WORKSPACE 'build/ci-activity.log'
-          $lines = & ./build/Release/fluxtop.exe --samples 2 --interval-ms 250 --no-gpu --jsonl
-          if ($LASTEXITCODE -ne 0 -or $lines.Count -ne 2) { throw 'Collector failed or wrong sample count' }
-          foreach ($line in $lines) {
-            $sample = $line | ConvertFrom-Json
-            if ($sample.schema_version -ne 1 -or $sample.gpu_status -ne 'disabled') { throw 'Invalid schema/status' }
-            if ($sample.process_count -lt 1 -or $sample.self.working_set_bytes -le 0) { throw 'Missing live metrics' }
-            if ($sample.history_error) { throw "History accumulator error: $($sample.history_error)" }
-          }
-          # Writes are buffered by minute. The worker flushes its pending minute at shutdown.
-          # CTest separately verifies schema, graph, icons and mathematical rollups.
-          if (-not (Test-Path -LiteralPath $dbPath -PathType Leaf) -or
-              (Get-Item -LiteralPath $dbPath).Length -eq 0) {
-            throw 'History was not persisted on graceful shutdown'
-          }
-      - name: Package downloadable EXE
-        shell: pwsh
-        run: ./tools/Package-Release.ps1 -SkipTests
+      - name: Package downloadable EXE with CMake
+        shell: cmd
+        run: cmake -DROOT=. -DBUILD_DIRECTORY=build -DOUTPUT_DIR=out/release -DCONFIG=Release -P tools/Package-Release.cmake
       - uses: actions/upload-artifact@v4
         with:
           name: FluxTop-windows-x64

@@ -17,35 +17,34 @@ jobs:
     runs-on: windows-2022
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    defaults:
+      run:
+        shell: cmd
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag || github.ref_name }}
-      - name: Validate release tag
-        shell: pwsh
-        env:
-          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-        run: |
-          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+(-preview\.\d+)?$') { throw 'Unsupported release tag' }
-          "RELEASE_TAG=$env:RELEASE_TAG" >> $env:GITHUB_ENV
+      - name: Validate tag and prepare release notes
+        run: cmake -DROOT=. "-DTAG=%RELEASE_TAG%" -DOUTPUT=build/release-notes.md -P tools/Get-ReleaseNotes.cmake
       - name: Configure
-        run: cmake -S . -B build -A x64 "-DFLUXTOP_RELEASE_TAG:STRING=${{ env.RELEASE_TAG }}"
-      - name: Build
+        run: cmake -S . -B build -A x64 "-DFLUXTOP_RELEASE_TAG:STRING=%RELEASE_TAG%"
+      - name: Build Release
         run: cmake --build --preset release
-      - name: Test and package
-        shell: pwsh
-        run: ./tools/Package-Release.ps1
+      - name: Test
+        run: ctest --preset release --output-on-failure
+      - name: Package verified assets
+        run: cmake -DROOT=. -DBUILD_DIRECTORY=build -DOUTPUT_DIR=out/release -DCONFIG=Release -P tools/Package-Release.cmake
       - name: Publish verified assets
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          $notesPath = Join-Path $env:RUNNER_TEMP 'release-notes.md'
-          & ./tools/Get-ReleaseNotes.ps1 -Tag $env:RELEASE_TAG -OutputPath $notesPath
-          if (-not (Test-Path -LiteralPath $notesPath -PathType Leaf)) { throw 'Release notes file missing' }
-          if ([string]::IsNullOrWhiteSpace((Get-Content -LiteralPath $notesPath -Raw))) { throw 'Release notes file empty' }
-          $arguments=@('release','create',$env:RELEASE_TAG,'out/release/FluxTop.exe','out/release/SHA256SUMS.txt','out/release/LICENSE.txt',
-            '--verify-tag','--title',"FluxTop $env:RELEASE_TAG",'--notes-file',$notesPath)
-          if ($env:RELEASE_TAG -like '*-preview.*') { $arguments+='--prerelease' }
-          & gh @arguments
-          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
+        run: >-
+          gh release create "%RELEASE_TAG%"
+          "out/release/FluxTop.exe"
+          "out/release/SHA256SUMS.txt"
+          "out/release/LICENSE.txt"
+          --verify-tag
+          --title "FluxTop %RELEASE_TAG%"
+          --notes-file "build/release-notes.md"
+          ${{ contains(env.RELEASE_TAG, '-preview.') && '--prerelease' || '' }}

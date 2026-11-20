@@ -59,22 +59,24 @@ set_target_properties(fluxtop_launcher PROPERTIES OUTPUT_NAME FluxTop
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(fluxtop_native_policy_tests tests/native_policy_tests.cpp)
+    target_compile_features(fluxtop_native_policy_tests PRIVATE cxx_std_20)
     add_executable(fluxtop_tests tests/core_tests.cpp)
     target_link_libraries(fluxtop_tests PRIVATE fluxtop_core)
     add_test(NAME core COMMAND fluxtop_tests)
-    add_test(NAME update_consent_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
-        -File "${PROJECT_SOURCE_DIR}/tests/update_consent_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
+    add_test(NAME update_consent_policy COMMAND fluxtop_native_policy_tests "${PROJECT_SOURCE_DIR}" "update_consent_policy")
     add_executable(fluxtop_release_tests tests/release_tests.cpp)
     target_link_libraries(fluxtop_release_tests PRIVATE fluxtop_release_update)
     target_compile_definitions(fluxtop_release_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
     add_test(NAME release_update COMMAND fluxtop_release_tests "$<TARGET_FILE:fluxtop_launcher>" "${CMAKE_CURRENT_BINARY_DIR}" "${FLUXTOP_RELEASE_TAG}")
-    add_test(NAME portable COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
-        -File "${PROJECT_SOURCE_DIR}/tests/portable_tests.ps1" -Launcher "$<TARGET_FILE:fluxtop_launcher>"
-        -Monitor "$<TARGET_FILE:fluxtop>" -FixtureRoot "${CMAKE_CURRENT_BINARY_DIR}")
-    add_test(NAME installation_fixture COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
-        -File "${PROJECT_SOURCE_DIR}/tests/installation_tests.ps1"
-        -Launcher "$<TARGET_FILE:fluxtop_launcher>" -FixtureRoot "${CMAKE_CURRENT_BINARY_DIR}")
-    set_tests_properties(installation_fixture PROPERTIES TIMEOUT 30)
+    add_executable(fluxtop_native_launcher_fixture_tests tests/native_launcher_fixture_tests.cpp)
+    target_compile_features(fluxtop_native_launcher_fixture_tests PRIVATE cxx_std_20)
+    target_link_libraries(fluxtop_native_launcher_fixture_tests PRIVATE bcrypt)
+    add_test(NAME portable COMMAND fluxtop_native_launcher_fixture_tests portable
+        "$<TARGET_FILE:fluxtop_launcher>" "$<TARGET_FILE:fluxtop>" "${CMAKE_CURRENT_BINARY_DIR}")
+    add_test(NAME installation_fixture COMMAND fluxtop_native_launcher_fixture_tests installation_fixture
+        "$<TARGET_FILE:fluxtop_launcher>" "$<TARGET_FILE:fluxtop>" "${CMAKE_CURRENT_BINARY_DIR}")
+    set_tests_properties(installation_fixture PROPERTIES TIMEOUT 75)
     set_tests_properties(release_update portable PROPERTIES TIMEOUT 30)
     add_executable(fluxtop_history_tests tests/history_tests.cpp)
     target_link_libraries(fluxtop_history_tests PRIVATE fluxtop_history)
@@ -89,20 +91,13 @@ if(BUILD_TESTING)
     target_include_directories(fluxtop_axis_tests PRIVATE include)
     target_compile_features(fluxtop_axis_tests PRIVATE cxx_std_20)
     add_test(NAME statistics_axis COMMAND fluxtop_axis_tests)
-    add_test(NAME statistics_table_popout_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
-        -File "${PROJECT_SOURCE_DIR}/tests/statistics_table_popout_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
-    add_test(NAME statistics_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
-        -File "${PROJECT_SOURCE_DIR}/tests/statistics_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
-    add_test(NAME statistics_popout_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
-        -File "${PROJECT_SOURCE_DIR}/tests/statistics_popout_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
-    add_test(NAME statistics_tooltip_axis_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
-        -File "${PROJECT_SOURCE_DIR}/tests/statistics_tooltip_axis_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
-    add_test(NAME overlay_animation_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
-        -File "${PROJECT_SOURCE_DIR}/tests/overlay_animation_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
-    add_test(NAME overlay_settings_animation_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
-        -File "${PROJECT_SOURCE_DIR}/tests/overlay_settings_animation_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
-    add_test(NAME fps_header_policy COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
-        -File "${PROJECT_SOURCE_DIR}/tests/fps_header_policy.ps1" -Root "${PROJECT_SOURCE_DIR}")
+    add_test(NAME statistics_table_popout_policy COMMAND fluxtop_native_policy_tests "${PROJECT_SOURCE_DIR}" "statistics_table_popout_policy")
+    add_test(NAME statistics_policy COMMAND fluxtop_native_policy_tests "${PROJECT_SOURCE_DIR}" "statistics_policy")
+    add_test(NAME statistics_popout_policy COMMAND fluxtop_native_policy_tests "${PROJECT_SOURCE_DIR}" "statistics_popout_policy")
+    add_test(NAME statistics_tooltip_axis_policy COMMAND fluxtop_native_policy_tests "${PROJECT_SOURCE_DIR}" "statistics_tooltip_axis_policy")
+    add_test(NAME overlay_animation_policy COMMAND fluxtop_native_policy_tests "${PROJECT_SOURCE_DIR}" "overlay_animation_policy")
+    add_test(NAME overlay_settings_animation_policy COMMAND fluxtop_native_policy_tests "${PROJECT_SOURCE_DIR}" "overlay_settings_animation_policy")
+    add_test(NAME fps_header_policy COMMAND fluxtop_native_policy_tests "${PROJECT_SOURCE_DIR}" "fps_header_policy")
     set_tests_properties(history PROPERTIES TIMEOUT 20)
     add_executable(fluxtop_temperature_tests tests/temperature_tests.cpp src/temperatures.cpp)
     target_include_directories(fluxtop_temperature_tests PRIVATE include)
@@ -128,6 +123,11 @@ if(BUILD_TESTING)
     target_link_libraries(fluxtop_unified_storage_tests PRIVATE fluxtop_history fluxtop_icons)
     target_compile_definitions(fluxtop_unified_storage_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
     add_test(NAME unified_storage COMMAND fluxtop_unified_storage_tests "${CMAKE_CURRENT_BINARY_DIR}")
+    add_executable(fluxtop_native_jsonl_tests tests/native_jsonl_tests.cpp)
+    target_compile_features(fluxtop_native_jsonl_tests PRIVATE cxx_std_20)
+    add_test(NAME jsonl_contract COMMAND fluxtop_native_jsonl_tests
+        "$<TARGET_FILE:fluxtop>" "${CMAKE_CURRENT_BINARY_DIR}")
+    set_tests_properties(jsonl_contract PROPERTIES TIMEOUT 30)
     add_test(NAME cli_help COMMAND fluxtop --help)
     set_tests_properties(cli_help PROPERTIES TIMEOUT 20)
     add_test(NAME cli_invalid COMMAND fluxtop --interval-ms 0)
@@ -140,7 +140,7 @@ if(BUILD_TESTING)
         ENVIRONMENT "FLUXTOP_OVERLAY_SETTINGS=${CMAKE_CURRENT_BINARY_DIR}/overlay-smoke.ini;FLUXTOP_DATA_DB=${CMAKE_CURRENT_BINARY_DIR}/overlay-fluxtop.db;FLUXTOP_LOG_PATH=${CMAKE_CURRENT_BINARY_DIR}/overlay-activity.log")
 endif()
 
-foreach(target fluxtop fluxtop_launcher fluxtop_release_update fluxtop_core fluxtop_icons fluxtop_history fluxtop_statistics_tests fluxtop_tests fluxtop_icon_tests fluxtop_network_tests fluxtop_history_tests fluxtop_release_tests fluxtop_temperature_tests fluxtop_logging fluxtop_diagnostics_tests fluxtop_unified_storage_tests fluxtop_axis_tests)
+foreach(target fluxtop fluxtop_launcher fluxtop_release_update fluxtop_core fluxtop_icons fluxtop_history fluxtop_statistics_tests fluxtop_tests fluxtop_icon_tests fluxtop_network_tests fluxtop_history_tests fluxtop_release_tests fluxtop_temperature_tests fluxtop_logging fluxtop_diagnostics_tests fluxtop_unified_storage_tests fluxtop_axis_tests fluxtop_native_policy_tests fluxtop_native_launcher_fixture_tests fluxtop_native_jsonl_tests)
     if(TARGET ${target} AND MSVC)
         target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/W4;/WX;/permissive-;/utf-8;/EHsc>")
     endif()
