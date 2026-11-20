@@ -35,7 +35,7 @@ constexpr UINT foreground_update_message = WM_APP + 13;
 constexpr int toggle_hotkey = 1, client_hotkey = 2;
 enum Control : UINT { open_client = 100, toggle_table, quit_app, top_label, top_control, sort_control, font_control,
     alpha_control, visible_control, move_control, icons_control, stats_control, startup_control,
-    alpha_label, interval_control, summary_control, header_colors_control, row_colors_control, animation_control, metric_control = 200, disk_list_control = 300, tab_control = 450, font_label = 500, interval_label = 501 };
+    alpha_label, interval_control, summary_control, header_colors_control, row_colors_control, animation_control, metric_control = 200, disk_checkbox_control = 300, tab_control = 450, font_label = 500, interval_label = 501 };
 constexpr unsigned all_metrics = 31; // Five resource columns; FPS is in the application heading.
 constexpr unsigned default_metrics = 31;
 constexpr std::array<Sort, 8> sort_ui_values{Sort::automatic, Sort::cpu, Sort::ram, Sort::gpu,
@@ -194,7 +194,8 @@ private:
     unsigned metrics_ = default_metrics;
     unsigned selected_disks_mask_{}; // 26 letters, persisted even when a drive disappears.
     std::vector<wchar_t> available_disk_letters_;
-    HWND disk_list_{};
+    std::array<HWND,26> disk_checks_{};
+    HWND shortcuts_label_{};
     bool summary_ = false;
     bool header_colors_ = true, row_colors_ = true;
     bool animation_enabled_ = true;
@@ -350,17 +351,53 @@ float Overlay::disk_left(std::size_t ordinal) const {
         static_cast<float>(ordinal)*(overlay_layout.disk_width+overlay_layout.column_gap));
 }
 void Overlay::refresh_disk_controls() {
-    if(!disk_list_ || !IsWindow(disk_list_))return;
-    SendMessageW(disk_list_,WM_SETREDRAW,FALSE,0);
-    SendMessageW(disk_list_,LB_RESETCONTENT,0,0);
-    for(const wchar_t letter:available_disk_letters_) {
-        const auto name=L"Диск "+std::wstring(1,letter)+L":";
-        const auto index=SendMessageW(disk_list_,LB_ADDSTRING,0,reinterpret_cast<LPARAM>(name.c_str()));
-        if(index>=0)SendMessageW(disk_list_,LB_SETSEL,
-            selected_disks_mask_&(1U<<(letter-L'A'))?TRUE:FALSE,index);
+    if(!client_ || !IsWindow(client_))return;
+    // Disk topology changes are infrequent; keep no permanently hidden listbox.
+    for(auto& check:disk_checks_) {
+        if(!check)continue;
+        const HWND old=check;
+        controls_.erase(std::remove_if(controls_.begin(),controls_.end(),
+            [old](const Child& entry){return entry.window==old;}),controls_.end());
+        DestroyWindow(old);
+        check=nullptr;
     }
-    SendMessageW(disk_list_,WM_SETREDRAW,TRUE,0);
-    InvalidateRect(disk_list_,nullptr,FALSE);
+    for(std::size_t i=0;i<available_disk_letters_.size();++i) {
+        const wchar_t letter=available_disk_letters_[i];
+        if(letter<L'A' || letter>L'Z')continue;
+        const unsigned ordinal=static_cast<unsigned>(letter-L'A');
+        const auto name=L"Диск "+std::wstring(1,letter)+L":";
+        const HWND box=control(L"BUTTON",name.c_str(),BS_AUTOCHECKBOX | WS_TABSTOP,
+            disk_checkbox_control+ordinal,22+static_cast<int>(i%5U)*104,
+            483+static_cast<int>(i/5U)*32,98,26);
+        disk_checks_[ordinal]=box;
+        SendMessageW(box,BM_SETCHECK,(selected_disks_mask_ & (1U<<ordinal))?
+            BST_CHECKED:BST_UNCHECKED,0);
+        if(client_page_!=0)ShowWindow(box,SW_HIDE);
+    }
+    // The same responsive checkbox grid also determines the settings height.
+    const int rows=static_cast<int>((available_disk_letters_.size()+4U)/5U);
+    const int summary_y=486+rows*32;
+    const int header_y=summary_y+33;
+    const int animation_y=header_y+36;
+    const int stats_y=animation_y+43;
+    const int shortcuts_y=stats_y+112;
+    const int quit_y=shortcuts_y+40;
+    const auto position=[this](HWND handle,int y) {
+        if(!handle)return;
+        for(auto& child:controls_)if(child.window==handle) {
+            const int height=child.bounds.bottom-child.bounds.top;
+            child.bounds.top=y;child.bounds.bottom=y+height;
+            return;
+        }
+    };
+    position(GetDlgItem(client_,summary_control),summary_y);
+    position(GetDlgItem(client_,header_colors_control),header_y);
+    position(GetDlgItem(client_,row_colors_control),header_y);
+    position(GetDlgItem(client_,animation_control),animation_y);
+    position(GetDlgItem(client_,stats_control),stats_y);
+    position(shortcuts_label_,shortcuts_y);
+    position(GetDlgItem(client_,quit_app),quit_y);
+    if(!initializing_client_)layout_client();
 }
 void Overlay::fonts() {
     // Layouts and rasterized rows use the previous font; release both.
@@ -388,7 +425,9 @@ void Overlay::fit_table() {
     const int width = std::min(pixels(table_width()), static_cast<int>(area.right-area.left-margin*2));
     const int requested_height = static_cast<int>(std::ceil((row_height() * static_cast<float>(summary_only() ? 1 : options_.top+1) + 4) * static_cast<float>(dpi_) / 96.0f));
     const int height = std::min(requested_height, static_cast<int>(area.bottom-area.top-margin*2));
-    const int x = std::clamp(static_cast<int>(rect.left), static_cast<int>(area.left+margin), static_cast<int>(area.right-margin-width));
+    const int preferred_x=static_cast<int>(rect.right)-width;
+    const int x=std::clamp(preferred_x,static_cast<int>(area.left+margin),
+        static_cast<int>(area.right-margin-width));
     const int y = std::clamp(static_cast<int>(rect.top), static_cast<int>(area.top+margin), static_cast<int>(area.bottom-margin-height));
     SetWindowPos(hwnd_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
 }
@@ -510,18 +549,16 @@ void Overlay::init_client() {
     const auto row_colors = control(L"BUTTON", L"Окрашивать строки оверлея", BS_AUTOCHECKBOX | WS_TABSTOP,
         row_colors_control, 290, 668, 280, 26);
     SendMessageW(row_colors, BM_SETCHECK, row_colors_ ? BST_CHECKED : BST_UNCHECKED, 0);
-    control(L"STATIC",L"Диски (% активности всей системы, не по приложениям):",0,0,22,484,536,24);
-    disk_list_=control(L"LISTBOX",L"",LBS_MULTIPLESEL|LBS_NOTIFY|WS_VSCROLL|WS_BORDER|WS_TABSTOP,
-        disk_list_control,22,508,536,110);
-    refresh_disk_controls();
+
     const auto animation = control(L"BUTTON", L"Анимация строк оверлея", BS_AUTOCHECKBOX | WS_TABSTOP,
         animation_control, 22, 704, 536, 26);
     SendMessageW(animation, BM_SETCHECK, animation_enabled_ ? BST_CHECKED : BST_UNCHECKED, 0);
     control(L"STATIC", L"", 0, stats_control, 22, 747, 536, 104);
-    control(L"STATIC", L"Ctrl+Alt+F9 — клиент   ·   Ctrl+Alt+F10 — оверлей", 0, 0, 22, 859, 540, 24);
+    shortcuts_label_=control(L"STATIC", L"Ctrl+Alt+F9 — клиент   ·   Ctrl+Alt+F10 — оверлей", 0, 0, 22, 859, 540, 24);
     control(L"BUTTON", L"Завершить работу", WS_TABSTOP, quit_app, 373, 899, 185, 32);
     statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,options_.top);
     statistics_->activate(false);
+    refresh_disk_controls();
     initializing_client_ = false; client_stats();
 }
 void Overlay::switch_page(unsigned page) {
@@ -552,7 +589,10 @@ void Overlay::layout_client() {
         MoveWindow(child.window, px(child.bounds.left), px(child.bounds.top+40), px(child.bounds.right-child.bounds.left), px(child.bounds.bottom-child.bounds.top), TRUE);
     }
     const int page_width=client_page_==1?1180:680;
-    const int page_height=client_page_==1?920:1010;
+    int settings_height=840;
+    for(const auto& child:controls_)if(GetDlgCtrlID(child.window)==static_cast<int>(quit_app))
+        settings_height=std::max(settings_height,static_cast<int>(child.bounds.bottom)+68);
+    const int page_height=client_page_==1?920:settings_height;
     if(tabs_) MoveWindow(tabs_,0,0,px(page_width),px(page_height),TRUE);
     if(statistics_) statistics_->resize(px(12),px(40),px(page_width-24),px(page_height-52));
     if (client_font_) DeleteObject(client_font_); client_font_ = font;
@@ -587,10 +627,11 @@ void Overlay::apply_client() {
         if (SendDlgItemMessageW(client_,metric_control+i,BM_GETCHECK,0,0)==BST_CHECKED)
             metrics_ |= 1U<<i;
     }
-    if(disk_list_)for(std::size_t i=0;i<available_disk_letters_.size();++i) {
-        const unsigned bit=1U<<(available_disk_letters_[i]-L'A');
-        if(SendMessageW(disk_list_,LB_GETSEL,i,0)>0)selected_disks_mask_|=bit;
-        else selected_disks_mask_ &= ~bit;
+    for(std::size_t i=0;i<disk_checks_.size();++i)if(disk_checks_[i]) {
+        const unsigned bit=1U<<static_cast<unsigned>(i);
+        if(SendMessageW(disk_checks_[i],BM_GETCHECK,0,0)==BST_CHECKED)
+            selected_disks_mask_|=bit;
+        else selected_disks_mask_&=~bit;
     }
     summary_ = SendDlgItemMessageW(client_,summary_control,BM_GETCHECK,0,0)==BST_CHECKED;
     header_colors_ = SendDlgItemMessageW(client_,header_colors_control,BM_GETCHECK,0,0)==BST_CHECKED;
@@ -1396,7 +1437,8 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         if (LOWORD(wp)==sort_control && HIWORD(wp)==CBN_SELCHANGE) {
             apply_client(); return 0;
         }
-        if(LOWORD(wp)==disk_list_control && HIWORD(wp)==LBN_SELCHANGE) {
+        if(LOWORD(wp)>=disk_checkbox_control && LOWORD(wp)<disk_checkbox_control+26U
+            && HIWORD(wp)==BN_CLICKED) {
             apply_client();return 0;
         }
         if (LOWORD(wp)>=metric_control && LOWORD(wp)<metric_control+metric_names.size() && HIWORD(wp)==BN_CLICKED) {
@@ -1427,7 +1469,9 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         diagnostics::write(diagnostics::Level::info,"ui.close","settings window closed");
         KillTimer(window,settings_timer); apply_client(); DestroyWindow(window); return 0;
     case WM_DESTROY:
-        statistics_.reset(); tabs_=nullptr; client_=nullptr; controls_.clear(); if (client_font_) { DeleteObject(client_font_); client_font_=nullptr; } activity(); return 0;
+        statistics_.reset(); tabs_=nullptr; client_=nullptr; controls_.clear();
+        disk_checks_.fill(nullptr);shortcuts_label_=nullptr;
+        if (client_font_) { DeleteObject(client_font_); client_font_=nullptr; } activity(); return 0;
     }
     return DefWindowProcW(window,msg,wp,lp);
 }

@@ -1489,7 +1489,7 @@ void StatisticsPage::draw(HDC dc) {
         const auto reading=system_points_.empty()?std::optional<double>{}:
             system_points_.back().disks[selected_disk_letter_-L'A'];
         const auto detail=L"Активность логического диска "+std::wstring(1,selected_disk_letter_)+
-            L": "+stat_percent(reading)+L"   (общая нагрузка, не отдельного процесса)";
+            L": "+stat_percent(reading);
         label(dc,detail.c_str(),310,731,RGB(45,52,60));
     } else if(selected_section_<4) {
         const auto range=std::array<std::int64_t,3>{{60000,300000,900000}}[system_range_];

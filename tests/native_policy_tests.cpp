@@ -271,6 +271,14 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "GetDlgItemInt(client_, interval_control"});
         need(overlay,{"for (const auto label : {L\"Авто\", L\"CPU\", L\"RAM\", L\"GPU\""});
         regex_need(overlay,"L\"Авто\\s*[—-]",false);
+        need(overlay,{"disk_checkbox_control = 300","std::array<HWND,26> disk_checks_{};",
+            "disk_checkbox_control+ordinal","const int summary_y=486+rows*32;",
+            "SendMessageW(disk_checks_[i],BM_GETCHECK,0,0)",
+            "const int preferred_x=static_cast<int>(rect.right)-width;"});
+        absent(overlay,{"LBS_MULTIPLESEL","LB_GETSEL","LB_SETSEL",
+            "Диски (% активности всей системы, не по приложениям):"});
+        const auto disk_page=read(root/"src/statistics_page.cpp");
+        absent(disk_page,{"общая нагрузка, не отдельного процесса"});
     } else if(policy=="source_bootstrap_policy") {
         const auto auto_start=read(root/"src/autostart.cpp");
         const auto core=read(root/"src/source_checkout.cpp");
