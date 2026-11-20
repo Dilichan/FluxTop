@@ -28,6 +28,23 @@ int main(){
             "Single in-view point must scale");
         check(fluxtop::statistics_auto_vertical_zoom(series,21000,19000)==1.0,
             "Invalid viewport must be safe");
+        // The left edge never moves; the latest sample is painted offscreen.
+        const double left=42.0,right=842.0,guard=18.0;
+        const auto project=[&](double x){
+            return fluxtop::statistics_chart_project_x(x,left,right,guard);
+        };
+        const auto unproject=[&](double x){
+            return fluxtop::statistics_chart_unproject_x(x,left,right,guard);
+        };
+        check(project(left)==left,"Live overscan keeps the left chart edge unchanged");
+        check(std::abs(project(right)-(right+guard))<0.001,
+            "Live newest sample must enter outside the right clipping boundary");
+        check(project(400.0)>400.0 && project(400.0)<right,
+            "Mid-viewport history must still draw within the visible plot");
+        check(std::abs(unproject(project(400.0))-400.0)<0.001,
+            "Chart hover must invert the right-edge projection");
+        check(fluxtop::statistics_chart_project_x(400.0,left,right,0.0)==400.0,
+            "Historical chart geometry must remain unchanged");
         std::cout<<"Clipped historical AutoScore autoscale tests passed\n";
         return 0;
     }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}

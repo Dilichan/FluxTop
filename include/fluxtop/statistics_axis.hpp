@@ -47,4 +47,14 @@ inline double statistics_auto_vertical_zoom(
     const double ceiling=std::clamp(std::ceil(padded/step)*step,2.0,100.0);
     return 100.0/ceiling;
 }
+// Present the most recent live samples just outside the right clip edge.
+// The plot remains left-anchored; history (overscan=0) keeps exact coordinates.
+inline double statistics_chart_project_x(double x,double left,double right,double overscan) noexcept {
+    if(right<=left || overscan<=0.0)return x;
+    return left+(x-left)*(right-left+overscan)/(right-left);
+}
+inline double statistics_chart_unproject_x(double x,double left,double right,double overscan) noexcept {
+    if(right<=left || overscan<=0.0)return x;
+    return left+(x-left)*(right-left)/(right-left+overscan);
+}
 } // namespace fluxtop

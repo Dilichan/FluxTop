@@ -1,4 +1,9 @@
 // Reuse the StatisticsPage model and colour map: detached windows never collect data.
+// The original six popup indices are stable; disk A:..Z: use kinds 6..31.
+std::wstring popup_auto_scale_key(unsigned kind) {
+    if(kind<popup_auto_scale_keys.size())return popup_auto_scale_keys[kind];
+    return L"stats_popup_auto_disk_"+std::wstring(1,static_cast<wchar_t>(L'A'+kind-6));
+}
 void StatisticsPage::popup_range(const PopupState& popup,std::int64_t& from,std::int64_t& to) const {
     const auto end=popup.paused?popup.frozen_to:(popup.kind>=2?system_view_end():
         popup.kind==0?live_view_end():window_to_);
@@ -33,13 +38,16 @@ void StatisticsPage::open_popup(unsigned kind) {
     register_window_class(cls,"Register detached statistics graph");
     popup.owner=this;popup.kind=kind;
     popup.zoom_x=1.0;popup.zoom_y=1.0;popup.pan_ms=0;
-    const auto& auto_keys=popup_auto_scale_keys;
-    popup.auto_scale=ini_overlay_read(settings_,auto_keys[kind],1)!=0;
+    const auto auto_key=popup_auto_scale_key(kind);
+    popup.auto_scale=ini_overlay_read(settings_,auto_key.c_str(),1)!=0;
     popup.dragging=false;popup.cursor={-1,-1};
     const std::array<const wchar_t*,6> titles{{L"FluxTop — последняя минута (AutoScore)",
         L"FluxTop — история (AutoScore)",L"FluxTop — ЦП",L"FluxTop — память",
         L"FluxTop — сеть",L"FluxTop — GPU"}};
-    const wchar_t* title=titles[kind];
+    const auto disk_title=kind>=6
+        ?L"FluxTop — Диск "+std::wstring(1,static_cast<wchar_t>(L'A'+kind-6))+L":"
+        :std::wstring{};
+    const wchar_t* title=kind<titles.size()?titles[kind]:disk_title.c_str();
     popup.window=CreateWindowExW(0,window_class,title,
         WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,
         CW_USEDEFAULT,CW_USEDEFAULT,1050,590,nullptr,nullptr,GetModuleHandleW(nullptr),&popup);
@@ -59,7 +67,10 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
     const auto old_font=SelectObject(dc,popup_font_?popup_font_:GetStockObject(DEFAULT_GUI_FONT));
     const std::array<const wchar_t*,6> names{{L"AutoScore · последняя минута",L"AutoScore · история",
         L"ЦП",L"Память",L"Сеть",L"GPU"}};
-    label(dc,names[popup.kind],22,55);
+    const auto disk_name=popup.kind>=6
+        ?L"Диск "+std::wstring(1,static_cast<wchar_t>(L'A'+popup.kind-6))+L":"
+        :std::wstring{};
+    label(dc,popup.kind<names.size()?names[popup.kind]:disk_name.c_str(),22,55);
     // Controls are native Win32; navigation instructions are intentionally absent.
     std::int64_t from{},to{};popup_range(popup,from,to);
     const RECT graph{68,114,client.right-30,client.bottom-60};
@@ -73,7 +84,8 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
             label(dc,L"Использование VRAM",170,middle+4,RGB(194,89,178));
             draw_system_graph(dc,gpu,3,from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system,true);
             draw_system_graph(dc,vram,4,from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system,true);
-        } else draw_system_graph(dc,graph,popup.kind-2,from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system,true);
+        } else draw_system_graph(dc,graph,popup.kind>=6?popup.kind-1:popup.kind-2,
+            from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system,true);
         SelectObject(dc,old_font);
         return;
     }
@@ -93,7 +105,8 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
     if(popup.cursor.x>=graph.left && popup.cursor.x<=graph.right
         && popup.cursor.y>=graph.top && popup.cursor.y<=graph.bottom && to>from) {
         double best=144.0;std::size_t selected=0;double score=0;std::int64_t sample_at=0;bool found=false;
-        const double width=static_cast<double>(graph.right-graph.left);
+        const double width=static_cast<double>(graph.right-graph.left)+
+            (popup.kind==0 && !popup.paused && to>=live_view_end()-1000?live_tail_guard_px:0);
         const double height=static_cast<double>(graph.bottom-graph.top);
         for(std::size_t i=0;i<apps.size();++i) {
             const auto& pts=apps[i].points;
@@ -198,8 +211,8 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
         if(LOWORD(wp)==popup_auto_id && HIWORD(wp)==BN_CLICKED) {
             popup->auto_scale=SendMessageW(popup->auto_toggle,BM_GETCHECK,0,0)==BST_CHECKED;
             popup->axis_dirty=true;
-            const auto& keys=popup_auto_scale_keys;
-            ini_overlay_write(page->settings_,keys[popup->kind],popup->auto_scale);
+            const auto key=popup_auto_scale_key(popup->kind);
+            ini_overlay_write(page->settings_,key.c_str(),popup->auto_scale);
             InvalidateRect(window,nullptr,FALSE);
             return 0;
         }
@@ -228,8 +241,8 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
                 } else popup->zoom_y=1.0;
                 popup->auto_scale=false;
                 SendMessageW(popup->auto_toggle,BM_SETCHECK,BST_UNCHECKED,0);
-                const auto& keys=popup_auto_scale_keys;
-                ini_overlay_write(page->settings_,keys[popup->kind],false);
+                const auto key=popup_auto_scale_key(popup->kind);
+                ini_overlay_write(page->settings_,key.c_str(),false);
             }
             popup->zoom_y=std::clamp(popup->zoom_y*factor,1.0,100.0);
         } else {
@@ -256,8 +269,8 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
         popup->auto_scale=true;
         popup->axis_dirty=true;
         SendMessageW(popup->auto_toggle,BM_SETCHECK,BST_CHECKED,0);
-        const auto& keys=popup_auto_scale_keys;
-        ini_overlay_write(page->settings_,keys[popup->kind],true);
+        const auto key=popup_auto_scale_key(popup->kind);
+        ini_overlay_write(page->settings_,key.c_str(),true);
         InvalidateRect(window,nullptr,FALSE);return 0;
     }
     case WM_LBUTTONDOWN:
@@ -287,8 +300,8 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
                         popup->paused?&popup->frozen_system:nullptr);
                 else page->show_system_hover(3,current,gpu,from,to,
                         popup->paused?&popup->frozen_system:nullptr);
-            } else page->show_system_hover(popup->kind-2,current,chart,from,to,
-                popup->paused?&popup->frozen_system:nullptr);
+            } else page->show_system_hover(popup->kind>=6?popup->kind-1:popup->kind-2,
+                current,chart,from,to,popup->paused?&popup->frozen_system:nullptr);
         }
         if(popup->dragging) {
             std::int64_t from{},to{};page->popup_range(*popup,from,to);

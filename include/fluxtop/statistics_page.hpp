@@ -64,6 +64,7 @@ private:
         bool adaptive_fill{};
         bool ink_detail{};
         bool point_markers{true};
+        int right_edge_overscan{}; // Live data enters offscreen on the right.
     };
     void draw_chart_core(HDC dc,const ChartStyle& style,
         const std::vector<ChartStroke>& plots,const std::vector<ChartBar>& bars={});
@@ -147,7 +148,7 @@ private:
     PaintBuffer page_buffer_;
     PaintBuffer tooltip_buffer_; // Reusable native tooltip double buffer.
     PaintBuffer fill_color_buffer_; // Reused 1x1 bitmap for GDI alpha blending.
-    std::array<PopupState,6> popups_{}; // AutoScore live/history, CPU, RAM, network, GPU
+    std::array<PopupState,32> popups_{}; // Six existing graphs + disks A: through Z:.
     // FluxTop.SystemDashboard.Stage1: bounded, sampler-fed system history.
     std::deque<SystemPoint> system_points_;
     ULONGLONG hover_last_frame_{};
@@ -181,7 +182,7 @@ private:
         double zoom{1.0};
         SystemInfo info{};
     };
-    std::array<FrozenView,6> frozen_views_{};
+    std::array<FrozenView,32> frozen_views_{}; // Six existing graph views + 26 per-disk pauses.
     bool system_tip_active_{};
     unsigned system_tip_metric_{};
     SystemPoint system_tip_sample_{};

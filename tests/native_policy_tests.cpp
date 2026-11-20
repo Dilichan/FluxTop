@@ -113,7 +113,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         absent(page,{"GetPrivateProfileIntW(","WritePrivateProfileStringW(","RegisterClassExW("});
         absent(overlay,{"GetPrivateProfileIntW(","WritePrivateProfileStringW(","RegisterClassExW("});
         absent(popup,{"GetPrivateProfileIntW(","WritePrivateProfileStringW(","RegisterClassExW("});
-        need(header,{"PopupState","target_auto_zoom_","std::array<PopupState,6> popups_",
+        need(header,{"PopupState","target_auto_zoom_","std::array<PopupState,32> popups_",
             "std::array<std::optional<double>,5> values", "fill_enabled_", "smooth_system_end_",
             "frozen_views_", "toggle_section_pause()", "pause_toggle_"});
         need(page,{"FluxTop.SystemDashboard.VisualRefinement.v1", "draw_system_hover(dc,rect)",
@@ -131,7 +131,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "eased_latest_value(*previous_measurement,actual,"});
         need(page,{"void draw_time_grid(HDC dc,const RECT& area,",
             "void StatisticsPage::draw_chart_core(",
-            "draw_time_grid(dc,area,style.from,style.to,style.time_divisions);",
+            "draw_time_grid(dc,grid_area,style.from,style.to,style.time_divisions);",
             "style.time_divisions=8;", "style.time_divisions=10;",
             "const bool live_page=active_ && selected_section_<5",
             "const double current_wall_time=static_cast<double>(now_ms());",
@@ -150,6 +150,12 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "frozen_system,true", "WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN",
             "if(popup->kind<2 || popup->dragging)InvalidateRect(window,nullptr,FALSE);"});
         need(header,{"PaintBuffer tooltip_buffer_;", "bool position_tooltip(POINT screen,int offset_x,int offset_y);"});
+        need(header,{"std::array<FrozenView,32> frozen_views_"});
+        need(page,{"const bool disk=selected_disk_letter_!=0;", "refresh_pause_control();",
+            "held.paused?&held.samples:nullptr", "open_popup(selected_disk_letter_"});
+        need(popup,{"popup_auto_scale_key(unsigned kind)", "popup.kind>=6?popup.kind-1:popup.kind-2",
+            "popup->kind>=6?popup->kind-1:popup->kind-2"});
+        absent(page,{"Системная метрика, не нагрузка отдельного PID"});
         need(page,{"bool StatisticsPage::position_tooltip(",
             "SWP_NOACTIVATE|SWP_NOZORDER|(visible?0U:SWP_SHOWWINDOW)",
             "page->tooltip_buffer_.prepare(dc,bounds.right,bounds.bottom)",
