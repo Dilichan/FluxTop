@@ -4,6 +4,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <cwchar>
 #include <deque>
@@ -41,14 +42,30 @@ std::string cleaned(std::string_view input,std::size_t limit) {
     return result;
 }
 std::string event_line(Level level,std::string_view category,std::string_view message) {
-    SYSTEMTIME now{}; GetSystemTime(&now);
+    // Timestamp uses the Windows local clock; include the UTC offset so daylight
+    // saving changes remain unambiguous and older UTC ('Z') records stay readable.
+    SYSTEMTIME utc{},now{};
+    GetSystemTime(&utc);
+    if(!SystemTimeToTzSpecificLocalTime(nullptr,&utc,&now))GetLocalTime(&now);
+    FILETIME utc_file{},local_file{};
+    int offset_minutes=0;
+    if(SystemTimeToFileTime(&utc,&utc_file) && SystemTimeToFileTime(&now,&local_file)){
+        ULARGE_INTEGER utc_ticks{},local_ticks{};
+        utc_ticks.LowPart=utc_file.dwLowDateTime;utc_ticks.HighPart=utc_file.dwHighDateTime;
+        local_ticks.LowPart=local_file.dwLowDateTime;local_ticks.HighPart=local_file.dwHighDateTime;
+        constexpr std::int64_t ticks_per_minute=600000000LL;
+        const auto delta=static_cast<std::int64_t>(local_ticks.QuadPart)-static_cast<std::int64_t>(utc_ticks.QuadPart);
+        offset_minutes=static_cast<int>(delta/ticks_per_minute);
+    }
+    const int absolute_offset=offset_minutes<0?-offset_minutes:offset_minutes;
+    const char offset_sign=offset_minutes<0?'-':'+';
     char prefix[116]{};
     const char* severity=level==Level::error?"ERROR":level==Level::warning?"WARN":level==Level::trace?"TRACE":"INFO";
-    std::snprintf(prefix,sizeof(prefix),"%04u-%02u-%02uT%02u:%02u:%02u.%03uZ pid=%lu tid=%lu [%s] ",
+    std::snprintf(prefix,sizeof(prefix),"%04u-%02u-%02uT%02u:%02u:%02u.%03u%c%02d:%02d pid=%lu tid=%lu [%s] ",
         static_cast<unsigned>(now.wYear),static_cast<unsigned>(now.wMonth),
         static_cast<unsigned>(now.wDay),static_cast<unsigned>(now.wHour),
         static_cast<unsigned>(now.wMinute),static_cast<unsigned>(now.wSecond),
-        static_cast<unsigned>(now.wMilliseconds),
+        static_cast<unsigned>(now.wMilliseconds),offset_sign,absolute_offset/60,absolute_offset%60,
         static_cast<unsigned long>(GetCurrentProcessId()),static_cast<unsigned long>(GetCurrentThreadId()),severity);
     std::string result(prefix);
     result+=cleaned(category,72);

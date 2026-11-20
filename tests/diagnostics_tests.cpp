@@ -1,5 +1,6 @@
 #include "fluxtop/diagnostics.hpp"
 #include <windows.h>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -28,6 +29,31 @@ int wmain(int argc,wchar_t** argv) {
         total+=size;++files;
     }
     if(!files || total>5ULL*64*1024)return 5;
-    std::cout<<"Structured bounded journal and rotation fixture passed\n";
+    // A fresh event must carry the current PC wall time and an explicit UTC offset.
+    SYSTEMTIME before{},after{};
+    GetLocalTime(&before);
+    fluxtop::diagnostics::write(fluxtop::diagnostics::Level::info,"timestamp-check","local clock");
+    fluxtop::diagnostics::flush();
+    GetLocalTime(&after);
+    std::ifstream stream(path,std::ios::binary);
+    if(!stream)return 6;
+    std::string line,probe;
+    while(std::getline(stream,line))
+        if(line.find("timestamp-check | local clock")!=std::string::npos)probe=line;
+    if(probe.empty())return 7;
+    const auto local_prefix=[](const SYSTEMTIME& time){
+        char buffer[20]{};
+        std::snprintf(buffer,sizeof(buffer),"%04u-%02u-%02uT%02u:%02u:%02u",
+            static_cast<unsigned>(time.wYear),static_cast<unsigned>(time.wMonth),
+            static_cast<unsigned>(time.wDay),static_cast<unsigned>(time.wHour),
+            static_cast<unsigned>(time.wMinute),static_cast<unsigned>(time.wSecond));
+        return std::string(buffer);
+    };
+    if(probe.compare(0,19,local_prefix(before))!=0 &&
+       probe.compare(0,19,local_prefix(after))!=0)return 8;
+    if(probe.size()<35 || probe[19]!='.' ||
+       (probe[23]!='+' && probe[23]!='-') || probe[26]!=':' || probe[29]!=' ' ||
+       probe.compare(30,4,"pid=")!=0)return 9;
+    std::cout<<"Structured bounded journal, local timestamps and rotation fixture passed\n";
     return 0;
 }
