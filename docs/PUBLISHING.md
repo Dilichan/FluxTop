@@ -1,85 +1,55 @@
-# Публикация EXE и обновлений
+# Сборка и публикация Windows-релизов
 
-Скачиваемая сборка — один Windows x64 файл FluxTop.exe. Начиная с v0.2.2,
-скачанный файл устанавливает приложение для текущего пользователя и регистрирует
-ярлык в меню «Пуск» и запись удаления. В нём находятся нативный
-launcher/updater и ресурс с монитором. MSVC Runtime статически слинкован.
-Монитор извлекается в LocalAppData/FluxTop/versions/<SHA-256>/fluxtop.exe;
-подмена/повреждение кеша обнаруживается сравнением с встроенным ресурсом.
+## Артефакты и устройство установщика
 
-## Выпуск новой версии
+Пользователь скачивает один файл `FluxTop.exe` для Windows 10/11 x64. Он содержит нативный Win32 launcher/updater, встроенный монитор `fluxtop.exe` (ресурс 201) и нативный деинсталлятор `Uninstall-FluxTop.exe` (ресурс 205). Сборка MSVC Runtime статически слинкована: Git, CMake, Python и PowerShell на пользовательском компьютере не требуются.
 
-Установленный `Uninstall-FluxTop.exe` включён в скачиваемый `FluxTop.exe` как
-ресурс 205 и извлекается при установке. Запись Windows Installed Apps указывает
-непосредственно на этот нативный деинсталлятор. Он удаляет EXE и каталоги
-извлечённых программ, но сохраняет `fluxtop.db`, `-wal`, `-shm`, `overlay.ini`
-и журналы. Устаревший `Uninstall-FluxTop.cmd` больше не создаётся.
+После установки используются `%LOCALAPPDATA%\FluxTop\FluxTop.exe`, `Uninstall-FluxTop.exe` и `versions/<SHA-256>/fluxtop.exe`. Удаление через Windows Installed Apps выполняет нативный EXE. История, настройки и журналы сохраняются. Структура данных описана в [HISTORY.md](HISTORY.md).
 
-1. Обновить VERSION в CMakeLists.txt и docs/RELEASE_NOTES.md, выполнить проверки.
-2. Закоммитить изменения логическими блоками и отправить main.
-3. Создать тег `vX.Y.Z` либо `vX.Y.Z-preview.N` на проверенном коммите и отправить
-   тег в origin. Числовая версия должна совпадать с CMake VERSION.
-4. Workflow Publish Windows EXE соберёт Release, выполнит CTest, упакует EXE,
-   SHA256SUMS.txt и LICENSE.txt и создаст GitHub Release с этими файлами.
-   Preview-теги публикуются как prerelease. Можно запустить workflow вручную
-   для уже существующего тега.
-5. Проверить скачивание FluxTop.exe из Assets. Новые установки и следующие
-   запуски встроенного updater-а увидят релиз без Git и компилятора.
+Имя релизного asset **`FluxTop.exe` нельзя менять**: его ожидает встроенный updater. `SHA256SUMS.txt` и `LICENSE.txt` публикуются рядом. Updater проверяет HTTPS, размер, digest SHA-256, PE-заголовок и release tag перед активацией. Digest GitHub не заменяет цифровую подпись издателя.
 
-Имя **FluxTop.exe** — контракт автообновления. Не переименовывать asset.
-Updater использует поле `digest: sha256:...`, вычисленное самим GitHub,
-проверяет размер и встроенный тег, выбирает наибольшую подходящую версию из
-последних 20 опубликованных релизов. Draft, неполные assets, неподдерживаемые
-теги и понижения версии пропускаются. Preview входит в текущий канал обновлений.
-Публиковать assets лучше через workflow: приложение не выберет релиз до
-готовности EXE и digest. Не заменять бинарник уже выпущенного тега новой сборкой:
-для изменений повышать версию/номер Preview.
+## Подготовка v0.2.6
+
+1. Обновить `project(FluxTop VERSION 0.2.6 ...)` в `CMakeLists.txt`, описание в `docs/RELEASE_NOTES.md`, пользовательскую и техническую документацию.
+2. Выполнить локальную Release-сборку и CTest. Без повышенных прав `network` может быть помечен `Skipped` — это не успешная проверка сетевого ETW на администраторском токене.
+3. Создать коммит и отправить его в `main`. Проверить успешное завершение Windows CI **до создания тега**.
+4. Создать **новый аннотированный тег `v0.2.6`** на проверенном коммите и отправить `git push origin v0.2.6`. Не перемещать и не перезаписывать существующий `v0.2.5`.
+5. Workflow `.github/workflows/release.yml` соберёт EXE, выполнит CTest, сформирует release notes, `SHA256SUMS.txt` и создаст GitHub Release. Проверить, что в Assets присутствуют `FluxTop.exe`, `SHA256SUMS.txt` и `LICENSE.txt`.
+6. Ручной сценарий: обновление установленной предыдущей версии после согласия; установка, вход в Windows, отмена UAC, удаление через Windows и сохранение `fluxtop.db`/настроек.
+
+**Не создавать GitHub Release вручную одновременно с workflow:** возможна гонка публикации. Версия CMake и числовая часть тега должны совпадать. Для preview допускается `vX.Y.Z-preview.N`.
 
 ## Локальная проверка
 
-В x64 Developer PowerShell:
+Запускайте из корня checkout в Developer PowerShell с MSVC x64:
 
 ```powershell
-cmake --preset windows -DFLUXTOP_RELEASE_TAG=v0.2.1
+cmake --preset windows -DFLUXTOP_RELEASE_TAG:STRING=v0.2.6
 cmake --build --preset release
-./tools/Package-Release.ps1
+ctest --preset release --output-on-failure
+cmake -DROOT=. -DTAG=v0.2.6 -DOUTPUT=build/release-notes.md -P tools/Get-ReleaseNotes.cmake
+cmake -DROOT=. -DBUILD_DIRECTORY=build -DOUTPUT_DIR=out/release -DCONFIG=Release -P tools/Package-Release.cmake
 ```
 
-Результат: out/release/FluxTop.exe, SHA256SUMS.txt, LICENSE.txt.
-Для Ninja задайте -BuildDirectory build/ninja. Release готовится только после
-тестов; -SkipTests предназначен для CI, где они уже выполнены.
+**Почему тег указан явно:** `FLUXTOP_RELEASE_TAG` — переменная CMake Cache. После сборки предыдущей версии в том же каталоге значение может остаться `v0.2.5`, даже когда `project(VERSION)` уже изменён. Перед локальной упаковкой задавайте `-DFLUXTOP_RELEASE_TAG:STRING=v0.2.6`; workflow релиза получает тег из GitHub и задаёт его самостоятельно.
 
-Tests release_update и portable проверяют JSON/версии, SHA-256, повреждённый
-кеш, смену launcher-а, rollback при ошибке старта и заблокированный файл.
-Они работают в build/, без сети, UAC и включения автозагрузки. Сетевой ETW-тест
-помечается skipped без административного токена. Не выдавать это за его запуск.
-Проверка реального входа в Windows и UAC остаётся ручной.
+Результат: `out/release/FluxTop.exe`, `SHA256SUMS.txt`, `LICENSE.txt` и `build/release-notes.md`. Скрипты упаковки и заметок — нативные CMake, без PowerShell. Для Ninja используйте отдельный каталог сборки и укажите его в `-DBUILD_DIRECTORY`.
 
-## Политика доверия
+## Проверка тега и публикация
 
-Адрес репозитория закреплён: Dilichan/FluxTop. HTTPS проверяется системным
-WinHTTP; ошибки TLS не обходятся. Данные мониторинга не входят в запросы.
-Хеш из GitHub подтверждает целостность относительно опубликованного asset,
-но не заменяет подпись издателя и не защищает при компрометации самого аккаунта.
-CI выпускает неподписанный EXE; цифровая подпись — отдельная будущая задача.
+Только после коммита и успешного CI:
 
-Launcher сохраняет предыдущий EXE при ошибке активации. Это ещё не протокол
-готовности основного монитора: ready/timeout/fallback из ADR-0001 остаётся
-следующим этапом. Отдельный updater всё равно выполняется до старта монитора.
+```powershell
+git status --short
+git log -1 --oneline
+git tag -a v0.2.6 -m "FluxTop v0.2.6"
+git push origin v0.2.6
+```
 
-## Проверка обновления Preview → 0.2.1
+Страница тега в GitHub показывает **README и документацию из коммита тега**. Обновление только `main` не меняет историческую страницу `v0.2.5`. Поэтому README версии `v0.2.6` попадёт на страницу нового тега после его создания.
 
-После успешного CI для `main` создать аннотированный тег `v0.2.1` на
-этом же коммите и отправить его в `origin`. Workflow `Publish Windows EXE`
-создаст **обычный релиз** и asset с точным именем `FluxTop.exe`.
-Не создавать релиз вручную одновременно с workflow — это приводит к гонке.
+## Границы автоматической проверки
 
-1. Убедиться, что https://github.com/Dilichan/FluxTop/releases/tag/v0.2.1
-   существует, а в Assets лежат `FluxTop.exe`, `SHA256SUMS.txt`, `LICENSE.txt`.
-2. Завершить установленный монитор 0.2.0-preview.1 полностью через трей.
-3. Запустить старый скачанный `FluxTop.exe`, а не локальный `build/Release/fluxtop.exe`.
-4. После запуска проверить новую версию в клиенте и сохранность `history.db`.
-5. Если обновление не удалось, посмотреть `%LOCALAPPDATA%\FluxTop\update.log`.
+CTest покрывает математику, SQLite/иконки, JSONL, Win32-установщик, нативное удаление на изолированных тестовых каталогах, Git fast-forward, блокировку и fallback исходного launcher-а. CI не подтверждает ручное взаимодействие с UAC, реальный автозапуск после входа в Windows, права на защищённые процессы, достижение целевого бюджета RAM и работу в эксклюзивном fullscreen.
 
-Исключить при проверке изменённую ветку Git: локальный `fluxtop.cmd`
-обновляет **исходники**, а пользовательский `FluxTop.exe` — GitHub Releases.
+Релиз остаётся неподписанным, пока не настроена подпись издателя. Не отключайте встроенную защиту Windows ради тестирования.

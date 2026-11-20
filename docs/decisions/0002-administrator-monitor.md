@@ -4,8 +4,9 @@
 
 ## Решение
 
-Обычный запуск `fluxtop.cmd` подготавливает версию и запускает монитор отдельным
-процессом с `RunAs`. Пользователь подтверждает стандартный запрос UAC Windows.
+Запуск из исходников через `FluxTopSource.exe` подготавливает версию и
+запускает монитор отдельным процессом через Win32 ShellExecuteExW с `runas`.
+Установленный `FluxTop.exe` также использует стандартный запрос UAC. Пользователь подтверждает стандартный запрос UAC Windows.
 Отказ завершает запуск с кодом 1223; повторных запросов и скрытого перехода
 к ограниченному режиму нет. UAC и системные политики не изменяются.
 
@@ -15,7 +16,8 @@ Git, CMake и тесты не требуют административных п
 сборочные процессы наследуют эти права; принудительное понижение не выполняется.
 
 Для тестов, автоматизации и работы без запроса повышения предусмотрен
-`-StandardUser`: монитор получает унаследованные права. Прямой EXE также
+`--standard-user` (также `-StandardUser`) у исходного launcher-а: монитор
+получает унаследованные права. Прямой EXE также
 наследует токен родителя. Эти пути не понижают уже повышенные права родителя.
 
 ## Доступ к метрикам
@@ -55,4 +57,4 @@ launcher-а не захватывает его вывод. Для JSONL в pipel
 
 Источники: [права процессов](https://learn.microsoft.com/en-us/windows/win32/procthread/process-security-and-access-rights),
 [привилегии токена](https://learn.microsoft.com/en-us/windows/win32/secauthz/enabling-and-disabling-privileges-in-c--),
-[Start-Process](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/start-process?view=powershell-5.1).
+[ShellExecuteExW](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shellexecuteexw).

@@ -13,12 +13,18 @@ FluxTop разрабатывается открыто. Изменения дол
 CMake 3.24+. В x64 Developer PowerShell:
 
 ```powershell
-cmake --preset windows
+cmake --preset windows -DFLUXTOP_RELEASE_TAG:STRING=v0.2.6
 cmake --build --preset release
 ctest --preset release
 # source_git_update, source_process_contract, source_launcher_fallback
 # и source_bootstrap_policy теперь входят в CTest
 ```
+
+CMake кеширует `FLUXTOP_RELEASE_TAG`; при повторной сборке в старом каталоге
+явно задавайте новый тег, чтобы не оставить метаданные предыдущего релиза.
+Тесты `source_git_update`, `source_launcher_fallback`, `native_uninstall_fixture`
+и `installation_fixture` входят в CTest; сетевой ETW-тест может быть `Skipped`
+без административных прав. Python и PowerShell не требуются для упаковки EXE.
 
 Без Visual Studio generator можно использовать Ninja:
 
