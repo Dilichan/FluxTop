@@ -95,7 +95,13 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         const auto page=read(root/"src/statistics_page.cpp");
         const auto header=read(root/"include/fluxtop/statistics_page.hpp");
         const auto popup=read(root/"src/statistics_popout.inc");
-        need(header,{"PopupState","target_auto_zoom_","std::array<PopupState,6> popups_"});
+        need(header,{"PopupState","target_auto_zoom_","std::array<PopupState,6> popups_",
+            "std::array<std::optional<double>,5> values", "fill_enabled_", "smooth_system_end_",
+            "frozen_views_", "toggle_section_pause()", "pause_toggle_"});
+        need(page,{"FluxTop.SystemDashboard.VisualRefinement.v1", "draw_system_hover(dc,rect)",
+            "fill_under(dc,line,area.bottom,ink)", "point.values[4]", "advance_time_view(elapsed)",
+            "stats_chart_fill"});
+        need(popup,{"popup->fill_toggle", "popup_auto_id+1", "show_system_hover(popup->kind-2"});
         need(page,{"FluxTop.SystemDashboard.Stage1","system_points_.push_back(point)",
             "stats_selected_section","case WM_LBUTTONUP:","system_popout_id"});
         need(popup,{"popup.kind>=2","draw_system_graph(dc,graph,popup.kind-2",
@@ -105,10 +111,10 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "stats_limit_id","stats_history_top","stats_uptime_top","animate_message",
             "SetTimer(hwnd_,animate_message,33,nullptr)","nullptr,nullptr,GetModuleHandleW(nullptr),this);",
             "target_auto_zoom_[index]","axis_initialized_[index]","popup.axis_dirty=true",
-            "const auto now=last_live_timestamp_>0?last_live_timestamp_:now_ms();"});
+            "const auto now=live_view_end();"});
         need(popup,{"WM_MOUSEWHEEL","WM_LBUTTONDOWN","WM_LBUTTONDBLCLK","draw_graph(",
             "paint_popup(","1050,590,nullptr,nullptr,GetModuleHandleW(nullptr),&popup)",
-            "last_live_timestamp_>0?last_live_timestamp_:now_ms()"});
+            "popup.kind==0?live_view_end():window_to_"});
         need(overlay,{"grouped_processes_,options_.interval_ms",
             "if (wp==SIZE_MINIMIZED) return 0;"});
         absent(overlay,{"PostMessageW(window,WM_CLOSE,0,0)"});
@@ -123,7 +129,8 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "stat_decimal(*bytes*8.0/1000000.0)","L\" Mbps\"",
             "double eased_axis(double current,double target,double elapsed_ms)",
             "popup.cached_auto_zoom=eased_axis(","const bool axis_animating=advance_axes(elapsed);",
-            "if((!animating && !axis_animating) ||",
+            "const bool viewport_animating=advance_time_view(elapsed);",
+            "if((!animating && !axis_animating && !viewport_animating) ||",
             "(!active_ && !has_popup()))",
             "KillTimer(hwnd_,animate_message);"});
         one_of(page,{"stat_network(process->rx_bytes_per_second,process->tx_bytes_per_second)",

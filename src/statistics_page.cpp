@@ -30,8 +30,8 @@ enum : int { period_id=1001,from_id,to_id,system_id,table_id,stats_limit_id,popo
 // Logical page dimensions; chart labels and Win32 controls share the same grid.
 constexpr int page_width=1160, page_height=860;
 constexpr int auto_live_id=1201, auto_history_id=1202, popup_auto_id=1203, system_period_id=1210, system_auto_id=1211, system_popout_id=1212;
-constexpr RECT one_minute{310,171,1124,755};
-constexpr RECT history_chart{310,171,1124,755};
+constexpr RECT one_minute{310,171,1124,665};
+constexpr RECT history_chart{310,171,1124,665};
 std::int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -170,6 +170,7 @@ StatisticsPage::StatisticsPage(HWND parent,std::filesystem::path database,
     selected_section_=static_cast<unsigned>(std::clamp(GetPrivateProfileIntW(L"overlay",L"stats_selected_section",0,settings_.c_str()),0U,6U));
     system_range_=static_cast<unsigned>(std::clamp(GetPrivateProfileIntW(L"overlay",L"stats_system_range",0,settings_.c_str()),0U,2U));
     system_autoscale_=GetPrivateProfileIntW(L"overlay",L"stats_system_auto",1,settings_.c_str())!=0;
+    fill_enabled_=GetPrivateProfileIntW(L"overlay",L"stats_chart_fill",1,settings_.c_str())!=0;
     for(unsigned kind=0;kind<popups_.size();++kind) {
         popups_[kind].owner=this;popups_[kind].kind=kind;
     }
@@ -303,6 +304,9 @@ void StatisticsPage::make_controls() {
     system_auto_=add(L"BUTTON",L"Автомасштаб",BS_AUTOCHECKBOX|WS_TABSTOP,system_auto_id);
     SendMessageW(system_auto_,BM_SETCHECK,system_autoscale_?BST_CHECKED:BST_UNCHECKED,0);
     system_popout_=add(L"BUTTON",L"Открыть отдельно",WS_TABSTOP,system_popout_id);
+    fill_toggle_=add(L"BUTTON",L"Заливка графика",BS_AUTOCHECKBOX|WS_TABSTOP,system_popout_id+1);
+    pause_toggle_=add(L"BUTTON",L"Пауза",WS_TABSTOP,system_popout_id+2);
+    SendMessageW(fill_toggle_,BM_SETCHECK,fill_enabled_?BST_CHECKED:BST_UNCHECKED,0);
     layout();update_dates();
 }
 void StatisticsPage::resize(int x,int y,int width,int height) {
@@ -342,6 +346,8 @@ void StatisticsPage::layout() {
     put(system_period_,292,65,170,200);
     put(system_auto_,540,65,180,30);
     put(system_popout_,952,64,172,30);
+    put(fill_toggle_,925,114,200,29);
+    put(pause_toggle_,725,114,180,29);
     for(HWND control:{limit_label_,limit_slider_,auto_live_,popout_live_})
         ShowWindow(control,live?SW_SHOW:SW_HIDE);
     for(HWND control:{history_limit_label_,history_limit_slider_,auto_history_,popout_history_,period_})
@@ -355,6 +361,8 @@ void StatisticsPage::layout() {
     for(HWND control:{system_period_,system_auto_,system_popout_})
         ShowWindow(control,system?SW_SHOW:SW_HIDE);
     ShowWindow(table_,uptime?SW_SHOW:SW_HIDE);
+    ShowWindow(fill_toggle_,uptime?SW_HIDE:SW_SHOW);
+    ShowWindow(pause_toggle_,uptime?SW_HIDE:SW_SHOW);
     ShowWindow(first_label_,SW_HIDE);
     ListView_SetColumnWidth(table_,0,sx(370));
     ListView_SetColumnWidth(table_,1,sx(165));
@@ -369,7 +377,7 @@ void StatisticsPage::layout() {
     for(HWND control:{period_,from_,to_,uptime_period_,uptime_from_,uptime_to_,first_label_,
         show_system_,limit_label_,limit_slider_,history_limit_label_,history_limit_slider_,
         uptime_limit_label_,uptime_limit_slider_,table_,popout_live_,popout_history_,
-        popout_table_,auto_live_,auto_history_,system_period_,system_auto_,system_popout_})
+        popout_table_,auto_live_,auto_history_,system_period_,system_auto_,system_popout_,fill_toggle_,pause_toggle_})
         SendMessageW(control,WM_SETFONT,reinterpret_cast<WPARAM>(font_),TRUE);
     if(stale_font) DeleteObject(stale_font);
     ListView_SetBkColor(table_,GetSysColor(COLOR_WINDOW));
@@ -655,9 +663,11 @@ unsigned StatisticsPage::selected_popup_kind() const {
 void StatisticsPage::select_section(unsigned index) {
     if(index>=7 || index==selected_section_)return;
     selected_section_=index;
+    refresh_pause_control();
     WritePrivateProfileStringW(L"overlay",L"stats_selected_section",
         std::to_wstring(index).c_str(),settings_.c_str());
     hover_section_=-1;
+    system_tip_active_=false;
     if(tooltip_)ShowWindow(tooltip_,SW_HIDE);
     system_hover_={-1,-1};
     layout();
@@ -680,7 +690,23 @@ void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Pro
     if(system.total_rx_bytes_per_second && system.total_tx_bytes_per_second)
         point.values[2]=8.0*(*system.total_rx_bytes_per_second+*system.total_tx_bytes_per_second)/1000000.0;
     point.values[3]=system.total_gpu_percent;
+    if(system.total_gpu_memory && system.total_gpu_memory_capacity && *system.total_gpu_memory_capacity)
+        point.values[4]=100.0*static_cast<double>(*system.total_gpu_memory)/
+            static_cast<double>(*system.total_gpu_memory_capacity);
+    system_info_.ram_used=system.total_ram_used;
+    system_info_.ram_capacity=system.total_ram_capacity;
+    system_info_.gpu_memory=system.total_gpu_memory;
+    system_info_.gpu_capacity=system.total_gpu_memory_capacity;
+    system_info_.rx=system.total_rx_bytes_per_second;
+    system_info_.tx=system.total_tx_bytes_per_second;
+    system_info_.cpu_temp=system.cpu_temperature_c;
+    system_info_.gpu_temp=system.gpu_temperature_c;
+    system_info_.cpu_board=system.cpu_temperature_board;
+    system_info_.logical_processors=system.logical_processors;
+    system_info_.collection_ms=system.collection_ms;
     system_points_.push_back(point);
+    if(smooth_system_end_<=0.0)smooth_system_end_=static_cast<double>(timestamp_ms);
+    if(smooth_live_end_<=0.0)smooth_live_end_=static_cast<double>(timestamp_ms);
     while(!system_points_.empty() && system_points_.front().time<timestamp_ms-900000)
         system_points_.pop_front();
     while(system_points_.size()>900U)system_points_.pop_front();
@@ -865,6 +891,7 @@ void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<Statis
             line.back().y=previous.y+static_cast<LONG>(std::lround((final.y-previous.y)*t));
         }
         const auto ink=series_color(apps[i],i);
+        if(fill_enabled_)fill_under(dc,line,area.bottom,ink);
         const HPEN stroke=graph_pen(ink,false);
         if(stroke) old=SelectObject(dc,stroke);
         if(line.size()>1) Polyline(dc,line.data(),static_cast<int>(line.size()));
@@ -943,12 +970,61 @@ void StatisticsPage::rebuild_live_series() {
     if(active_ || popups_[0].window || popups_[1].window)
         SetTimer(hwnd_,animate_message,33,nullptr);
 }
+// FluxTop.SystemDashboard.VisualRefinement.v1: continuous viewport, two GPU series, true hover bubble.
+std::int64_t StatisticsPage::system_view_end() const {
+    if(smooth_system_end_>0.0)return static_cast<std::int64_t>(std::llround(smooth_system_end_));
+    return system_points_.empty()?now_ms():system_points_.back().time;
+}
+std::int64_t StatisticsPage::live_view_end() const {
+    if(smooth_live_end_>0.0)return static_cast<std::int64_t>(std::llround(smooth_live_end_));
+    return last_live_timestamp_>0?last_live_timestamp_:now_ms();
+}
+bool StatisticsPage::advance_time_view(double elapsed_ms) {
+    const double blend=1.0-std::exp(-std::clamp(elapsed_ms,0.0,100.0)/330.0);
+    bool moving=false;
+    const auto step=[&](double& current,double desired) {
+        if(desired<=0.0)return;
+        if(current<=0.0)current=desired;
+        const double delta=desired-current;
+        if(std::abs(delta)<1.0)current=desired;
+        else {current+=blend*delta;moving=true;}
+    };
+    if(!system_points_.empty())step(smooth_system_end_,static_cast<double>(system_points_.back().time));
+    if(last_live_timestamp_>0)step(smooth_live_end_,static_cast<double>(last_live_timestamp_));
+    return moving;
+}
+void StatisticsPage::fill_under(HDC dc,const std::vector<POINT>& line,LONG baseline,COLORREF color) {
+    if(!fill_enabled_ || line.size()<2)return;
+    // Visually equivalent to ~22%-opacity ink on the white chart paper; no alpha surface.
+    constexpr double strength=.22;
+    // RGB(250,250,250) is the chart paper. Using Get*Value on a
+    // constant COLORREF triggers MSVC C4310 via Windows narrowing macros.
+    constexpr BYTE paper_channel=250;
+    const auto channel=[&](BYTE foreground,BYTE background) {
+        return std::clamp(static_cast<int>(std::lround(strength*foreground+(1.0-strength)*background)),0,255);
+    };
+    const COLORREF tint=static_cast<COLORREF>(channel(GetRValue(color),paper_channel)) |
+        (static_cast<COLORREF>(channel(GetGValue(color),paper_channel)) << 8) |
+        (static_cast<COLORREF>(channel(GetBValue(color),paper_channel)) << 16);
+    const HBRUSH fill=CreateSolidBrush(tint);
+    if(!fill)return;
+    std::vector<POINT> polygon;
+    polygon.reserve(line.size()+2);
+    polygon.push_back({line.front().x,baseline});
+    polygon.insert(polygon.end(),line.begin(),line.end());
+    polygon.push_back({line.back().x,baseline});
+    const auto old_brush=SelectObject(dc,fill);
+    const auto old_pen=SelectObject(dc,GetStockObject(NULL_PEN));
+    Polygon(dc,polygon.data(),static_cast<int>(polygon.size()));
+    SelectObject(dc,old_pen);SelectObject(dc,old_brush);DeleteObject(fill);
+}
+
 // FluxTop.SystemDashboard.Stage1: sidebar+in-page chart; old popouts remain available.
 void StatisticsPage::draw_sidebar(HDC dc) {
     const std::array<const wchar_t*,7> names{{L"ЦП",L"Память",L"Сеть",L"GPU",L"Авто",L"История",L"Аптайм"}};
     const std::array<COLORREF,7> colors{{RGB(14,132,177),RGB(67,105,181),RGB(184,55,114),
         RGB(131,54,156),RGB(34,133,123),RGB(85,112,142),RGB(99,123,96)}};
-    const std::int64_t latest=system_points_.empty()?now_ms():system_points_.back().time;
+    const std::int64_t latest=system_view_end();
     for(unsigned section=0;section<names.size();++section) {
         const int y=18+static_cast<int>(section)*114;
         const RECT item{14,y,266,y+105};
@@ -969,7 +1045,7 @@ void StatisticsPage::draw_sidebar(HDC dc) {
         DrawTextW(dc,reading.c_str(),-1,&value_area,DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
         const RECT spark{26,y+38,249,y+94};
         HBRUSH paper=CreateSolidBrush(RGB(255,255,255));FillRect(dc,&spark,paper);DeleteObject(paper);
-        std::vector<POINT> points;
+        std::vector<POINT> points,second_gpu_line;
         const auto add=[&](std::int64_t at,double value,std::int64_t begin,std::int64_t end,double max_y){
             if(at<begin || at>end || end<=begin || max_y<=0)return;
             const auto x=spark.left+static_cast<LONG>((at-begin)*(spark.right-spark.left)/static_cast<double>(end-begin));
@@ -982,6 +1058,14 @@ void StatisticsPage::draw_sidebar(HDC dc) {
                 if(sample.values[2])max_y=std::max(max_y,*sample.values[2]*1.15);
             for(const auto& sample:system_points_)if(sample.values[section])
                 add(sample.time,*sample.values[section],latest-60000,latest,max_y);
+            if(section==3)for(const auto& sample:system_points_)if(sample.values[4] &&
+                sample.time>=latest-60000 && sample.time<=latest) {
+                const auto x=spark.left+static_cast<LONG>((sample.time-(latest-60000))*
+                    (spark.right-spark.left)/60000.0);
+                const auto ypoint=spark.bottom-2-static_cast<LONG>(
+                    std::clamp(*sample.values[4]/100.0,0.0,1.0)*(spark.bottom-spark.top-5));
+                second_gpu_line.push_back({x,ypoint});
+            }
         } else if(section==4 || section==5) {
             const auto& apps=section==4?live_apps_:history_.history;
             const auto start=section==4?latest-60000:window_from_;
@@ -1000,18 +1084,72 @@ void StatisticsPage::draw_sidebar(HDC dc) {
             }
         }
         if(points.size()>1) {
+            const int saved=SaveDC(dc);
+            IntersectClipRect(dc,spark.left,spark.top,spark.right,spark.bottom);
+            fill_under(dc,points,spark.bottom,colors[section]);
             HPEN line=graph_pen(colors[section],false);
             const auto old=line?SelectObject(dc,line):nullptr;
             Polyline(dc,points.data(),static_cast<int>(points.size()));
             if(line)SelectObject(dc,old);
+            RestoreDC(dc,saved);
+        }
+        if(section==3 && second_gpu_line.size()>1) {
+            const int saved=SaveDC(dc);
+            IntersectClipRect(dc,spark.left,spark.top,spark.right,spark.bottom);
+            fill_under(dc,second_gpu_line,spark.bottom,RGB(194,89,178));
+            HPEN line=graph_pen(RGB(194,89,178),false);
+            const auto old=line?SelectObject(dc,line):nullptr;
+            Polyline(dc,second_gpu_line.data(),static_cast<int>(second_gpu_line.size()));
+            if(line)SelectObject(dc,old);
+            RestoreDC(dc,saved);
         }
     }
 }
 void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
-    std::int64_t from,std::int64_t to,bool autoscale,double manual_zoom,POINT hover) {
-    if(metric>=4)return;
-    const std::array<COLORREF,4> ink{{RGB(14,132,177),RGB(67,105,181),RGB(184,55,114),RGB(131,54,156)}};
-    const HBRUSH paper=CreateSolidBrush(RGB(250,250,250));FillRect(dc,&area,paper);DeleteObject(paper);
+    std::int64_t from,std::int64_t to,bool autoscale,double manual_zoom,POINT hover,
+    const std::deque<SystemPoint>* frozen) {
+    const auto& samples=frozen?*frozen:system_points_;
+    (void)hover; // The old on-graph readings have moved to the native hover bubble.
+    if(metric>=5)return;
+    constexpr std::array<COLORREF,5> ink{{RGB(14,132,177),RGB(67,105,181),RGB(184,55,114),
+        RGB(131,54,156),RGB(194,89,178)}};
+    const HBRUSH paper=CreateSolidBrush(RGB(250,250,250));
+    FillRect(dc,&area,paper);DeleteObject(paper);
+    const unsigned count=1U;
+    double max_y=metric==2?1.0:100.0;
+    if(autoscale) {
+        max_y=metric==2?0.1:5.0;
+        for(const auto& sample:samples)if(sample.time>=from && sample.time<=to)
+            for(unsigned s=0;s<count;++s)if(sample.values[metric+s])
+                max_y=std::max(max_y,*sample.values[metric+s]*(metric==2?1.2:1.12));
+        if(metric!=2)max_y=std::min(100.0,std::ceil(max_y/5.0)*5.0);
+    } else max_y/=std::clamp(manual_zoom,1.0,100.0);
+    max_y=std::max(max_y,.001);
+    if(to<=from)to=from+1;
+    const int clip=SaveDC(dc);
+    IntersectClipRect(dc,area.left,area.top,area.right,area.bottom);
+    for(unsigned s=0;s<count;++s) {
+        const unsigned index=metric+s;
+        std::vector<POINT> line;
+        const auto paint_line=[&]() {
+            if(line.empty())return;
+            fill_under(dc,line,area.bottom,ink[index]);
+            const HPEN pen=graph_pen(ink[index],false);
+            const auto previous=pen?SelectObject(dc,pen):nullptr;
+            if(line.size()>1)Polyline(dc,line.data(),static_cast<int>(line.size()));
+            else Ellipse(dc,line[0].x-2,line[0].y-2,line[0].x+2,line[0].y+2);
+            if(pen)SelectObject(dc,previous);
+            line.clear();
+        };
+        for(const auto& sample:samples) {
+            if(sample.time<from || sample.time>to || !sample.values[index]){paint_line();continue;}
+            const double fraction=static_cast<double>(sample.time-from)/static_cast<double>(to-from);
+            const double normalized=std::clamp(*sample.values[index]/max_y,0.0,1.0);
+            line.push_back({area.left+static_cast<LONG>(fraction*(area.right-area.left)),
+                area.bottom-static_cast<LONG>(normalized*(area.bottom-area.top))});
+        }
+        paint_line();
+    }
     const HPEN grid=graph_pen(RGB(211,217,220),true);
     const auto old_grid=grid?SelectObject(dc,grid):nullptr;
     for(int row=0;row<=5;++row){
@@ -1023,56 +1161,87 @@ void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
         MoveToEx(dc,x,area.top,nullptr);LineTo(dc,x,area.bottom);
     }
     if(grid)SelectObject(dc,old_grid);
-    double maximum=metric==2?1.0:100.0;
-    if(autoscale) {
-        maximum=metric==2?0.1:5.0;
-        for(const auto& sample:system_points_)if(sample.time>=from && sample.time<=to && sample.values[metric])
-            maximum=std::max(maximum,*sample.values[metric]*(metric==2?1.2:1.12));
-        if(metric!=2)maximum=std::min(100.0,std::ceil(maximum/5.0)*5.0);
-    } else maximum/=std::clamp(manual_zoom,1.0,100.0);
-    const std::wstring top_label=stat_decimal(maximum)+(metric==2?L" Mbps":L"%");
-    label(dc,top_label.c_str(),area.left,area.top-24,RGB(76,81,84));
+    RestoreDC(dc,clip);
+    const auto cap=stat_decimal(max_y)+(metric==2?L" Mbps":L"%");
+    label(dc,cap.c_str(),area.left,area.top-24,RGB(76,81,84));
     label(dc,L"0",area.left,area.bottom+4,RGB(76,81,84));
-    std::vector<POINT> points;
-    if(to<=from)to=from+1;
-    for(const auto& sample:system_points_) {
-        if(sample.time<from || sample.time>to || !sample.values[metric]){
-            if(!points.empty()) {
-                const HPEN pen=graph_pen(ink[metric],false);
-                const auto old=pen?SelectObject(dc,pen):nullptr;
-                if(points.size()>1)Polyline(dc,points.data(),static_cast<int>(points.size()));
-                if(pen)SelectObject(dc,old);
-                points.clear();
-            }
-            continue;
+    const auto a=local_label(from),b=local_label(to);
+    label(dc,a.c_str(),area.left,area.bottom+24);
+    SIZE extent{};GetTextExtentPoint32W(dc,b.c_str(),static_cast<int>(b.size()),&extent);
+    label(dc,b.c_str(),area.right-extent.cx,area.bottom+24);
+    if(samples.empty())label(dc,L"Ожидание показаний Windows…",area.left+20,area.top+50,RGB(120,119,116));
+}
+
+void StatisticsPage::draw_system_details(HDC dc,unsigned metric) {
+    if(metric>=4)return;
+    const int top=731;
+    const auto& held=frozen_views_[metric];
+    const auto& info=held.paused?held.info:system_info_;
+    const auto& samples=held.paused?held.samples:system_points_;
+    const auto& sample=samples.empty()?SystemPoint{}:samples.back();
+    const auto percent=[&](unsigned index)->std::wstring {
+        return sample.values[index]?stat_decimal(*sample.values[index])+L"%":L"—";
+    };
+    std::wstring one,two,three;
+    if(metric==0){
+        one=L"Загрузка ЦП: "+percent(0)+L"   Логических процессоров: "+std::to_wstring(info.logical_processors);
+        two=L"Длительность опроса: "+stat_decimal(info.collection_ms)+L" мс";
+        three=L"Температура ЦП: "+(info.cpu_temp?stat_decimal(*info.cpu_temp)+L" °C"+(info.cpu_board?L" (датчик платы)":L""):L"—");
+    } else if(metric==1) {
+        one=L"Используется RAM: "+stat_memory(info.ram_used)+L" / "+stat_memory(info.ram_capacity)+L"   "+percent(1);
+        const std::optional<std::uint64_t> free_mem=info.ram_capacity && info.ram_used &&
+            *info.ram_capacity>=*info.ram_used?std::optional<std::uint64_t>(*info.ram_capacity-*info.ram_used):std::nullopt;
+        two=L"Доступно: "+stat_memory(free_mem);
+        three=L"Системная память Windows (не сумма Working Set приложений)";
+    } else if(metric==2) {
+        one=L"Сеть · Rx/Tx: "+stat_network(info.rx,info.tx);
+        two=L"Приём: "+(info.rx?stat_decimal(*info.rx*8.0/1000000.0)+L" Mbps":L"—");
+        three=L"Передача: "+(info.tx?stat_decimal(*info.tx*8.0/1000000.0)+L" Mbps":L"—");
+    } else {
+        one=L"GPU: "+percent(3)+L"   Использование VRAM: "+percent(4);
+        two=L"Видеопамять: "+stat_memory(info.gpu_memory)+L" / "+stat_memory(info.gpu_capacity);
+        three=L"Температура GPU: "+(info.gpu_temp?stat_decimal(*info.gpu_temp)+L" °C":L"—");
+    }
+    label(dc,one.c_str(),310,top,RGB(45,52,60));
+    label(dc,two.c_str(),310,top+29,RGB(65,72,80));
+    label(dc,three.c_str(),310,top+58,RGB(65,72,80));
+    if(metric==3){
+        const HBRUSH gpu=CreateSolidBrush(RGB(131,54,156));
+        const RECT gpu_mark{1035,top,1047,top+12};FillRect(dc,&gpu_mark,gpu);DeleteObject(gpu);
+        const HBRUSH vram=CreateSolidBrush(RGB(194,89,178));
+        const RECT vram_mark{1035,top+25,1047,top+37};FillRect(dc,&vram_mark,vram);DeleteObject(vram);
+        label(dc,L"GPU",1052,top-4);label(dc,L"VRAM",1052,top+21);
+    }
+}
+
+void StatisticsPage::refresh_pause_control() {
+    if(pause_toggle_ && selected_section_<6)
+        SetWindowTextW(pause_toggle_,frozen_views_[selected_section_].paused?L"Продолжить":L"Пауза");
+}
+void StatisticsPage::toggle_section_pause() {
+    if(selected_section_>=6)return;
+    auto& state=frozen_views_[selected_section_];
+    if(state.paused) {
+        state=FrozenView{};
+    } else {
+        state.paused=true;
+        if(selected_section_<4) {
+            state.samples=system_points_; // Immutable copy: future sampler ticks cannot move this chart.
+            state.info=system_info_;
+            state.to=system_view_end();
+            state.from=state.to-std::array<std::int64_t,3>{{60000,300000,900000}}[system_range_];
+        } else {
+            state.apps=selected_section_==4?live_apps_:history_.history;
+            const auto axis=selected_section_-4;
+            state.zoom=auto_scale_[axis]?cached_auto_zoom_[axis]:1.0;
+            state.to=selected_section_==4?live_view_end():window_to_;
+            state.from=selected_section_==4?state.to-60000:window_from_;
         }
-        const auto x=area.left+static_cast<LONG>((sample.time-from)*(area.right-area.left)/static_cast<double>(to-from));
-        const auto y=area.bottom-static_cast<LONG>(std::clamp(*sample.values[metric]/maximum,0.0,1.0)*(area.bottom-area.top));
-        points.push_back({x,y});
     }
-    if(!points.empty()) {
-        const HPEN pen=graph_pen(ink[metric],false);
-        const auto old=pen?SelectObject(dc,pen):nullptr;
-        if(points.size()>1)Polyline(dc,points.data(),static_cast<int>(points.size()));
-        else Ellipse(dc,points.front().x-2,points.front().y-2,points.front().x+2,points.front().y+2);
-        if(pen)SelectObject(dc,old);
-    }
-    if(system_points_.empty())label(dc,L"Ожидание показаний Windows…",area.left+20,area.top+50,RGB(120,119,116));
-    const auto left=local_label(from),right=local_label(to);
-    label(dc,left.c_str(),area.left,area.bottom+24);
-    SIZE size{};GetTextExtentPoint32W(dc,right.c_str(),static_cast<int>(right.size()),&size);
-    label(dc,right.c_str(),area.right-size.cx,area.bottom+24);
-    if(hover.x>=area.left && hover.x<=area.right && hover.y>=area.top && hover.y<=area.bottom) {
-        const auto timestamp=from+static_cast<std::int64_t>((hover.x-area.left)*static_cast<double>(to-from)/std::max(1L,area.right-area.left));
-        const SystemPoint* closest=nullptr;
-        for(const auto& sample:system_points_)if(sample.values[metric] && sample.time>=from && sample.time<=to &&
-            (!closest || std::abs(sample.time-timestamp)<std::abs(closest->time-timestamp)))closest=&sample;
-        if(closest) {
-            const auto text=local_sample_label(closest->time)+L"  ·  "+stat_decimal(*closest->values[metric])+
-                (metric==2?L" Mbps":L"%");
-            label(dc,text.c_str(),area.left+12,area.top+11,ink[metric]);
-        }
-    }
+    refresh_pause_control();
+    system_tip_active_=false;hover_section_=-1;
+    if(tooltip_)ShowWindow(tooltip_,SW_HIDE);
+    InvalidateRect(hwnd_,nullptr,FALSE);
 }
 void StatisticsPage::draw(HDC dc) {
     RECT physical{};GetClientRect(hwnd_,&physical);
@@ -1089,18 +1258,35 @@ void StatisticsPage::draw(HDC dc) {
     label(dc,titles[selected_section_],292,18,RGB(40,47,55));
     // Only one graph is visible; the original range, auto-scale and popout controls
     // remain above the graph and keep their existing settings and handlers.
-    const auto now=last_live_timestamp_>0?last_live_timestamp_:now_ms();
+    const auto now=live_view_end();
     if(selected_section_<4) {
         const auto range=std::array<std::int64_t,3>{{60000,300000,900000}}[system_range_];
-        const auto right=system_points_.empty()?now:system_points_.back().time;
-        draw_system_graph(dc,one_minute,selected_section_,right-range,right,
-            system_autoscale_,1.0,system_hover_);
+        const auto& held=frozen_views_[selected_section_];
+        const auto right=held.paused?held.to:system_view_end();
+        const auto begin=held.paused?held.from:right-range;
+        const auto* samples=held.paused?&held.samples:nullptr;
+        if(selected_section_==3) {
+            const RECT gpu{310,190,1124,372};
+            const RECT vram{310,458,1124,640};
+            label(dc,L"Загрузка GPU",438,162,RGB(131,54,156));
+            label(dc,L"Использование VRAM",438,430,RGB(194,89,178));
+            draw_system_graph(dc,gpu,3,begin,right,system_autoscale_,1.0,system_hover_,samples);
+            draw_system_graph(dc,vram,4,begin,right,system_autoscale_,1.0,system_hover_,samples);
+        } else draw_system_graph(dc,one_minute,selected_section_,begin,right,
+            system_autoscale_,1.0,system_hover_,samples);
+        draw_system_details(dc,selected_section_);
     } else if(selected_section_==4) {
-        draw_graph(dc,one_minute,live_apps_,now-60000,now,L"",true,
-            auto_scale_[0]?cached_auto_zoom_[0]:1.0);
+        const auto& held=frozen_views_[4];
+        const auto& series=held.paused?held.apps:live_apps_;
+        const auto end=held.paused?held.to:now;
+        const auto begin=held.paused?held.from:end-60000;
+        draw_graph(dc,one_minute,series,begin,end,L"",!held.paused,
+            held.paused?held.zoom:(auto_scale_[0]?cached_auto_zoom_[0]:1.0));
     } else if(selected_section_==5) {
-        draw_graph(dc,history_chart,history_.history,window_from_,window_to_,L"",false,
-            auto_scale_[1]?cached_auto_zoom_[1]:1.0);
+        const auto& held=frozen_views_[5];
+        draw_graph(dc,history_chart,held.paused?held.apps:history_.history,
+            held.paused?held.from:window_from_,held.paused?held.to:window_to_,L"",false,
+            held.paused?held.zoom:(auto_scale_[1]?cached_auto_zoom_[1]:1.0));
         if(!history_.error.empty())label(dc,history_.error.c_str(),292,819,RGB(162,50,40));
     } else label(dc,L"Таблица аптайма сохраняет независимые фильтры и период.",292,813,RGB(100,105,108));
     SelectObject(dc,old);
@@ -1109,17 +1295,23 @@ void StatisticsPage::mouse(int x,int y) {
     RECT physical{};GetClientRect(hwnd_,&physical);
     if(physical.right<=0 || physical.bottom<=0) return;
     x=MulDiv(x,page_width,physical.right);y=MulDiv(y,page_height,physical.bottom);
-    const bool hover_changed=system_hover_.x!=x || system_hover_.y!=y;
-    const bool was_graph=system_hover_.x>=one_minute.left && system_hover_.x<=one_minute.right &&
-        system_hover_.y>=one_minute.top && system_hover_.y<=one_minute.bottom;
     system_hover_={x,y};
-    const bool in_graph=x>=one_minute.left && x<=one_minute.right &&
-        y>=one_minute.top && y<=one_minute.bottom;
-    const auto tick=GetTickCount64();
-    if(selected_section_<4 && hover_changed && (was_graph || in_graph) &&
-        tick-hover_last_frame_>=40) {
-        hover_last_frame_=tick;InvalidateRect(hwnd_,nullptr,FALSE);
+    if(selected_section_<4) {
+        const auto range=std::array<std::int64_t,3>{{60000,300000,900000}}[system_range_];
+        const auto& held=frozen_views_[selected_section_];
+        const auto right=held.paused?held.to:system_view_end();
+        const auto begin=held.paused?held.from:right-range;
+        const auto* samples=held.paused?&held.samples:nullptr;
+        if(selected_section_==3) {
+            const RECT gpu{310,190,1124,372};
+            const RECT vram{310,458,1124,640};
+            if(y>=vram.top && y<=vram.bottom)
+                show_system_hover(4,system_hover_,vram,begin,right,samples);
+            else show_system_hover(3,system_hover_,gpu,begin,right,samples);
+        } else show_system_hover(selected_section_,system_hover_,one_minute,begin,right,samples);
+        return;
     }
+    system_tip_active_=false;
     const bool in_live=selected_section_==4 && x>=one_minute.left && x<=one_minute.right
         && y>=one_minute.top && y<=one_minute.bottom;
     const bool in_history=selected_section_==5 && x>=history_chart.left && x<=history_chart.right
@@ -1128,12 +1320,14 @@ void StatisticsPage::mouse(int x,int y) {
         if(hover_section_!=-1) {hover_section_=-1;if(tooltip_) ShowWindow(tooltip_,SW_HIDE);}
         return;
     }
-    const auto& chart=in_live?live_apps_:history_.history;
+    const auto& held=frozen_views_[in_live?4U:5U];
+    const auto& chart=held.paused?held.apps:(in_live?live_apps_:history_.history);
     const auto& area=in_live?one_minute:history_chart;
-    const auto now=last_live_timestamp_>0?last_live_timestamp_:now_ms();
-    const auto from=in_live?now-60000:window_from_;
-    const auto to=in_live?now:window_to_;
-    const double zoom=auto_scale_[in_live?0:1]?cached_auto_zoom_[in_live?0:1]:1.0;
+    const auto now=live_view_end();
+    const auto from=held.paused?held.from:(in_live?now-60000:window_from_);
+    const auto to=held.paused?held.to:(in_live?now:window_to_);
+    const double zoom=held.paused?held.zoom:
+        (auto_scale_[in_live?0:1]?cached_auto_zoom_[in_live?0:1]:1.0);
     double best=9.0*9.0;
     int section=-1;std::size_t selected=0;double score=0;std::int64_t sample_at=0;
     if(to>from) for(std::size_t i=0;i<chart.size();++i) {
@@ -1247,9 +1441,89 @@ void StatisticsPage::draw_metric_tooltip(HDC dc,const RECT& area,const Statistic
     line(L"Rx/Tx: "+values.network,158);
     SelectObject(dc,original);
 }
+void StatisticsPage::show_system_hover(unsigned metric,POINT cursor,const RECT& area,
+    std::int64_t from,std::int64_t to,const std::deque<SystemPoint>* frozen) {
+    if(metric>=5 || cursor.x<area.left || cursor.x>area.right || cursor.y<area.top ||
+        cursor.y>area.bottom || to<=from || !tooltip_) {
+        system_tip_active_=false;
+        if(tooltip_ && hover_section_<0)ShowWindow(tooltip_,SW_HIDE);
+        return;
+    }
+    const auto time=from+static_cast<std::int64_t>((cursor.x-area.left)*
+        static_cast<double>(to-from)/std::max<LONG>(1,area.right-area.left));
+    const SystemPoint* closest=nullptr;
+    const auto& samples=frozen?*frozen:system_points_;
+    for(const auto& sample:samples) {
+        if(sample.time<from || sample.time>to || !sample.values[metric])continue;
+        if(!closest || std::abs(sample.time-time)<std::abs(closest->time-time))closest=&sample;
+    }
+    if(!closest){system_tip_active_=false;ShowWindow(tooltip_,SW_HIDE);return;}
+    system_tip_active_=true;system_tip_metric_=metric;system_tip_sample_=*closest;
+    POINT screen{};GetCursorPos(&screen);
+    const UINT dpi=GetDpiForWindow(tooltip_);
+    const int width=MulDiv(420,static_cast<int>(dpi),96),height=MulDiv(198,static_cast<int>(dpi),96);
+    int x=screen.x+MulDiv(16,static_cast<int>(dpi),96);
+    int y=screen.y+MulDiv(18,static_cast<int>(dpi),96);
+    MONITORINFO monitor{sizeof(monitor)};
+    if(GetMonitorInfoW(MonitorFromPoint(screen,MONITOR_DEFAULTTONEAREST),&monitor)){
+        x=std::clamp(x,static_cast<int>(monitor.rcWork.left),
+            std::max(static_cast<int>(monitor.rcWork.left),static_cast<int>(monitor.rcWork.right)-width));
+        y=std::clamp(y,static_cast<int>(monitor.rcWork.top),
+            std::max(static_cast<int>(monitor.rcWork.top),static_cast<int>(monitor.rcWork.bottom)-height));
+    }
+    SetWindowPos(tooltip_,HWND_TOPMOST,x,y,width,height,SWP_NOACTIVATE|SWP_SHOWWINDOW);
+    InvalidateRect(tooltip_,nullptr,FALSE);
+}
+void StatisticsPage::draw_system_hover(HDC dc,const RECT& bounds){
+    const std::array<COLORREF,5> colors{{RGB(14,132,177),RGB(67,105,181),RGB(184,55,114),RGB(131,54,156),RGB(194,89,178)}};
+    const std::array<const wchar_t*,5> names{{L"ЦП",L"Память",L"Сеть",L"GPU",L"VRAM"}};
+    const HBRUSH paper=CreateSolidBrush(RGB(250,248,239));FillRect(dc,&bounds,paper);DeleteObject(paper);
+    const HBRUSH edge=CreateSolidBrush(RGB(151,137,112));FrameRect(dc,&bounds,edge);DeleteObject(edge);
+    const COLORREF color=colors[std::min<unsigned>(4,system_tip_metric_)];
+    const HBRUSH accent=CreateSolidBrush(color);
+    const RECT bar{bounds.left+2,bounds.bottom-6,bounds.right-2,bounds.bottom-2};
+    FillRect(dc,&bar,accent);DeleteObject(accent);
+    SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(53,49,43));
+    RECT header{bounds.left+18,bounds.top+9,bounds.right-16,bounds.top+39};
+    DrawTextW(dc,names[system_tip_metric_],-1,&header,DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
+    const auto value=[&](unsigned index,const wchar_t* unit)->std::wstring {
+        return system_tip_sample_.values[index]?stat_decimal(*system_tip_sample_.values[index])+unit:L"—";
+    };
+    std::wstring primary=value(system_tip_metric_,system_tip_metric_==2?L" Mbps":L"%");
+    if(system_tip_metric_==3)primary+=L"   VRAM: "+value(4,L"%");
+    SetTextColor(dc,color);
+    RECT main{bounds.left+18,bounds.top+41,bounds.right-12,bounds.top+75};
+    DrawTextW(dc,primary.c_str(),-1,&main,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
+    const HBRUSH separator=CreateSolidBrush(RGB(221,215,199));
+    const RECT rule{bounds.left+13,bounds.top+101,bounds.right-13,bounds.top+102};
+    FillRect(dc,&rule,separator);DeleteObject(separator);
+    SetTextColor(dc,RGB(75,71,64));
+    const auto write=[&](const std::wstring& text,int top){
+        RECT cell{bounds.left+18,bounds.top+top,bounds.right-14,bounds.top+top+25};
+        DrawTextW(dc,text.c_str(),-1,&cell,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
+    };
+    write(L"Замер: "+local_sample_label(system_tip_sample_.time),75);
+    if(system_tip_metric_==0) {
+        write(L"ЦП: "+value(0,L"%")+L" · Потоков: "+std::to_wstring(system_info_.logical_processors),108);
+        write(L"Опрос: "+stat_decimal(system_info_.collection_ms)+L" мс",135);
+    } else if(system_tip_metric_==1) {
+        write(L"RAM: "+stat_memory(system_info_.ram_used)+L" / "+stat_memory(system_info_.ram_capacity),108);
+        write(L"Использование: "+value(1,L"%"),135);
+    } else if(system_tip_metric_==2) {
+        write(L"Rx/Tx: "+stat_network(system_info_.rx,system_info_.tx),108);
+        write(L"Включая LAN/loopback",135);
+    } else {
+        write(L"GPU: "+value(3,L"%")+L" · VRAM: "+value(4,L"%"),108);
+        write(L"VRAM: "+stat_memory(system_info_.gpu_memory)+L" / "+stat_memory(system_info_.gpu_capacity),135);
+    }
+}
+
 void StatisticsPage::paint_tooltip(HDC dc) {
+    if(system_tip_active_) {RECT rect{};GetClientRect(tooltip_,&rect);draw_system_hover(dc,rect);return;}
     if(hover_section_<0) return;
-    const auto& source=hover_section_==0?live_apps_:history_.history;
+    const unsigned section=hover_section_==0?4U:5U;
+    const auto& held=frozen_views_[section];
+    const auto& source=held.paused?held.apps:(hover_section_==0?live_apps_:history_.history);
     if(hover_index_>=source.size()) return;
     RECT bounds{};GetClientRect(tooltip_,&bounds);
     draw_metric_tooltip(dc,bounds,source[hover_index_],hover_value_,hover_timestamp_);
@@ -1325,9 +1599,10 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
             const double elapsed=axis_tick_?std::clamp(static_cast<double>(tick-axis_tick_),1.0,100.0):33.0;
             axis_tick_=tick;
             const bool axis_animating=advance_axes(elapsed);
+            const bool viewport_animating=advance_time_view(elapsed);
             if(active_) InvalidateRect(hwnd_,nullptr,FALSE);
             for(auto& popup:popups_) if(popup.window) InvalidateRect(popup.window,nullptr,FALSE);
-            if((!animating && !axis_animating) ||
+            if((!animating && !axis_animating && !viewport_animating) ||
                 (!active_ && !has_popup()))
                 KillTimer(hwnd_,animate_message);
             return 0;
@@ -1359,12 +1634,26 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
         break;
     case WM_MOUSELEAVE:
         system_hover_={-1,-1};
+        system_tip_active_=false;
         hover_section_=-1;
         if(tooltip_) ShowWindow(tooltip_,SW_HIDE);
         return 0;
     case WM_SIZE: if(hwnd_) {layout();InvalidateRect(hwnd_,nullptr,FALSE);} return 0;
     case ready_message: accept();return 0;
     case WM_COMMAND:
+        if(LOWORD(wp)==system_popout_id+2 && HIWORD(wp)==BN_CLICKED) {
+            toggle_section_pause();return 0;
+        }
+        if(LOWORD(wp)==system_popout_id+1 && HIWORD(wp)==BN_CLICKED) {
+            fill_enabled_=SendMessageW(fill_toggle_,BM_GETCHECK,0,0)==BST_CHECKED;
+            WritePrivateProfileStringW(L"overlay",L"stats_chart_fill",fill_enabled_?L"1":L"0",settings_.c_str());
+            for(auto& popup:popups_)if(popup.window) {
+                if(popup.fill_toggle)SendMessageW(popup.fill_toggle,BM_SETCHECK,
+                    fill_enabled_?BST_CHECKED:BST_UNCHECKED,0);
+                InvalidateRect(popup.window,nullptr,FALSE);
+            }
+            InvalidateRect(hwnd_,nullptr,FALSE);return 0;
+        }
         if(HIWORD(wp)==BN_CLICKED && (LOWORD(wp)==auto_live_id || LOWORD(wp)==auto_history_id)) {
             const unsigned index=LOWORD(wp)==auto_live_id?0U:1U;
             const HWND control=index==0?auto_live_:auto_history_;

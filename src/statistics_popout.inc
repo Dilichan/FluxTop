@@ -1,9 +1,9 @@
 // Reuse the StatisticsPage model and colour map: detached windows never collect data.
 void StatisticsPage::popup_range(const PopupState& popup,std::int64_t& from,std::int64_t& to) const {
-    const auto end=popup.kind>=2?(system_points_.empty()?now_ms():system_points_.back().time):
-        popup.kind==0?(last_live_timestamp_>0?last_live_timestamp_:now_ms()):window_to_;
-    const auto begin=popup.kind>=2?end-std::array<std::int64_t,3>{{60000,300000,900000}}[system_range_]:
-        popup.kind==0?end-60000:window_from_;
+    const auto end=popup.paused?popup.frozen_to:(popup.kind>=2?system_view_end():
+        popup.kind==0?live_view_end():window_to_);
+    const auto begin=popup.paused?popup.frozen_from:(popup.kind>=2?end-std::array<std::int64_t,3>{{60000,300000,900000}}[system_range_]:
+        popup.kind==0?end-60000:window_from_);
     const double total=static_cast<double>(std::max<std::int64_t>(1000,end-begin));
     const double span=std::max(1000.0,total/std::clamp(popup.zoom_x,1.0,128.0));
     const double room=std::max(0.0,(total-span)/2.0);
@@ -60,16 +60,25 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
     const auto old_font=SelectObject(dc,popup_font_?popup_font_:GetStockObject(DEFAULT_GUI_FONT));
     const std::array<const wchar_t*,6> names{{L"AutoScore · последняя минута",L"AutoScore · история",
         L"ЦП",L"Память",L"Сеть",L"GPU"}};
-    label(dc,names[popup.kind],22,18);
+    label(dc,names[popup.kind],22,55);
     // Controls are native Win32; navigation instructions are intentionally absent.
     std::int64_t from{},to{};popup_range(popup,from,to);
-    const RECT graph{68,83,client.right-30,client.bottom-60};
+    const RECT graph{68,114,client.right-30,client.bottom-60};
+    const auto* frozen_system=popup.paused?&popup.frozen_system:nullptr;
     if(popup.kind>=2) {
-        draw_system_graph(dc,graph,popup.kind-2,from,to,popup.auto_scale,popup.zoom_y,popup.cursor);
+        if(popup.kind==5) {
+            const LONG middle=114+(client.bottom-174)/2;
+            const RECT gpu{68,114,client.right-30,middle-23};
+            const RECT vram{68,middle+26,client.right-30,client.bottom-60};
+            label(dc,L"Загрузка GPU",170,90,RGB(131,54,156));
+            label(dc,L"Использование VRAM",170,middle+4,RGB(194,89,178));
+            draw_system_graph(dc,gpu,3,from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system);
+            draw_system_graph(dc,vram,4,from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system);
+        } else draw_system_graph(dc,graph,popup.kind-2,from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system);
         SelectObject(dc,old_font);
         return;
     }
-    const auto& apps=popup.kind==0?live_apps_:history_.history;
+    const auto& apps=popup.paused?popup.frozen_apps:(popup.kind==0?live_apps_:history_.history);
     if(popup.auto_scale && popup.axis_dirty) {
         popup.target_auto_zoom=auto_vertical_zoom(apps,from,to);
         if(!popup.axis_initialized) {
@@ -137,13 +146,57 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
     case WM_CREATE: {
         popup->auto_toggle=CreateWindowExW(0,L"BUTTON",L"Автомасштаб",
             WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_AUTOCHECKBOX,
-            22,48,180,28,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(popup_auto_id)),
+            22,8,180,28,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(popup_auto_id)),
             GetModuleHandleW(nullptr),nullptr);
         if(!popup->auto_toggle) return -1;
         SendMessageW(popup->auto_toggle,BM_SETCHECK,popup->auto_scale?BST_CHECKED:BST_UNCHECKED,0);
+        popup->fill_toggle=CreateWindowExW(0,L"BUTTON",L"Заливка графика",
+            WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_AUTOCHECKBOX,220,8,190,28,
+            window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(popup_auto_id+1)),
+            GetModuleHandleW(nullptr),nullptr);
+        if(!popup->fill_toggle)return -1;
+        SendMessageW(popup->fill_toggle,BM_SETCHECK,page->fill_enabled_?BST_CHECKED:BST_UNCHECKED,0);
+        popup->pause_toggle=CreateWindowExW(0,L"BUTTON",L"Пауза",
+            WS_CHILD|WS_VISIBLE|WS_TABSTOP,445,8,126,28,window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(popup_auto_id+2)),
+            GetModuleHandleW(nullptr),nullptr);
+        if(!popup->pause_toggle)return -1;
         return 0;
     }
     case WM_COMMAND:
+        if(LOWORD(wp)==popup_auto_id+2 && HIWORD(wp)==BN_CLICKED) {
+            if(popup->paused) {
+                popup->paused=false;
+                popup->frozen_system.clear();popup->frozen_apps.clear();
+                popup->frozen_from=0;popup->frozen_to=0;
+            } else {
+                const auto latest=popup->kind>=2?page->system_view_end():
+                    (popup->kind==0?page->live_view_end():page->window_to_);
+                popup->frozen_to=latest;
+                popup->frozen_from=popup->kind>=2?
+                    latest-std::array<std::int64_t,3>{{60000,300000,900000}}[page->system_range_]:
+                    (popup->kind==0?latest-60000:page->window_from_);
+                if(popup->kind>=2)popup->frozen_system=page->system_points_;
+                else popup->frozen_apps=popup->kind==0?page->live_apps_:page->history_.history;
+                popup->paused=true;
+            }
+            SetWindowTextW(popup->pause_toggle,popup->paused?L"Продолжить":L"Пауза");
+            popup->axis_dirty=true;
+            InvalidateRect(window,nullptr,FALSE);return 0;
+        }
+        if(LOWORD(wp)==popup_auto_id+1 && HIWORD(wp)==BN_CLICKED) {
+            page->fill_enabled_=SendMessageW(popup->fill_toggle,BM_GETCHECK,0,0)==BST_CHECKED;
+            WritePrivateProfileStringW(L"overlay",L"stats_chart_fill",
+                page->fill_enabled_?L"1":L"0",page->settings_.c_str());
+            if(page->fill_toggle_)SendMessageW(page->fill_toggle_,BM_SETCHECK,
+                page->fill_enabled_?BST_CHECKED:BST_UNCHECKED,0);
+            for(auto& other:page->popups_)if(other.window) {
+                if(other.fill_toggle)SendMessageW(other.fill_toggle,BM_SETCHECK,
+                    page->fill_enabled_?BST_CHECKED:BST_UNCHECKED,0);
+                InvalidateRect(other.window,nullptr,FALSE);
+            }
+            InvalidateRect(page->hwnd_,nullptr,FALSE);return 0;
+        }
         if(LOWORD(wp)==popup_auto_id && HIWORD(wp)==BN_CLICKED) {
             popup->auto_scale=SendMessageW(popup->auto_toggle,BM_GETCHECK,0,0)==BST_CHECKED;
             popup->axis_dirty=true;
@@ -173,7 +226,8 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
             if(popup->auto_scale) {
                 std::int64_t from{},to{};page->popup_range(*popup,from,to);
                 if(popup->kind<2) {
-                    const auto& apps=popup->kind==0?page->live_apps_:page->history_.history;
+                    const auto& apps=popup->paused?popup->frozen_apps:
+                    (popup->kind==0?page->live_apps_:page->history_.history);
                     popup->zoom_y=auto_vertical_zoom(apps,from,to);
                 } else popup->zoom_y=1.0;
                 popup->auto_scale=false;
@@ -226,6 +280,22 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
         TRACKMOUSEEVENT track{sizeof(track),TME_LEAVE,window,0};
         TrackMouseEvent(&track);
         popup->cursor=current;
+        if(popup->kind>=2) {
+            RECT bounds{};GetClientRect(window,&bounds);
+            const RECT chart{68,114,bounds.right-30,bounds.bottom-60};
+            std::int64_t from{},to{};page->popup_range(*popup,from,to);
+            if(popup->kind==5) {
+                const LONG middle=114+(bounds.bottom-174)/2;
+                const RECT gpu{68,114,bounds.right-30,middle-23};
+                const RECT vram{68,middle+26,bounds.right-30,bounds.bottom-60};
+                if(current.y>=vram.top && current.y<=vram.bottom)
+                    page->show_system_hover(4,current,vram,from,to,
+                        popup->paused?&popup->frozen_system:nullptr);
+                else page->show_system_hover(3,current,gpu,from,to,
+                        popup->paused?&popup->frozen_system:nullptr);
+            } else page->show_system_hover(popup->kind-2,current,chart,from,to,
+                popup->paused?&popup->frozen_system:nullptr);
+        }
         if(popup->dragging) {
             std::int64_t from{},to{};page->popup_range(*popup,from,to);
             RECT r{};GetClientRect(window,&r);
@@ -245,20 +315,36 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
     }
     case WM_MOUSELEAVE:
         popup->cursor={-1,-1};
+        if(popup->kind>=2) {
+            page->system_tip_active_=false;
+            if(page->tooltip_)ShowWindow(page->tooltip_,SW_HIDE);
+        }
         InvalidateRect(window,nullptr,FALSE);return 0;
     case WM_GETMINMAXINFO: {
         auto* bounds=reinterpret_cast<MINMAXINFO*>(lp);
         bounds->ptMinTrackSize={460,340};
         return 0;
     }
-    case WM_SIZE:
+    case WM_SIZE: {
         if(wp==SIZE_MINIMIZED) {popup->paint_buffer.clear();return 0;}
+        RECT r{};GetClientRect(window,&r);
+        if(popup->auto_toggle)MoveWindow(popup->auto_toggle,
+            std::max<LONG>(15,r.right-410),8,180,28,TRUE);
+        if(popup->fill_toggle)MoveWindow(popup->fill_toggle,
+            std::max<LONG>(205,r.right-210),8,195,28,TRUE);
         InvalidateRect(window,nullptr,FALSE);return 0;
+    }
     case WM_CLOSE:DestroyWindow(window);return 0;
     case WM_DESTROY:
         if(GetCapture()==window) ReleaseCapture();
         popup->paint_buffer.clear();
         popup->auto_toggle=nullptr;
+        popup->fill_toggle=nullptr;
+        popup->pause_toggle=nullptr;
+        popup->paused=false;
+        popup->frozen_system.clear();popup->frozen_apps.clear();
+        page->system_tip_active_=false;
+        if(page->tooltip_)ShowWindow(page->tooltip_,SW_HIDE);
         popup->window=nullptr;popup->dragging=false;return 0;
     }
     return DefWindowProcW(window,msg,wp,lp);

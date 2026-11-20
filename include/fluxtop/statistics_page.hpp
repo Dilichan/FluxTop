@@ -26,6 +26,7 @@ public:
     void set_limit(unsigned limit);
     void on_snapshot(std::int64_t timestamp_ms,const std::vector<Process>& grouped,unsigned interval_ms,const Snapshot& system);
 private:
+    struct SystemPoint;
     static LRESULT CALLBACK dispatch(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp);
     static LRESULT CALLBACK hover_dispatch(HWND window,UINT msg,WPARAM wp,LPARAM lp);
     static LRESULT CALLBACK table_dispatch(HWND window,UINT msg,WPARAM wp,LPARAM lp);
@@ -42,8 +43,16 @@ private:
     void update_dates();
     void draw(HDC dc);
     void draw_sidebar(HDC dc);
+    void fill_under(HDC dc,const std::vector<POINT>& points,LONG baseline,COLORREF color);
+    void draw_system_details(HDC dc,unsigned metric);
+    void show_system_hover(unsigned metric,POINT cursor,const RECT& area,std::int64_t from,std::int64_t to,const std::deque<SystemPoint>* frozen=nullptr);
+    void draw_system_hover(HDC dc,const RECT& bounds);
+    bool advance_time_view(double elapsed_ms);
+    std::int64_t system_view_end() const;
+    std::int64_t live_view_end() const;
     void draw_system_graph(HDC dc,const RECT& area,unsigned metric,std::int64_t from,
-        std::int64_t to,bool autoscale,double manual_zoom,POINT hover);
+        std::int64_t to,bool autoscale,double manual_zoom,POINT hover,
+        const std::deque<SystemPoint>* frozen=nullptr);
     void select_section(unsigned section);
     unsigned selected_popup_kind() const;
     bool has_popup() const;
@@ -81,11 +90,21 @@ private:
     COLORREF chart_color(const StatisticsApplication& app) const;
     HPEN graph_pen(COLORREF color,bool dotted);
     std::int64_t custom_timestamp(HWND picker,bool until_end);
+    struct SystemPoint {
+        std::int64_t time{};
+        std::array<std::optional<double>,5> values{}; // CPU%, RAM%, network Mbps, GPU%, VRAM%
+    };
     struct PopupState {
         StatisticsPage* owner{};
         unsigned kind{};
         HWND window{};
         HWND auto_toggle{};
+        HWND fill_toggle{};
+        HWND pause_toggle{};
+        bool paused{};
+        std::deque<SystemPoint> frozen_system;
+        std::vector<StatisticsApplication> frozen_apps;
+        std::int64_t frozen_from{},frozen_to{};
         bool auto_scale{true};
         double cached_auto_zoom{1.0};
         double target_auto_zoom{1.0};
@@ -99,17 +118,36 @@ private:
     PaintBuffer page_buffer_;
     std::array<PopupState,6> popups_{}; // AutoScore live/history, CPU, RAM, network, GPU
     // FluxTop.SystemDashboard.Stage1: bounded, sampler-fed system history.
-    struct SystemPoint {
-        std::int64_t time{};
-        std::array<std::optional<double>,4> values{}; // CPU%, RAM%, network Mbps, GPU%
-    };
     std::deque<SystemPoint> system_points_;
     ULONGLONG hover_last_frame_{};
     POINT system_hover_{-1,-1};
     unsigned selected_section_{0}; // CPU, RAM, network, GPU, AutoScore, history, uptime
     unsigned system_range_{0}; // 1, 5, 15 minutes
     bool system_autoscale_{true};
-    HWND system_period_{},system_auto_{},system_popout_{};
+    HWND system_period_{},system_auto_{},system_popout_{},fill_toggle_{},pause_toggle_{};
+    void toggle_section_pause();
+    void refresh_pause_control();
+    bool fill_enabled_{true}; // 22% tint; shared by embedded and detached graphs.
+    double smooth_system_end_{},smooth_live_end_{};
+    struct SystemInfo {
+        std::optional<std::uint64_t> ram_used,ram_capacity,gpu_memory,gpu_capacity;
+        std::optional<double> rx,tx,cpu_temp,gpu_temp;
+        unsigned logical_processors{};
+        double collection_ms{};
+        bool cpu_board{};
+    } system_info_;
+    struct FrozenView {
+        bool paused{};
+        std::deque<SystemPoint> samples;
+        std::vector<StatisticsApplication> apps;
+        std::int64_t from{},to{};
+        double zoom{1.0};
+        SystemInfo info{};
+    };
+    std::array<FrozenView,6> frozen_views_{};
+    bool system_tip_active_{};
+    unsigned system_tip_metric_{};
+    SystemPoint system_tip_sample_{};
     HWND popout_live_{},popout_history_{},popout_table_{};
     HWND auto_live_{},auto_history_{};
     std::array<bool,2> auto_scale_{{true,true}};
