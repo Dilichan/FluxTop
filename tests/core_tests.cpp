@@ -70,6 +70,32 @@ void cpu_tests() {
     result = tracker.update({sample}, 4);
     check(!result[0].cpu_percent, "access loss is unknown");
 }
+void disk_io_tests() {
+    fluxtop::CpuTracker counter;
+    fluxtop::RawProcess raw{};
+    raw.pid=600;raw.creation_time=123;raw.cpu_ticks=0;raw.sampled_ns=1000000000;
+    raw.io_read_bytes=100;raw.io_write_bytes=200;
+    auto rows=counter.update({raw},4);
+    check(!rows[0].io_bytes_per_second,"process I/O starts without a baseline");
+    raw.sampled_ns=2000000000;raw.io_read_bytes=1048676;raw.io_write_bytes=200;
+    rows=counter.update({raw},4);
+    check(rows[0].io_bytes_per_second &&
+        std::abs(*rows[0].io_bytes_per_second-1048576.0)<0.1,
+        "process I/O delta is bytes per second, not a cumulative count");
+    fluxtop::SpikeTracker tracker;
+    tracker.update(rows);
+    check(fluxtop::auto_rank(rows[0],63U).score>0.0 &&
+        fluxtop::auto_rank(rows[0],63U).metric==fluxtop::AutoMetric::io,
+        "enabled disk metric makes process I/O contribute to AutoScore");
+    check(fluxtop::auto_rank(rows[0],31U).score==0.0,
+        "hidden disk metrics do not affect AutoScore");
+    raw.creation_time=124;raw.sampled_ns=3000000000;
+    rows=counter.update({raw},4);
+    check(!rows[0].io_bytes_per_second,"PID reuse resets process I/O baseline");
+    raw.creation_time=125;raw.io_read_bytes.reset();
+    rows=counter.update({raw},4);
+    check(!rows[0].io_bytes_per_second,"unavailable I/O counter remains unknown");
+}
 void sort_tests() {
     fluxtop::Process unknown, idle, busy, tie;
     unknown.pid = 1;
@@ -469,6 +495,7 @@ int main() {
     metric_format_tests();
     overlay_geometry_tests();
     cpu_tests();
+    disk_io_tests();
     sort_tests();
     focused_process_tests();
     multiprocess_aggregation_tests();

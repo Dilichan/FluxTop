@@ -78,6 +78,11 @@ Snapshot ProcessCollector::collect() {
                 }
                 if (row.exe_path) next_paths.emplace(row.pid, Path{*row.creation_time, *row.exe_path});
             }
+            IO_COUNTERS io{};
+            if (GetProcessIoCounters(process.get(), &io)) {
+                row.io_read_bytes = io.ReadTransferCount;
+                row.io_write_bytes = io.WriteTransferCount;
+            }
             PROCESS_MEMORY_COUNTERS_EX memory{};
             memory.cb = sizeof(memory);
             if (GetProcessMemoryInfo(process.get(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory), sizeof(memory))) {

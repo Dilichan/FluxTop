@@ -69,6 +69,7 @@ private:
         const std::vector<ChartStroke>& plots,const std::vector<ChartBar>& bars={});
     void fill_under(HDC dc,const std::vector<POINT>& points,LONG baseline,COLORREF color,BYTE opacity=31);
     void draw_system_details(HDC dc,unsigned metric);
+    void select_disk(wchar_t letter);
     void show_system_hover(unsigned metric,POINT cursor,const RECT& area,std::int64_t from,std::int64_t to,const std::deque<SystemPoint>* frozen=nullptr);
     void draw_system_hover(HDC dc,const RECT& bounds);
     bool advance_time_view(double elapsed_ms);
@@ -120,6 +121,7 @@ private:
     struct SystemPoint {
         std::int64_t time{};
         std::array<std::optional<double>,5> values{}; // CPU%, RAM%, network Mbps, GPU%, VRAM%
+        std::array<std::optional<double>,26> disks{}; // Same timeline, per-letter activity percent.
     };
     struct PopupState {
         StatisticsPage* owner{};
@@ -151,11 +153,14 @@ private:
     ULONGLONG hover_last_frame_{};
     POINT system_hover_{-1,-1};
     unsigned selected_section_{0}; // CPU, RAM, network, GPU, AutoScore, history, uptime
+    wchar_t selected_disk_letter_{};
+    std::vector<wchar_t> disk_letters_;
+    unsigned sidebar_scroll_{};
     unsigned system_range_{0}; // 1, 5, 15 minutes
     bool system_autoscale_{true};
     // Independent axis easing for embedded and detached system charts (five metrics).
-    std::array<std::array<double,5>,2> smooth_system_axis_max_{};
-    std::array<std::array<ULONGLONG,5>,2> smooth_system_axis_tick_{};
+    std::array<std::array<double,31>,2> smooth_system_axis_max_{};
+    std::array<std::array<ULONGLONG,31>,2> smooth_system_axis_tick_{};
     HWND system_period_{},system_auto_{},system_popout_{},fill_toggle_{},pause_toggle_{};
     void toggle_section_pause();
     void refresh_pause_control();

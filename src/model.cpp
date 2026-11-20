@@ -20,13 +20,21 @@ std::vector<Process> CpuTracker::update(std::vector<RawProcess> raw, unsigned pr
             if (found != previous_.end() && found->second.creation == *row.creation_time) {
                 const auto& before = found->second;
                 row.has_baseline = true;
+                if (row.sampled_ns > before.sampled_ns && row.io_read_bytes && row.io_write_bytes &&
+                    before.io_read_bytes && before.io_write_bytes &&
+                    *row.io_read_bytes >= *before.io_read_bytes && *row.io_write_bytes >= *before.io_write_bytes) {
+                    const double bytes=static_cast<double>(*row.io_read_bytes-*before.io_read_bytes)+
+                        static_cast<double>(*row.io_write_bytes-*before.io_write_bytes);
+                    row.io_bytes_per_second=bytes*1000000000.0/
+                        static_cast<double>(row.sampled_ns-before.sampled_ns);
+                }
                 if (processors && row.sampled_ns > before.sampled_ns && *row.cpu_ticks >= before.ticks) {
                     const double elapsed = static_cast<double>(row.sampled_ns - before.sampled_ns);
                     const double ticks = static_cast<double>(*row.cpu_ticks - before.ticks);
                     row.cpu_percent = std::clamp(ticks * 100.0 * 100.0 / elapsed / processors, 0.0, 100.0);
                 }
             }
-            next.emplace(row.pid, Baseline{*row.creation_time, *row.cpu_ticks, row.sampled_ns});
+            next.emplace(row.pid, Baseline{*row.creation_time, *row.cpu_ticks, row.sampled_ns, row.io_read_bytes, row.io_write_bytes});
         }
         rows.push_back(std::move(row));
     }
@@ -43,13 +51,13 @@ constexpr double mib = 1048576.0;
 constexpr double gib = 1073741824.0;
 // Visual alert threshold; distinct from the large ranking-bonus threshold (20).
 constexpr double orange_burst_threshold = 5.0;
-constexpr std::array<unsigned,6> visible_bits{1U,2U,4U,8U,16U,16U};
-std::array<std::optional<double>,6> metric_values(const Process& row) {
+constexpr std::array<unsigned,7> visible_bits{1U,2U,4U,8U,16U,16U,32U};
+std::array<std::optional<double>,7> metric_values(const Process& row) {
     return {row.cpu_percent,
         row.working_set ? std::optional<double>(static_cast<double>(*row.working_set)) : std::nullopt,
         row.gpu_percent,
         row.dedicated_gpu_bytes ? std::optional<double>(static_cast<double>(*row.dedicated_gpu_bytes)) : std::nullopt,
-        row.rx_bytes_per_second, row.tx_bytes_per_second};
+        row.rx_bytes_per_second, row.tx_bytes_per_second, row.io_bytes_per_second};
 }
 double positive(std::optional<double> value) {
     return value && std::isfinite(*value) && *value > 0.0 ? *value : 0.0;
@@ -65,6 +73,7 @@ double activity_score(std::size_t metric, double value,
     case 1: return fraction_score(value,ram_capacity,0.70);
     case 2: return std::clamp(value,0.0,100.0);       // GPU engine utilization
     case 3: return fraction_score(value,gpu_capacity,0.65);
+    case 6: return std::clamp(90.0*(1.0-std::exp(-value/(4.0*mib))),0.0,90.0);
     default: return std::clamp(90.0 * (1.0 - std::exp(-value / (2.0*mib))),0.0,90.0);
     }
 }
@@ -78,6 +87,7 @@ double change_score(std::size_t metric, double increase,
     case 2: return std::min(100.0,increase * 2.0);
     case 3: return std::min(100.0,30.0*increase /
         std::max(256.0*mib,gpu_capacity ? static_cast<double>(*gpu_capacity)*.08 : gib));
+    case 6: return std::min(100.0,100.0*(1.0-std::exp(-increase/(3.0*mib))));
     default: return std::min(100.0,100.0*(1.0-std::exp(-increase/(2.0*mib))));
     }
 }
@@ -96,7 +106,7 @@ void SpikeTracker::update(std::vector<Process>& rows,
             && found->second.creation_time == row.creation_time;
         const auto measurements = metric_values(row);
         const auto old = same ? found->second.metrics
-            : std::array<std::optional<double>,6>{};
+            : std::array<std::optional<double>,7>{};
         for (std::size_t i=0; i<measurements.size(); ++i) {
             if (!measurements[i] || !std::isfinite(*measurements[i]) || *measurements[i] < 0) continue;
             const double now = positive(measurements[i]);
@@ -127,7 +137,7 @@ AutoRank auto_rank(const Process& row, unsigned visible_metrics) {
     for (std::size_t i=0;i<row.auto_scores.size();++i) {
         if (!(visible_metrics & visible_bits[i])) continue;
         const double current = row.auto_scores[i];
-        const int group = i >= 4 ? 4 : static_cast<int>(i);
+        const int group = i >= 6 ? 5 : (i >= 4 ? 4 : static_cast<int>(i));
         if (std::isfinite(current) && current > top) {
             if (group != leading_group) second = top;
             top = current;
@@ -272,6 +282,7 @@ std::vector<Process> aggregate_application_processes(const std::vector<Process>&
             combined.gpu_percent.reset(); combined.dedicated_gpu_bytes.reset();
             combined.presented_fps.reset();
             combined.rx_bytes_per_second.reset(); combined.tx_bytes_per_second.reset();
+            combined.io_bytes_per_second.reset();
             combined.spike_score=0; combined.auto_scores.fill(0); combined.burst_scores.fill(0);
             combined.member_pids.clear();
             result.push_back(std::move(combined));
@@ -286,6 +297,7 @@ std::vector<Process> aggregate_application_processes(const std::vector<Process>&
         add_bytes(combined.dedicated_gpu_bytes,part.dedicated_gpu_bytes);
         add_positive(combined.rx_bytes_per_second,part.rx_bytes_per_second);
         add_positive(combined.tx_bytes_per_second,part.tx_bytes_per_second);
+        add_positive(combined.io_bytes_per_second,part.io_bytes_per_second);
     }
     for (auto& group : result)
         if (group.cpu_percent) group.cpu_percent=std::clamp(*group.cpu_percent,0.0,100.0);

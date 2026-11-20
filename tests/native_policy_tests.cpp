@@ -136,7 +136,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "const bool live_page=active_ && selected_section_<5",
             "const double current_wall_time=static_cast<double>(now_ms());",
             "const bool viewport_animating=advance_time_view(elapsed);"});
-        need(header,{"std::array<std::array<double,5>,2> smooth_system_axis_max_",
+        need(header,{"std::array<std::array<double,31>,2> smooth_system_axis_max_",
             "const std::deque<SystemPoint>* frozen=nullptr,bool detached=false"});
         // AutoScore, system graphs and sidebar mini-charts must share the same
         // renderer instead of introducing private per-view GDI painting loops.
@@ -144,8 +144,8 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         for(std::size_t at=0;(at=page.find("draw_chart_core(dc,style,plots",at))
             !=std::string::npos;at+=sizeof("draw_chart_core(dc,style,plots")-1)
             ++shared_calls;
-        if(shared_calls!=3U)
-            throw std::runtime_error("Expected exactly three shared chart renderer call sites");
+        if(shared_calls!=4U)
+            throw std::runtime_error("Expected exactly four shared chart renderer call sites");
         need(popup,{"popup->fill_toggle", "popup_auto_id+1", "show_system_hover(popup->kind-2",
             "frozen_system,true", "WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN",
             "if(popup->kind<2 || popup->dragging)InvalidateRect(window,nullptr,FALSE);"});
@@ -219,7 +219,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
     } else if(policy=="overlay_animation_policy") {
         need(overlay,{"bool animation_enabled_ = true;","read(L\"overlay_animation\", 1)",
             "save(L\"overlay_animation\", animation_enabled_ ? 1 : 0)",
-            "animation_control, 22, 556, 536, 26","case animation_control:",
+            "animation_control, 22, 704, 536, 26","case animation_control:",
             "if(pinned) from=i==0?0.0f:std::max(1.0f,from);",
             "target_->PushAxisAlignedClip(D2D1::RectF(0,row_height()+1,table_width(),",
             "constexpr UINT overlay_animation_timer_ms = 40;",

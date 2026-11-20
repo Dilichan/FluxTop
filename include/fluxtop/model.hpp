@@ -19,9 +19,10 @@ struct RawProcess {
     std::int64_t sampled_ns{}; // monotonic, recorded next to GetProcessTimes
     std::optional<std::uint64_t> working_set;
     std::optional<std::uint64_t> private_bytes;
+    std::optional<std::uint64_t> io_read_bytes, io_write_bytes; // Cumulative process I/O, not per-volume attribution.
 };
 
-enum class AutoMetric : std::uint8_t { none, cpu, ram, gpu, vram, rx, tx };
+enum class AutoMetric : std::uint8_t { none, cpu, ram, gpu, vram, rx, tx, io };
 struct AutoRank {
     double score{};
     AutoMetric metric{AutoMetric::none};
@@ -35,8 +36,9 @@ struct Process : RawProcess {
     std::optional<std::uint64_t> dedicated_gpu_bytes;
     bool has_baseline{};
     double spike_score{};
-    std::array<double,6> auto_scores{}; // CPU, RAM, GPU, GPU RAM, Rx, Tx
-    std::array<double,6> burst_scores{}; // Immediate growth, separate from sustained load
+    std::array<double,7> auto_scores{}; // CPU, RAM, GPU, GPU RAM, Rx, Tx, process I/O
+    std::array<double,7> burst_scores{}; // Immediate growth, separate from sustained load
+    std::optional<double> io_bytes_per_second; // Total process I/O (disk/device/network); never assigned to a drive.
     std::optional<double> rx_bytes_per_second, tx_bytes_per_second;
     std::vector<std::uint32_t> member_pids; // Only populated in UI-level aggregate, never raw history.
 };
@@ -49,6 +51,7 @@ private:
         std::uint64_t creation;
         std::uint64_t ticks;
         std::int64_t sampled_ns;
+        std::optional<std::uint64_t> io_read_bytes, io_write_bytes;
     };
     std::unordered_map<std::uint32_t, Baseline> previous_;
 };
@@ -62,9 +65,9 @@ private:
     // Process (names, paths, member PIDs and other non-scoring fields).
     struct Baseline {
         std::optional<std::uint64_t> creation_time;
-        std::array<std::optional<double>, 6> metrics;
-        std::array<double, 6> auto_scores{};
-        std::array<double, 6> burst_scores{};
+        std::array<std::optional<double>, 7> metrics;
+        std::array<double, 7> auto_scores{};
+        std::array<double, 7> burst_scores{};
     };
     std::unordered_map<std::uint32_t, Baseline> previous_;
 };
@@ -85,6 +88,11 @@ void sort_process_refs(std::vector<const Process*>& rows, Sort sort, unsigned vi
 bool prioritize_focused_process(std::vector<Process>& rows, std::uint32_t pid);
 bool prioritize_focused_process(std::vector<const Process*>& rows, std::uint32_t pid);
 std::optional<std::uint32_t> gpu_instance_pid(const std::wstring& instance);
+
+struct DiskActivity {
+    wchar_t letter{}; // Windows logical volume letter (not physical device identity).
+    std::optional<double> active_percent; // PDH LogicalDisk % Disk Time, clamped to 0..100.
+};
 
 struct Snapshot {
     std::int64_t timestamp_ms{};
@@ -107,6 +115,7 @@ struct Snapshot {
     bool cpu_temperature_board{}; // True if CPU value is an explicit motherboard/ACPI CPU zone.
     std::optional<double> total_rx_bytes_per_second, total_tx_bytes_per_second;
     std::string network_status;
+    std::vector<DiskActivity> disks; // Enumerated on sampler thread, sorted by letter.
     double interval_ms{};
     std::optional<std::uint64_t> history_records;
     std::string history_error;

@@ -29,6 +29,7 @@ Snapshot Sampler::collect() {
     snapshot.cpu_temperature_board = hwtemps.cpu_from_board;
     if (!snapshot.gpu_temperature_c) snapshot.gpu_temperature_c = hwtemps.gpu_c;
     network_.collect(snapshot);
+    disks_.collect(snapshot);
     spikes_.update(snapshot.processes, snapshot.total_ram_capacity, snapshot.total_gpu_memory_capacity);
     PROCESS_MEMORY_COUNTERS_EX memory{};
     memory.cb = sizeof(memory);

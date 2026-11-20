@@ -202,6 +202,8 @@ StatisticsPage::StatisticsPage(HWND parent,std::filesystem::path database,
     auto_scale_[0]=ini_overlay_read(settings_,L"stats_auto_live",1)!=0;
     auto_scale_[1]=ini_overlay_read(settings_,L"stats_auto_history",1)!=0;
     selected_section_=std::clamp(ini_overlay_read(settings_,L"stats_selected_section",0),0U,6U);
+    const UINT saved_disk=ini_overlay_read(settings_,L"stats_selected_disk",0);
+    selected_disk_letter_=saved_disk>=L'A' && saved_disk<=L'Z'?static_cast<wchar_t>(saved_disk):0;
     system_range_=std::clamp(ini_overlay_read(settings_,L"stats_system_range",0),0U,2U);
     system_autoscale_=ini_overlay_read(settings_,L"stats_system_auto",1)!=0;
     fill_enabled_=ini_overlay_read(settings_,L"stats_chart_fill",1)!=0;
@@ -352,8 +354,8 @@ void StatisticsPage::layout() {
     const auto put=[&](HWND control,int x,int y,int w,int h){
         MoveWindow(control,sx(x),sy(y),sx(w),sy(h),TRUE);
     };
-    const bool live=selected_section_==4,history=selected_section_==5,uptime=selected_section_==6;
-    const bool system=selected_section_<4;
+    const bool live=!selected_disk_letter_ && selected_section_==4,history=!selected_disk_letter_ && selected_section_==5,uptime=!selected_disk_letter_ && selected_section_==6;
+    const bool system=selected_disk_letter_ || selected_section_<4;
     // Old per-graph options are preserved above the selected chart, never in its popup only.
     put(limit_label_,292,66,260,28);
     put(limit_slider_,546,63,225,33);
@@ -391,10 +393,10 @@ void StatisticsPage::layout() {
     for(HWND control:{uptime_from_,uptime_to_})
         ShowWindow(control,uptime?SW_SHOW:SW_HIDE);
     for(HWND control:{system_period_,system_auto_,system_popout_})
-        ShowWindow(control,system?SW_SHOW:SW_HIDE);
+        ShowWindow(control,system && (control!=system_popout_ || !selected_disk_letter_)?SW_SHOW:SW_HIDE);
     ShowWindow(table_,uptime?SW_SHOW:SW_HIDE);
     ShowWindow(fill_toggle_,uptime?SW_HIDE:SW_SHOW);
-    ShowWindow(pause_toggle_,uptime?SW_HIDE:SW_SHOW);
+    ShowWindow(pause_toggle_,uptime || selected_disk_letter_?SW_HIDE:SW_SHOW);
     ShowWindow(first_label_,SW_HIDE);
     ListView_SetColumnWidth(table_,0,sx(370));
     ListView_SetColumnWidth(table_,1,sx(165));
@@ -691,8 +693,18 @@ unsigned StatisticsPage::selected_popup_kind() const {
     constexpr std::array<unsigned,6> mapping{{2,3,4,5,0,1}};
     return mapping[std::min<std::size_t>(selected_section_,5)];
 }
+void StatisticsPage::select_disk(wchar_t letter) {
+    if(letter<L'A' || letter>L'Z' || selected_disk_letter_==letter)return;
+    selected_disk_letter_=letter;
+    ini_overlay_write(settings_,L"stats_selected_disk",static_cast<int>(letter));
+    system_hover_={-1,-1};system_tip_active_=false;hover_section_=-1;
+    if(tooltip_)ShowWindow(tooltip_,SW_HIDE);
+    layout();InvalidateRect(hwnd_,nullptr,FALSE);
+}
 void StatisticsPage::select_section(unsigned index) {
-    if(index>=7 || index==selected_section_)return;
+    if(index>=7 || (index==selected_section_ && !selected_disk_letter_))return;
+    selected_disk_letter_=0;
+    ini_overlay_write(settings_,L"stats_selected_disk",0);
     selected_section_=index;
     refresh_pause_control();
     ini_overlay_write(settings_,L"stats_selected_section",static_cast<int>(index));
@@ -713,7 +725,23 @@ void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Pro
         if(now_ms()-last_history_refresh_>30000) request();
         return;
     }
+    std::vector<wchar_t> found_letters;
+    found_letters.reserve(system.disks.size());
+    for(const auto& disk:system.disks)found_letters.push_back(disk.letter);
+    if(found_letters!=disk_letters_) {
+        disk_letters_=std::move(found_letters);
+        const auto max_scroll=static_cast<unsigned>(disk_letters_.size());
+        sidebar_scroll_=std::min(sidebar_scroll_,max_scroll);
+        if(selected_disk_letter_ && std::find(disk_letters_.begin(),disk_letters_.end(),selected_disk_letter_)==disk_letters_.end()) {
+            selected_disk_letter_=0;
+            ini_overlay_write(settings_,L"stats_selected_disk",0);
+            layout();
+        }
+    }
     SystemPoint point;point.time=timestamp_ms;
+    for(const auto& disk:system.disks)
+        if(disk.letter>=L'A' && disk.letter<=L'Z')
+            point.disks[disk.letter-L'A']=disk.active_percent;
     point.values[0]=system.total_cpu_percent;
     if(system.total_ram_used && system.total_ram_capacity && *system.total_ram_capacity)
         point.values[1]=100.0*static_cast<double>(*system.total_ram_used)/static_cast<double>(*system.total_ram_capacity);
@@ -761,7 +789,7 @@ void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Pro
         values.vram=stat_memory(p.dedicated_gpu_bytes);
         values.network=stat_network(p.rx_bytes_per_second,p.tx_bytes_per_second);
         current_readings_.emplace(color_key(identity),std::move(values));
-        sorted.push_back({&p,auto_rank(p,31U).score});
+        sorted.push_back({&p,auto_rank(p,63U).score});
     }
     // The bubble keeps showing up-to-date readings even when the cursor rests
     // on the same sample. One invalidation per real snapshot, not per animation.
@@ -1132,11 +1160,12 @@ void StatisticsPage::draw_sidebar(HDC dc) {
         RGB(131,54,156),RGB(34,133,123),RGB(85,112,142),RGB(99,123,96)}};
     const std::int64_t latest=system_view_end();
     for(unsigned section=0;section<names.size();++section) {
-        const int y=18+static_cast<int>(section)*114;
+        const int y=18+(static_cast<int>(section)-static_cast<int>(sidebar_scroll_))*114;
+        if(y>=830 || y+105<=18)continue;
         const RECT item{14,y,266,y+105};
-        HBRUSH face=CreateSolidBrush(section==selected_section_?RGB(225,233,241):RGB(245,246,247));
+        HBRUSH face=CreateSolidBrush(!selected_disk_letter_ && section==selected_section_?RGB(225,233,241):RGB(245,246,247));
         FillRect(dc,&item,face);DeleteObject(face);
-        HBRUSH border=CreateSolidBrush(section==selected_section_?RGB(52,115,156):RGB(206,211,214));
+        HBRUSH border=CreateSolidBrush(!selected_disk_letter_ && section==selected_section_?RGB(52,115,156):RGB(206,211,214));
         FrameRect(dc,&item,border);DeleteObject(border);
         label(dc,names[section],26,y+9,RGB(32,44,52));
         std::wstring reading=L"—";
@@ -1228,13 +1257,54 @@ void StatisticsPage::draw_sidebar(HDC dc) {
         style.fill_opacity=26;style.point_markers=false;
         draw_chart_core(dc,style,plots,bars);
     }
+    for(std::size_t i=0;i<disk_letters_.size();++i) {
+        const wchar_t letter=disk_letters_[i];
+        const unsigned index=static_cast<unsigned>(letter-L'A');
+        const int y=18+(7+static_cast<int>(i)-static_cast<int>(sidebar_scroll_))*114;
+        if(y>=830 || y+105<=18)continue;
+        const RECT item{14,y,266,y+105};
+        const bool chosen=selected_disk_letter_==letter;
+        HBRUSH face=CreateSolidBrush(chosen?RGB(225,233,241):RGB(245,246,247));
+        FillRect(dc,&item,face);DeleteObject(face);
+        HBRUSH border=CreateSolidBrush(chosen?RGB(52,115,156):RGB(206,211,214));
+        FrameRect(dc,&item,border);DeleteObject(border);
+        const std::wstring name=L"Диск "+std::wstring(1,letter);
+        label(dc,name.c_str(),26,y+9,RGB(32,44,52));
+        const auto latest_value=system_points_.empty()?std::optional<double>{}:system_points_.back().disks[index];
+        const auto reading=stat_percent(latest_value);
+        RECT box{92,y+7,250,y+30};
+        SetTextColor(dc,RGB(42,132,108));SetBkMode(dc,TRANSPARENT);
+        DrawTextW(dc,reading.c_str(),-1,&box,DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
+        const RECT spark{26,y+38,249,y+94};
+        std::vector<POINT> points;
+        std::optional<double> before;
+        for(const auto& point:system_points_) {
+            if(point.time<latest-60000 || point.time>latest || !point.disks[index])continue;
+            const double measured=*point.disks[index];
+            const double displayed=&point==&system_points_.back() && before?
+                eased_latest_value(*before,measured,animation_started_,animation_duration_ms_):measured;
+            const LONG x=spark.left+static_cast<LONG>((point.time-(latest-60000))*
+                (spark.right-spark.left)/60000.0);
+            const LONG yy=spark.bottom-2-static_cast<LONG>(std::clamp(displayed/100.0,0.0,1.0)*
+                (spark.bottom-spark.top-5));
+            points.push_back({x,yy});before=measured;
+        }
+        if(!system_points_.empty() && system_points_.back().disks[index])
+            extend_recent_line(points,spark.right,system_points_.back().time,latest,animation_duration_ms_);
+        extend_fresh_left_edge(points,spark,latest-60000,latest,animation_duration_ms_);
+        std::vector<ChartStroke> plots;
+        if(points.size()>1)plots.push_back({std::move(points),RGB(42,132,108)});
+        ChartStyle style{};style.area=spark;style.paper=RGB(255,255,255);
+        style.fill_opacity=26;style.point_markers=false;
+        draw_chart_core(dc,style,plots);
+    }
 }
 void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
     std::int64_t from,std::int64_t to,bool autoscale,double manual_zoom,POINT hover,
     const std::deque<SystemPoint>* frozen,bool detached) {
     const auto& samples=frozen?*frozen:system_points_;
     (void)hover; // The old on-graph readings have moved to the native hover bubble.
-    if(metric>=5)return;
+    if(metric>=31)return;
     constexpr std::array<COLORREF,5> ink{{RGB(14,132,177),RGB(67,105,181),RGB(184,55,114),
         RGB(131,54,156),RGB(194,89,178)}};
     const unsigned count=1U;
@@ -1242,8 +1312,10 @@ void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
     if(autoscale) {
         max_y=metric==2?0.1:5.0;
         for(const auto& sample:samples)if(sample.time>=from && sample.time<=to)
-            for(unsigned s=0;s<count;++s)if(sample.values[metric+s])
-                max_y=std::max(max_y,*sample.values[metric+s]*(metric==2?1.2:1.12));
+            for(unsigned s=0;s<count;++s) {
+                const auto value=metric+s<5?sample.values[metric+s]:sample.disks[metric+s-5];
+                if(value)max_y=std::max(max_y,*value*(metric==2?1.2:1.12));
+            }
         if(metric!=2)max_y=std::min(100.0,std::ceil(max_y/5.0)*5.0);
     } else max_y/=std::clamp(manual_zoom,1.0,100.0);
     max_y=std::max(max_y,.001);
@@ -1280,17 +1352,18 @@ void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
                 if(!samples.empty() && segment_end==samples.back().time)
                     extend_recent_line(line,area.right,segment_end,to,animation_duration_ms_);
             }
-            plots.push_back({std::move(line),ink[index]});
+            plots.push_back({std::move(line),index<ink.size()?ink[index]:RGB(42,132,108)});
             line.clear();
             previous_measurement.reset();
             segment_end=0;
         };
         for(const auto& sample:samples) {
-            if(sample.time<from || sample.time>to || !sample.values[index]) {
+            const auto value=index<5?sample.values[index]:sample.disks[index-5];
+            if(sample.time<from || sample.time>to || !value) {
                 finish_segment();continue;
             }
             const double fraction=static_cast<double>(sample.time-from)/static_cast<double>(to-from);
-            const double actual=*sample.values[index];
+            const double actual=*value;
             double displayed=actual;
             if(!frozen && !samples.empty() && &sample==&samples.back() && previous_measurement)
                 displayed=eased_latest_value(*previous_measurement,actual,
@@ -1400,11 +1473,25 @@ void StatisticsPage::draw(HDC dc) {
     draw_sidebar(dc);
     const std::array<const wchar_t*,7> titles{{L"ЦП",L"ПАМЯТЬ",L"СЕТЬ",L"ГРАФИЧЕСКИЙ ПРОЦЕССОР",
         L"ПОСЛЕДНЯЯ МИНУТА · AutoScore",L"ИСТОРИЯ · AutoScore",L"НАБЛЮДАЕМЫЙ АПТАЙМ"}};
-    label(dc,titles[selected_section_],292,18,RGB(40,47,55));
+    if(selected_disk_letter_) {
+        const auto label_text=L"ДИСК "+std::wstring(1,selected_disk_letter_)+L": · АКТИВНОСТЬ";
+        label(dc,label_text.c_str(),292,18,RGB(40,47,55));
+    } else label(dc,titles[selected_section_],292,18,RGB(40,47,55));
     // Only one graph is visible; the original range, auto-scale and popout controls
     // remain above the graph and keep their existing settings and handlers.
     const auto now=live_view_end();
-    if(selected_section_<4) {
+    if(selected_disk_letter_) {
+        const auto range=std::array<std::int64_t,3>{{60000,300000,900000}}[system_range_];
+        const auto right=system_view_end();
+        const auto begin=right-range;
+        draw_system_graph(dc,one_minute,5+static_cast<unsigned>(selected_disk_letter_-L'A'),
+            begin,right,system_autoscale_,1.0,system_hover_);
+        const auto reading=system_points_.empty()?std::optional<double>{}:
+            system_points_.back().disks[selected_disk_letter_-L'A'];
+        const auto detail=L"Активность логического диска "+std::wstring(1,selected_disk_letter_)+
+            L": "+stat_percent(reading)+L"   (общая нагрузка, не отдельного процесса)";
+        label(dc,detail.c_str(),310,731,RGB(45,52,60));
+    } else if(selected_section_<4) {
         const auto range=std::array<std::int64_t,3>{{60000,300000,900000}}[system_range_];
         const auto& held=frozen_views_[selected_section_];
         const auto right=held.paused?held.to:system_view_end();
@@ -1441,6 +1528,13 @@ void StatisticsPage::mouse(int x,int y) {
     if(physical.right<=0 || physical.bottom<=0) return;
     x=MulDiv(x,page_width,physical.right);y=MulDiv(y,page_height,physical.bottom);
     system_hover_={x,y};
+    if(selected_disk_letter_) {
+        const auto range=std::array<std::int64_t,3>{{60000,300000,900000}}[system_range_];
+        const auto right=system_view_end();
+        show_system_hover(5+static_cast<unsigned>(selected_disk_letter_-L'A'),
+            system_hover_,one_minute,right-range,right);
+        return;
+    }
     if(selected_section_<4) {
         const auto range=std::array<std::int64_t,3>{{60000,300000,900000}}[system_range_];
         const auto& held=frozen_views_[selected_section_];
@@ -1601,7 +1695,7 @@ bool StatisticsPage::position_tooltip(POINT screen,int offset_x,int offset_y) {
 }
 void StatisticsPage::show_system_hover(unsigned metric,POINT cursor,const RECT& area,
     std::int64_t from,std::int64_t to,const std::deque<SystemPoint>* frozen) {
-    if(metric>=5 || cursor.x<area.left || cursor.x>area.right || cursor.y<area.top ||
+    if(metric>=31 || cursor.x<area.left || cursor.x>area.right || cursor.y<area.top ||
         cursor.y>area.bottom || to<=from || !tooltip_) {
         system_tip_active_=false;
         if(tooltip_ && hover_section_<0)ShowWindow(tooltip_,SW_HIDE);
@@ -1612,12 +1706,13 @@ void StatisticsPage::show_system_hover(unsigned metric,POINT cursor,const RECT& 
     const SystemPoint* closest=nullptr;
     const auto& samples=frozen?*frozen:system_points_;
     for(const auto& sample:samples) {
-        if(sample.time<from || sample.time>to || !sample.values[metric])continue;
+        const auto reading=metric<5?sample.values[metric]:sample.disks[metric-5];
+        if(sample.time<from || sample.time>to || !reading)continue;
         if(!closest || std::abs(sample.time-time)<std::abs(closest->time-time))closest=&sample;
     }
     if(!closest){system_tip_active_=false;ShowWindow(tooltip_,SW_HIDE);return;}
     const bool content_changed=!system_tip_active_ || system_tip_metric_!=metric ||
-        system_tip_sample_.time!=closest->time || system_tip_sample_.values!=closest->values;
+        system_tip_sample_.time!=closest->time || system_tip_sample_.values!=closest->values || system_tip_sample_.disks!=closest->disks;
     system_tip_active_=true;system_tip_metric_=metric;system_tip_sample_=*closest;
     POINT screen{};GetCursorPos(&screen);
     const bool newly_shown=position_tooltip(screen,16,18);
@@ -1628,15 +1723,19 @@ void StatisticsPage::draw_system_hover(HDC dc,const RECT& bounds){
     const std::array<const wchar_t*,5> names{{L"ЦП",L"Память",L"Сеть",L"GPU",L"VRAM"}};
     const HBRUSH paper=CreateSolidBrush(RGB(250,248,239));FillRect(dc,&bounds,paper);DeleteObject(paper);
     const HBRUSH edge=CreateSolidBrush(RGB(151,137,112));FrameRect(dc,&bounds,edge);DeleteObject(edge);
-    const COLORREF color=colors[std::min<unsigned>(4,system_tip_metric_)];
+    const COLORREF color=system_tip_metric_>=5?RGB(42,132,108):colors[std::min<unsigned>(4,system_tip_metric_)];
     const HBRUSH accent=CreateSolidBrush(color);
     const RECT bar{bounds.left+2,bounds.bottom-6,bounds.right-2,bounds.bottom-2};
     FillRect(dc,&bar,accent);DeleteObject(accent);
     SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(53,49,43));
     RECT header{bounds.left+18,bounds.top+9,bounds.right-16,bounds.top+39};
-    DrawTextW(dc,names[system_tip_metric_],-1,&header,DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
+    const auto title=system_tip_metric_>=5?
+        L"Диск "+std::wstring(1,static_cast<wchar_t>(L'A'+system_tip_metric_-5)):
+        std::wstring(names[system_tip_metric_]);
+    DrawTextW(dc,title.c_str(),-1,&header,DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
     const auto value=[&](unsigned index,const wchar_t* unit)->std::wstring {
-        return system_tip_sample_.values[index]?stat_decimal(*system_tip_sample_.values[index])+unit:L"—";
+        const auto reading=index<5?system_tip_sample_.values[index]:system_tip_sample_.disks[index-5];
+        return reading?stat_decimal(*reading)+unit:L"—";
     };
     std::wstring primary=value(system_tip_metric_,system_tip_metric_==2?L" Mbps":L"%");
     if(system_tip_metric_==3)primary+=L"   VRAM: "+value(4,L"%");
@@ -1652,7 +1751,10 @@ void StatisticsPage::draw_system_hover(HDC dc,const RECT& bounds){
         DrawTextW(dc,text.c_str(),-1,&cell,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
     };
     write(L"Замер: "+local_sample_label(system_tip_sample_.time),75);
-    if(system_tip_metric_==0) {
+    if(system_tip_metric_>=5) {
+        write(L"Активность логического диска: "+value(system_tip_metric_,L"%"),108);
+        write(L"Системная метрика, не нагрузка отдельного PID",135);
+    } else if(system_tip_metric_==0) {
         write(L"ЦП: "+value(0,L"%")+L" · Потоков: "+std::to_wstring(system_info_.logical_processors),108);
         write(L"Опрос: "+stat_decimal(system_info_.collection_ms)+L" мс",135);
     } else if(system_tip_metric_==1) {
@@ -1737,12 +1839,29 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
             const int x=MulDiv(GET_X_LPARAM(lp),page_width,physical.right);
             const int y=MulDiv(GET_Y_LPARAM(lp),page_height,physical.bottom);
             if(x>=14 && x<=266 && y>=18) {
-                const auto row=static_cast<unsigned>((y-18)/114);
-                const auto top=18+static_cast<int>(row)*114;
-                if(row<7 && y<top+105)select_section(row);
+                const auto row=static_cast<unsigned>((y-18)/114)+sidebar_scroll_;
+                const auto top=18+static_cast<int>(row-sidebar_scroll_)*114;
+                if(y<top+105) {
+                    if(row<7)select_section(row);
+                    else if(row-7<disk_letters_.size())select_disk(disk_letters_[row-7]);
+                }
             }
         }
         return 0;
+    }
+    case WM_MOUSEWHEEL: {
+        POINT screen{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
+        ScreenToClient(hwnd_,&screen);
+        RECT viewport{};GetClientRect(hwnd_,&viewport);
+        const int x=viewport.right?MulDiv(screen.x,page_width,viewport.right):screen.x;
+        if(x>=14 && x<=266) {
+            const unsigned limit=static_cast<unsigned>(disk_letters_.size());
+            const int direction=GET_WHEEL_DELTA_WPARAM(wp)<0?1:-1;
+            sidebar_scroll_=static_cast<unsigned>(std::clamp(
+                static_cast<int>(sidebar_scroll_)+direction,0,static_cast<int>(limit)));
+            InvalidateRect(hwnd_,nullptr,FALSE);return 0;
+        }
+        break;
     }
     case WM_MOUSEMOVE: {
         TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,hwnd_,0};
@@ -1759,8 +1878,8 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
             axis_tick_=tick;
             const bool axis_animating=advance_axes(elapsed);
             const bool viewport_animating=advance_time_view(elapsed);
-            const bool live_page=selected_section_<5 &&
-                !frozen_views_[selected_section_].paused;
+            const bool live_page=selected_disk_letter_ || (selected_section_<5 &&
+                !frozen_views_[selected_section_].paused);
             if(active_ && (axis_animating ||
                 (live_page && (animating || viewport_animating))))
                 InvalidateRect(hwnd_,nullptr,FALSE);
