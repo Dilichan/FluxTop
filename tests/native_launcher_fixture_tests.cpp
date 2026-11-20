@@ -115,6 +115,7 @@ void install(const fs::path& launcher,const fs::path& build) {
     const auto installed=fixture.root/L"FluxTop.exe";
     check(fs::is_regular_file(installed),"Installed entry point missing");
     check(same_file(launcher,installed),"Installed launcher content mismatch");
+    check(fs::is_regular_file(fixture.root/L"Uninstall-FluxTop.exe"),"Native uninstaller payload was not extracted");
     check(launch(launcher,fixture.root,L"--install-only")==0,"Repeat install failed");
     check(get(history)=="history remains unchanged","Installer altered history");
 }

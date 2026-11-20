@@ -16,9 +16,8 @@ CMake 3.24+. В x64 Developer PowerShell:
 cmake --preset windows
 cmake --build --preset release
 ctest --preset release
-powershell.exe -NoProfile -File tests/update_tests.ps1
-powershell.exe -NoProfile -File tests/launcher_tests.ps1
-powershell.exe -NoProfile -File tests/elevation_tests.ps1
+# source_git_update, source_process_contract, source_launcher_fallback
+# и source_bootstrap_policy теперь входят в CTest
 ```
 
 Без Visual Studio generator можно использовать Ninja:
@@ -30,7 +29,9 @@ ctest --test-dir build/ninja --output-on-failure
 ```
 
 Сборщик/CLI: build/Release/fluxtop.exe (у Ninja — build/ninja/fluxtop.exe).
-Скачиваемый launcher: build/package/Release/FluxTop.exe. Смотрите
+Исходный Git-launcher: build/Release/FluxTopSource.exe; автозапуск:
+build/Release/FluxTopSourceAutostart.exe. Скачиваемый launcher:
+build/package/Release/FluxTop.exe. Смотрите
 [публикацию релизов](docs/PUBLISHING.md), прежде чем ставить тег.
 Для диагностики: fluxtop.exe --help, --jsonl, --samples N, --no-network.
 FLUXTOP_DATA_DB / FLUXTOP_LOG_PATH / FLUXTOP_OVERLAY_SETTINGS задают

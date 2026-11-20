@@ -42,12 +42,21 @@ target_include_directories(fluxtop_release_update PUBLIC include)
 target_compile_features(fluxtop_release_update PUBLIC cxx_std_20)
 target_compile_definitions(fluxtop_release_update PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
 target_link_libraries(fluxtop_release_update PUBLIC fluxtop_logging winhttp bcrypt runtimeobject shell32)
+set(UNINSTALL_ICON "${PROJECT_SOURCE_DIR}/assets/branding/fluxtop.ico")
+configure_file(src/uninstaller.rc.in "${CMAKE_CURRENT_BINARY_DIR}/uninstaller.rc" @ONLY)
+add_executable(fluxtop_uninstaller WIN32 src/uninstaller.cpp src/uninstall_cleanup.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/uninstaller.rc")
+target_include_directories(fluxtop_uninstaller PRIVATE include)
+target_compile_features(fluxtop_uninstaller PRIVATE cxx_std_20)
+target_compile_definitions(fluxtop_uninstaller PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
+target_link_libraries(fluxtop_uninstaller PRIVATE shell32 ole32 advapi32 uuid)
 add_custom_command(OUTPUT "${launcher_resource}"
     COMMAND "${CMAKE_COMMAND}" "-DINPUT=$<TARGET_FILE:fluxtop>" "-DOUTPUT=${launcher_resource}"
         "-DICON=${PROJECT_SOURCE_DIR}/assets/branding/fluxtop.ico" "-DVERSION=${PROJECT_VERSION}"
+        "-DUNINSTALLER=$<TARGET_FILE:fluxtop_uninstaller>"
         "-DRELEASE_TAG=${FLUXTOP_RELEASE_TAG}" "-DTEMPLATE=${PROJECT_SOURCE_DIR}/src/launcher.rc.in"
         -P "${PROJECT_SOURCE_DIR}/tools/Generate-LauncherResource.cmake"
-    DEPENDS fluxtop "${PROJECT_SOURCE_DIR}/assets/branding/fluxtop.ico" "${PROJECT_SOURCE_DIR}/tools/Generate-LauncherResource.cmake" "${PROJECT_SOURCE_DIR}/src/launcher.rc.in"
+    DEPENDS fluxtop fluxtop_uninstaller "${PROJECT_SOURCE_DIR}/assets/branding/fluxtop.ico" "${PROJECT_SOURCE_DIR}/tools/Generate-LauncherResource.cmake" "${PROJECT_SOURCE_DIR}/src/launcher.rc.in"
     VERBATIM)
 add_executable(fluxtop_launcher WIN32 src/launcher.cpp src/installation.cpp "${launcher_resource}")
 target_include_directories(fluxtop_launcher PRIVATE include)
@@ -57,10 +66,50 @@ target_link_libraries(fluxtop_launcher PRIVATE fluxtop_release_update fluxtop_lo
 set_target_properties(fluxtop_launcher PROPERTIES OUTPUT_NAME FluxTop
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/package/$<CONFIG>")
 
+# Source-checkout bootstrap: separate from the downloadable, embedded release launcher.
+add_library(fluxtop_source_checkout STATIC src/source_checkout.cpp)
+target_include_directories(fluxtop_source_checkout PUBLIC include)
+target_compile_features(fluxtop_source_checkout PUBLIC cxx_std_20)
+target_compile_definitions(fluxtop_source_checkout PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
+add_executable(fluxtop_source_launcher src/source_launcher.cpp src/autostart.cpp)
+target_compile_features(fluxtop_source_launcher PRIVATE cxx_std_20)
+target_link_libraries(fluxtop_source_launcher PRIVATE fluxtop_source_checkout fluxtop_logging shell32 ole32 advapi32 uuid)
+set_target_properties(fluxtop_source_launcher PROPERTIES OUTPUT_NAME FluxTopSource)
+# Startup must not flash a console and must not execute a .vbs or .ps1 script.
+add_executable(fluxtop_source_autostart WIN32 src/source_launcher.cpp src/autostart.cpp)
+target_compile_features(fluxtop_source_autostart PRIVATE cxx_std_20)
+target_compile_definitions(fluxtop_source_autostart PRIVATE FLUXTOP_SOURCE_GUI)
+target_link_libraries(fluxtop_source_autostart PRIVATE fluxtop_source_checkout fluxtop_logging shell32 ole32 advapi32 uuid)
+set_target_properties(fluxtop_source_autostart PROPERTIES OUTPUT_NAME FluxTopSourceAutostart)
+
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(fluxtop_uninstall_tests tests/uninstall_tests.cpp src/uninstall_cleanup.cpp)
+    target_include_directories(fluxtop_uninstall_tests PRIVATE include)
+    target_compile_features(fluxtop_uninstall_tests PRIVATE cxx_std_20)
+    target_compile_definitions(fluxtop_uninstall_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
+    add_test(NAME native_uninstall_fixture COMMAND fluxtop_uninstall_tests "${CMAKE_CURRENT_BINARY_DIR}")
+    set_tests_properties(native_uninstall_fixture PROPERTIES TIMEOUT 30)
     add_executable(fluxtop_native_policy_tests tests/native_policy_tests.cpp)
     target_compile_features(fluxtop_native_policy_tests PRIVATE cxx_std_20)
+    add_executable(fluxtop_source_checkout_tests tests/source_checkout_tests.cpp)
+    target_compile_features(fluxtop_source_checkout_tests PRIVATE cxx_std_20)
+    target_link_libraries(fluxtop_source_checkout_tests PRIVATE fluxtop_source_checkout)
+    add_test(NAME source_git_update COMMAND fluxtop_source_checkout_tests
+        "${CMAKE_CURRENT_BINARY_DIR}" "$<TARGET_FILE:fluxtop>"
+        "$<TARGET_FILE:fluxtop_source_launcher>" git)
+    add_test(NAME source_process_contract COMMAND fluxtop_source_checkout_tests
+        "${CMAKE_CURRENT_BINARY_DIR}" "$<TARGET_FILE:fluxtop>"
+        "$<TARGET_FILE:fluxtop_source_launcher>" process)
+    add_test(NAME source_launcher_fallback COMMAND fluxtop_source_checkout_tests
+        "${CMAKE_CURRENT_BINARY_DIR}" "$<TARGET_FILE:fluxtop>"
+        "$<TARGET_FILE:fluxtop_source_launcher>" fallback)
+    # The Git fixture creates/commits/clones multiple local repositories. Cold
+    # Windows Git processes and antivirus scans can exceed 90 s; individual
+    # operations remain bounded, and fixture output names the active phase.
+    set_tests_properties(source_git_update PROPERTIES TIMEOUT 180)
+    set_tests_properties(source_process_contract source_launcher_fallback PROPERTIES TIMEOUT 90)
+    add_test(NAME source_bootstrap_policy COMMAND fluxtop_native_policy_tests "${PROJECT_SOURCE_DIR}" "source_bootstrap_policy")
     add_executable(fluxtop_tests tests/core_tests.cpp)
     target_link_libraries(fluxtop_tests PRIVATE fluxtop_core)
     add_test(NAME core COMMAND fluxtop_tests)
@@ -140,7 +189,13 @@ if(BUILD_TESTING)
         ENVIRONMENT "FLUXTOP_OVERLAY_SETTINGS=${CMAKE_CURRENT_BINARY_DIR}/overlay-smoke.ini;FLUXTOP_DATA_DB=${CMAKE_CURRENT_BINARY_DIR}/overlay-fluxtop.db;FLUXTOP_LOG_PATH=${CMAKE_CURRENT_BINARY_DIR}/overlay-activity.log")
 endif()
 
-foreach(target fluxtop fluxtop_launcher fluxtop_release_update fluxtop_core fluxtop_icons fluxtop_history fluxtop_statistics_tests fluxtop_tests fluxtop_icon_tests fluxtop_network_tests fluxtop_history_tests fluxtop_release_tests fluxtop_temperature_tests fluxtop_logging fluxtop_diagnostics_tests fluxtop_unified_storage_tests fluxtop_axis_tests fluxtop_native_policy_tests fluxtop_native_launcher_fixture_tests fluxtop_native_jsonl_tests)
+foreach(target fluxtop fluxtop_launcher fluxtop_release_update fluxtop_core fluxtop_icons fluxtop_history fluxtop_statistics_tests fluxtop_tests fluxtop_icon_tests fluxtop_network_tests fluxtop_history_tests fluxtop_release_tests fluxtop_temperature_tests fluxtop_logging fluxtop_diagnostics_tests fluxtop_unified_storage_tests fluxtop_axis_tests fluxtop_native_policy_tests fluxtop_native_launcher_fixture_tests fluxtop_native_jsonl_tests fluxtop_source_checkout fluxtop_source_launcher fluxtop_source_autostart fluxtop_source_checkout_tests)
+    if(TARGET ${target} AND MSVC)
+        target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/W4;/WX;/permissive-;/utf-8;/EHsc>")
+    endif()
+endforeach()
+
+foreach(target fluxtop_uninstaller fluxtop_uninstall_tests)
     if(TARGET ${target} AND MSVC)
         target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/W4;/WX;/permissive-;/utf-8;/EHsc>")
     endif()

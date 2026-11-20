@@ -4,6 +4,7 @@
 #include <shlobj.h>
 #include <wrl/client.h>
 #include <filesystem>
+#include <cwctype>
 
 namespace fluxtop {
 namespace {
@@ -38,8 +39,10 @@ std::filesystem::path bootstrap() {
     executable.resize(size);
     auto folder = std::filesystem::path(executable).parent_path();
     while (!folder.empty()) {
-        const auto script = folder / L"tools" / L"Start-FluxTop.vbs";
-        if (std::filesystem::exists(script) && std::filesystem::exists(folder / L"fluxtop.cmd")) return script;
+        const auto native = folder / L"build" / L"Release" / L"FluxTopSourceAutostart.exe";
+        if (std::filesystem::is_regular_file(native)) return native;
+        const auto ninja = folder / L"build" / L"ninja" / L"FluxTopSourceAutostart.exe";
+        if (std::filesystem::is_regular_file(ninja)) return ninja;
         const auto parent = folder.parent_path();
         if (parent == folder) break;
         folder = parent;
@@ -74,15 +77,11 @@ void set_autostart(bool enabled) {
         if (std::filesystem::exists(path) && !DeleteFileW(path.c_str())) throw windows_error("Remove FluxTop startup shortcut");
         return;
     }
-    const auto script = bootstrap();
-    wchar_t system[MAX_PATH]{};
-    if (!GetSystemDirectoryW(system, MAX_PATH)) throw windows_error("GetSystemDirectoryW");
-    const bool portable=script.extension()==L".exe";
-    const auto host = portable ? script : std::filesystem::path(system) / L"wscript.exe";
-    const auto arguments = portable ? std::wstring(L"--autostart") : L"//B //Nologo \"" + script.wstring() + L"\"";
-    if (FAILED(link->SetPath(host.c_str())) || FAILED(link->SetArguments(arguments.c_str()))
-        || FAILED(link->SetWorkingDirectory((portable ? script.parent_path() : script.parent_path().parent_path()).c_str()))
-        || FAILED(link->SetDescription(description)) || FAILED(link->SetShowCmd(SW_SHOWNORMAL)))
+    const auto executable = bootstrap();
+    if (FAILED(link->SetPath(executable.c_str())) || FAILED(link->SetArguments(L"--autostart"))
+        || FAILED(link->SetWorkingDirectory(executable.parent_path().c_str()))
+        || FAILED(link->SetIconLocation(executable.c_str(),0))
+        || FAILED(link->SetDescription(description)) || FAILED(link->SetShowCmd(SW_HIDE)))
         throw std::runtime_error("Cannot configure the FluxTop startup shortcut");
     ComPtr<IPersistFile> file;
     const auto temporary = path.parent_path() / L"FluxTop.pending.lnk";
@@ -96,6 +95,53 @@ void set_autostart(bool enabled) {
     HKEY key{};
     if (RegOpenKeyExW(HKEY_CURRENT_USER, approved_key, 0, KEY_SET_VALUE, &key) == ERROR_SUCCESS) {
         RegDeleteValueW(key, L"FluxTop.lnk"); RegCloseKey(key);
+    }
+}
+// Returns true for an owned legacy WScript startup shortcut, conservatively
+// treating unreadable FluxTop shortcuts as needing manual attention.
+bool legacy_autostart_pending() noexcept {
+    try {
+        const auto path=shortcut_path();
+        if(!std::filesystem::is_regular_file(path))return false;
+        const auto link=shell_link();
+        // An unreadable or foreign shortcut must not be silently orphaned.
+        if(!owned(link.Get(),path))return true;
+        wchar_t target[32768]{};
+        if(FAILED(link->GetPath(target,32768,nullptr,SLGP_RAWPATH)))return true;
+        std::wstring target_lower(target);
+        for(auto& c:target_lower)c=static_cast<wchar_t>(std::towlower(c));
+        return target_lower.find(L"wscript.exe")!=std::wstring::npos;
+    }catch(...){return true;}
+}
+// Retarget only the old FluxTop-owned wscript shortcut; preserve StartupApproved.
+void migrate_autostart_if_needed() noexcept {
+    try {
+        const auto path=shortcut_path();
+        if (!std::filesystem::is_regular_file(path)) return;
+        const auto link=shell_link();
+        if (!owned(link.Get(),path)) return;
+        wchar_t target[32768]{};
+        if (FAILED(link->GetPath(target,32768,nullptr,SLGP_RAWPATH))) return;
+        std::wstring old_target(target);
+        for (auto& c:old_target) c=static_cast<wchar_t>(std::towlower(c));
+        if (old_target.find(L"wscript.exe")==std::wstring::npos) return;
+        const auto executable=bootstrap();
+        if (FAILED(link->SetPath(executable.c_str())) || FAILED(link->SetArguments(L"--autostart"))
+            || FAILED(link->SetWorkingDirectory(executable.parent_path().c_str()))
+            || FAILED(link->SetIconLocation(executable.c_str(),0))
+            || FAILED(link->SetShowCmd(SW_HIDE)))
+            throw std::runtime_error("Cannot retarget the old native Startup shortcut");
+        ComPtr<IPersistFile> persist;
+        const auto temp=path.parent_path()/L"FluxTop.pending.lnk";
+        if (FAILED(link.As(&persist)) || FAILED(persist->Save(temp.c_str(),TRUE)))
+            throw std::runtime_error("Cannot save migrated Startup shortcut");
+        if (!MoveFileExW(temp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) {
+            const auto error=GetLastError();DeleteFileW(temp.c_str());SetLastError(error);
+            throw windows_error("Publish migrated Startup shortcut");
+        }
+        diagnostics::write(diagnostics::Level::info,"settings.autostart","migrated legacy VBS shortcut");
+    } catch(const std::exception& error) {
+        diagnostics::write(diagnostics::Level::warning,"settings.autostart",error.what());
     }
 }
 } // namespace fluxtop

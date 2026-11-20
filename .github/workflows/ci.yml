@@ -18,16 +18,7 @@ jobs:
         run: cmake --build --preset release
       - name: Test including native JSONL and installer fixtures
         run: ctest --preset release --output-on-failure
-      # Git source-launcher remains PowerShell in stage 1; do not drop its integration coverage.
-      - name: Test Git updater with local repositories
-        shell: powershell
-        run: ./tests/update_tests.ps1
-      - name: Test launcher fallback and locking
-        shell: powershell
-        run: ./tests/launcher_tests.ps1
-      - name: Test elevation policy without opening UAC
-        shell: powershell
-        run: ./tests/elevation_tests.ps1
+      # Native Git, fallback, process timeout and UAC policy checks are included in CTest.
       - name: Package downloadable EXE with CMake
         shell: cmd
         run: cmake -DROOT=. -DBUILD_DIRECTORY=build -DOUTPUT_DIR=out/release -DCONFIG=Release -P tools/Package-Release.cmake

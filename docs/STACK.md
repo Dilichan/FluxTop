@@ -16,7 +16,7 @@
 | Хранение | Одна SQLite-база `fluxtop.db`, WAL, минутные/часовые/суточные агрегаты | Контроль WAL, до 10 лет суточной истории и дисковый бюджет 50 ГиБ |
 | Тестирование | CTest + собственные небольшие C++ тесты | Без стороннего тестового фреймворка на старте |
 | CI | GitHub Actions, Windows | Сборка, unit-тесты и короткий smoke test |
-| Обновление | PowerShell launcher + Git upstream + CMake/CTest | Проверка при запуске, fast-forward, отдельные версии EXE и fallback |
+| Обновление | C++20 source launcher + Git upstream + CMake/CTest | Проверка при запуске, fast-forward, отдельные версии EXE и fallback |
 | Права монитора | UAC RunAs + Win32 token API (Advapi32) | Административный запуск через launcher; проверка токена и назначенной SeDebugPrivilege |
 | Кеш EXE-иконок | WIC PNG 32×32 + системная winsqlite3 | Ограниченный RAM-кеш; таблица `icons` в общей `fluxtop.db`, фоновое извлечение |
 

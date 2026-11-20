@@ -1,6 +1,7 @@
 #include <windows.h>
 101 ICON "@ICON@"
 201 RCDATA "@INPUT@"
+205 RCDATA "@UNINSTALLER@"
 STRINGTABLE
 BEGIN
 202 L"@payload_hash@"

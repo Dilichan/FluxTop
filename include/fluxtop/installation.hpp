@@ -19,7 +19,6 @@ void install_application(const std::filesystem::path& source,
     const std::filesystem::path& data_directory, std::wstring_view tag, bool register_windows);
 // Starts the installed launcher (not the embedded monitor). Does not bypass UAC.
 void launch_installed_application(const std::filesystem::path& data_directory, bool tray);
-// Removes current-user registration and shortcuts. Starts a clean-up command that waits
-// for this uninstalling launcher to exit. History, settings and icons are retained.
+// Delegates removal to the installed native EXE; it confirms, waits and preserves user data.
 void uninstall_application(const std::filesystem::path& data_directory);
 } // namespace fluxtop

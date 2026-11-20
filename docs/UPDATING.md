@@ -33,7 +33,7 @@ TLS-проверки не отключаются. Сохранённый бол�
 
 ## Исходники и обновление через Git
 
-Обычная точка запуска — `fluxtop.cmd` в корне checkout. Launcher проверяет
+Обычная точка запуска — `build/Release/FluxTopSource.exe` после сборки checkout. Нативный launcher проверяет
 настроенную upstream-ветку, обновляет исходники, собирает Release и запускает
 проверенный EXE. Прямой запуск `fluxtop.exe` оставлен для офлайн-работы и замеров:
 сам сборщик не запускает Git и не держит updater в фоне.
@@ -45,7 +45,7 @@ TLS-проверки не отключаются. Сохранённый бол�
 
 ## Настройка
 
-Нужны Git for Windows, Windows PowerShell 5.1+, MSVC x64, Windows SDK и CMake.
+Нужны Git for Windows, MSVC x64, Windows SDK и CMake 3.24+. PowerShell не требуется.
 Ninja используется при наличии; иначе — Visual Studio generator.
 Launcher находит инструменты в PATH или установленном Visual Studio Build Tools.
 
@@ -58,7 +58,7 @@ Launcher находит инструменты в PATH или установле
 git remote add origin https://github.com/Dilichan/FluxTop.git
 git fetch origin
 git branch --set-upstream-to=origin/main main
-.\fluxtop.cmd --samples 5
+.\build\Release\FluxTopSource.exe --samples 5
 ```
 
 При обычном клонировании `git clone https://github.com/Dilichan/FluxTop.git`
@@ -91,19 +91,19 @@ remote и upstream создаются автоматически. Пустой �
 
 ```powershell
 # Обновить, собрать при необходимости, запустить с параметрами сборщика
-.\fluxtop.cmd -StandardUser --no-gpu --samples 5 --jsonl
+.\build\Release\FluxTopSource.exe -StandardUser --no-gpu --samples 5 --jsonl
 
 # Пропустить сетевую проверку
-.\fluxtop.cmd -NoUpdate --samples 5
+.\build\Release\FluxTopSource.exe -NoUpdate --samples 5
 
 # Подготовить версию без запуска монитора
-.\fluxtop.cmd -PrepareOnly
+.\build\Release\FluxTopSource.exe -PrepareOnly
 ```
 
 Launcher по умолчанию запускает готовый монитор через UAC в отдельном окне.
 `-StandardUser` отключает запрос повышения: приложение наследует права и консоль,
 его stdout сохраняет формат JSONL. Сообщения launcher-а идут в stderr.
-После запуска EXE PowerShell завершается. Код выхода `fluxtop.cmd`
+После запуска монитора нативный загрузчик завершается. Код выхода `FluxTopSource.exe`
 сообщает об успешном старте, а не о дальнейшем
 завершении монитора. Для ожидания результата и точного exit code используйте
 прямой запуск EXE, например в тестах и скриптах автоматизации.
@@ -117,8 +117,12 @@ Launcher по умолчанию запускает готовый монито�
 
 ## Доверие и ограничения
 
-Для будущего запуска при входе в Windows предусмотрены задержка, скрытый
-режим launcher-а и отдельная настройка проверки обновлений. Автозапуск включается только пользователем в клиенте и выполняется при входе
+Для запуска при входе в Windows предусмотрен отдельный оконный C++ загрузчик
+`FluxTopSourceAutostart.exe` без консоли и с задержкой 30 секунд.
+При успешной проверке миграции старые ярлыки VBS, принадлежащие FluxTop,
+переводятся на нативный EXE; состояние StartupApproved сохраняется.
+При ошибке доступа устаревшие скрипты сохраняются до устранения проблемы.
+Отдельная настройка проверки обновлений остаётся независимой. Автозапуск включается только пользователем в клиенте и выполняется при входе
 текущего пользователя, а не как системная служба. Запуск через установленный
 launcher использует задержку, запрос UAC и открытие оверлея в трее. При запуске
 из исходников доступен отдельный режим `-Autostart`. Отмена UAC не обходится.
@@ -138,15 +142,16 @@ Git и сборка не требуют повышения. UAC для мони�
 ## Проверки разработчика
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\update_tests.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\launcher_tests.ps1
+ctest --preset release --output-on-failure
+# Включены source_git_update, source_process_contract,
+# source_launcher_fallback и source_bootstrap_policy.
 ```
 
-Первый скрипт использует локальные bare/working репозитории в `build/`:
+Нативный тест `source_git_update` использует локальные bare/working репозитории в `build/`:
 fast-forward, повторная проверка, локальные tracked/untracked правки, detached
 HEAD, незавершённый merge, локальные коммиты, divergence и недоступный remote.
 Также проверяются timeout дочернего процесса, quoting argv и путь last-good.
-Второй требует уже собранного сборщика и проверяет fallback при ошибке CMake,
+Тест `source_launcher_fallback` требует уже собранного сборщика и проверяет fallback при ошибке CMake,
 сохранность предыдущего EXE/manifest, блокировку и повторное использование
 готового commit без пересборки. Проверки добавлены в Windows CI.
 Тесты не обращаются к сетевому Git-сервису и не меняют рабочее дерево проекта.

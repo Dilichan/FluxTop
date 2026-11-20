@@ -206,6 +206,22 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "GetDlgItemInt(client_, interval_control"});
         need(overlay,{"for (const auto label : {L\"Авто\", L\"CPU\", L\"RAM\", L\"GPU\""});
         regex_need(overlay,"L\"Авто\\s*[—-]",false);
+    } else if(policy=="source_bootstrap_policy") {
+        const auto auto_start=read(root/"src/autostart.cpp");
+        const auto core=read(root/"src/source_checkout.cpp");
+        const auto cli=read(root/"src/source_launcher.cpp");
+        const auto cmake=read(root/"CMakeLists.txt");
+        const auto workflow=read(root/".github/workflows/ci.yml");
+        need(auto_start,{"FluxTopSourceAutostart.exe","migrate_autostart_if_needed()",
+                         "StartupApproved","owned(link.Get(),path)","SetShowCmd(SW_HIDE)"});
+        absent(auto_start,{"Start-FluxTop.vbs","L\"//B //Nologo"});
+        need(core,{"local-changes","detached-head","operation-in-progress",
+                   "local-commits-or-diverged","fetch-failed","merge-base","--ff-only",
+                   "last-good.json","FILE_FLAG_DELETE_ON_CLOSE"});
+        need(cli,{"CreateFileW(lock.c_str()","--prepare-only","--standard-user",
+                  "L\"runas\"","--autostart","--migrate-autostart-only"});
+        need(cmake,{"fluxtop_source_checkout_tests","fluxtop_source_autostart"});
+        absent(workflow,{"update_tests.ps1","launcher_tests.ps1","elevation_tests.ps1"});
     } else {
         throw std::runtime_error("Unknown policy: "+policy);
     }

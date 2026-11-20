@@ -205,13 +205,6 @@ int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
         if (uninstall) {
             if (custom_directory || !fluxtop::same_file(self,installed))
                 throw std::runtime_error("Run --uninstall from the installed FluxTop.exe");
-            if (fluxtop::monitor_running()) {
-                MessageBoxW(nullptr,L"FluxTop запущен. Сначала закройте его через значок в трее.",
-                    L"FluxTop — удаление",MB_OK|MB_ICONINFORMATION);
-                return 0;
-            }
-            if (MessageBoxW(nullptr,L"Удалить FluxTop? История, настройки и иконки останутся на диске.",
-                L"FluxTop — удаление",MB_YESNO|MB_ICONQUESTION)!=IDYES) return 0;
             fluxtop::uninstall_application(directory);
             return 0;
         }

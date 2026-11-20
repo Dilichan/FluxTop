@@ -1501,6 +1501,7 @@ int run_overlay(const Options& options) {
     const auto com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
     struct Scope { bool active; ~Scope() { if (active) CoUninitialize(); } } scope{SUCCEEDED(com)};
     INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_STANDARD_CLASSES|ICC_BAR_CLASSES|ICC_TAB_CLASSES|ICC_LISTVIEW_CLASSES|ICC_DATE_CLASSES}; InitCommonControlsEx(&controls);
+    if (!options.samples) migrate_autostart_if_needed();
     FreeConsole();
     try { Overlay app(options); return app.run(); }
     catch (const std::exception& error) {
