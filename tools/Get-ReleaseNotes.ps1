@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory)][ValidatePattern('^v\d+\.\d+\.\d+(-preview\.\d+)?$')][string]$Tag,
     [Parameter(Mandatory)][string]$OutputPath
 )
