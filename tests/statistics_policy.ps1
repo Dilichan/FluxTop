@@ -18,6 +18,7 @@ $checks=[ordered]@{
  'History read-only and cancellable' = ($reader.Contains('SQLITE_OPEN_READONLY') -and $reader.Contains('sqlite3_progress_handler'))
  'Live and historical charts use rollups' = ($reader.Contains('FROM history_rollups') -and $page.Contains('on_snapshot'))
  'System application toggle' = ($reader.Contains('statistics_is_system(') -and $page.Contains('stats_show_system'))
+ 'System toggle isolated from both charts' = ($page.Contains('request(true);return 0;') -and $page.Contains('history_.uptime=std::move(item->second.uptime);') -and $reader.Contains('if(uptime_only || stop.stop_requested())return out;'))
  'Custom date bounds' = $page.Contains('DTM_SETRANGE')
  'FPS and overlay untouched' = $overlay.Contains('statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,10U)')
  'Shared overlay/live Top' = ($page.Contains('stats_limit_id') -and $overlay.Contains('statistics_->set_limit(options_.top)') -and $page.Contains('PostMessageW(GetParent(hwnd_),WM_APP+215'))

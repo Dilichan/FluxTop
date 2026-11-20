@@ -27,10 +27,10 @@ constexpr UINT ready_message=WM_APP+201;
 constexpr UINT_PTR animate_message=2201;
 enum : int { period_id=1001,from_id,to_id,system_id,table_id,stats_limit_id,popout_live_id,popout_history_id,popout_table_id,history_limit_id,uptime_limit_id,uptime_period_id,uptime_from_id,uptime_to_id };
 // Logical page dimensions; chart labels and Win32 controls share the same grid.
-constexpr int page_width=760, page_height=860;
+constexpr int page_width=860, page_height=860;
 constexpr int auto_live_id=1201, auto_history_id=1202, popup_auto_id=1203;
-constexpr RECT one_minute{54,96,728,238};
-constexpr RECT history_chart{54,402,728,544};
+constexpr RECT one_minute{54,96,828,238};
+constexpr RECT history_chart{54,402,828,544};
 std::int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -200,7 +200,7 @@ StatisticsPage::StatisticsPage(HWND parent,std::filesystem::path database,
                 q=requested_;finished=generation_;cancelled=cancel_query_.get_token();
             }
             auto result=read_statistics(database_,q.from,q.to,q.history_limit,q.uptime_limit,
-                q.limit,q.uptime_from,q.uptime_to,q.system,cancelled);
+                q.limit,q.uptime_from,q.uptime_to,q.system,cancelled,q.uptime_only);
             if(stop.stop_requested()) break;
             {
                 std::lock_guard lock(mutex_);
@@ -306,31 +306,31 @@ void StatisticsPage::layout() {
     };
     // Every section has its own heading, controls, then plot/list.
     // Live chart: share this trackbar's value with overlay's "Количество приложений".
-    put(show_system_,412,5,326,30);
-    put(limit_label_,18,43,189,27);
-    put(limit_slider_,209,40,192,35);
-    put(auto_live_,441,41,148,29);
-    put(popout_live_,596,41,140,29);
+    put(show_system_,418,607,265,35);
+    put(limit_label_,18,43,248,27);
+    put(limit_slider_,274,40,210,35);
+    put(auto_live_,530,41,148,29);
+    put(popout_live_,696,41,140,29);
     // Historical AutoScore: independent limit and calendar immediately above chart.
     put(history_limit_label_,18,296,147,27);
     put(history_limit_slider_,166,292,231,35);
-    put(auto_history_,441,294,148,29);
-    put(popout_history_,596,294,140,29);
+    put(auto_history_,530,294,148,29);
+    put(popout_history_,696,294,140,29);
     put(period_,18,345,165,230);
     put(from_,210,346,150,27);
     put(to_,385,346,150,27);
-    put(first_label_,18,379,724,20);
+    put(first_label_,18,379,824,20);
     // Uptime: own application limit, own date range, detached-table action.
     put(uptime_limit_label_,18,611,147,27);
     put(uptime_limit_slider_,166,607,231,35);
-    put(popout_table_,596,568,140,29);
+    put(popout_table_,696,568,140,29);
     put(uptime_period_,18,650,165,190);
     put(uptime_from_,210,651,150,27);
     put(uptime_to_,385,651,150,27);
-    put(table_,18,702,716,144);
-    ListView_SetColumnWidth(table_,0,sx(307));
-    ListView_SetColumnWidth(table_,1,sx(140));
-    ListView_SetColumnWidth(table_,2,sx(255));
+    put(table_,18,702,816,144);
+    ListView_SetColumnWidth(table_,0,sx(360));
+    ListView_SetColumnWidth(table_,1,sx(155));
+    ListView_SetColumnWidth(table_,2,sx(282));
     // Child controls must receive a fresh font after the settings window changes DPI.
     HFONT stale_font=nullptr;
     const UINT current_dpi=GetDpiForWindow(hwnd_);
@@ -407,7 +407,7 @@ std::int64_t StatisticsPage::custom_timestamp(HWND picker,bool until_end) {
     ULARGE_INTEGER ticks{};ticks.LowPart=f.dwLowDateTime;ticks.HighPart=f.dwHighDateTime;
     return static_cast<std::int64_t>((ticks.QuadPart-116444736000000000ULL)/10000ULL);
 }
-void StatisticsPage::request() {
+void StatisticsPage::request(bool uptime_only) {
     diagnostics::write(diagnostics::Level::trace,"ui.statistics","statistics query requested");
     if(!active_ && !popups_[0].window && !popups_[1].window && !table_window_) return;
     const auto now=now_ms();
@@ -425,14 +425,14 @@ void StatisticsPage::request() {
     const auto [from,to]=range(period_index_,from_,to_);
     const auto [uptime_from,uptime_to]=range(uptime_period_index_,uptime_from_,uptime_to_);
     // A date range may be empty independently; do not disable the other section.
-    window_from_=from;window_to_=to;
+    if(!uptime_only) {window_from_=from;window_to_=to;}
     {
         std::lock_guard lock(mutex_);
         cancel_query_.request_stop();cancel_query_=std::stop_source{};
-        requested_={from,to,uptime_from,uptime_to,limit_,history_limit_,uptime_limit_,system_,++generation_};
+        requested_={from,to,uptime_from,uptime_to,limit_,history_limit_,uptime_limit_,system_,uptime_only,++generation_};
     }
     wake_.notify_all();
-    last_history_refresh_=now;
+    if(!uptime_only) last_history_refresh_=now;
 }
 void StatisticsPage::update_dates() {
     const bool custom=period_index_==2;
@@ -448,11 +448,21 @@ void StatisticsPage::update_dates() {
 }
 void StatisticsPage::accept() {
     std::optional<std::pair<unsigned,StatisticsHistory>> item;
+    bool uptime_only=false;
     {
         std::lock_guard lock(mutex_);
-        if(completed_ && completed_->first==generation_) item.swap(completed_);
+        if(completed_ && completed_->first==generation_) {
+            uptime_only=requested_.uptime_only;
+            item.swap(completed_);
+        }
     }
     if(!item) return;
+    if(uptime_only) {
+        // Do not rebuild chart series, reset axis easing, or invalidate graph pixels.
+        history_.uptime=std::move(item->second.uptime);
+        populate_table();
+        return;
+    }
     history_=std::move(item->second);
     if(history_.first_record_ms && first_record_!=history_.first_record_ms) {
         first_record_=history_.first_record_ms;update_dates();
@@ -628,7 +638,7 @@ void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Pro
         StatisticsApplication identity;
         identity.name=stat_wide(p.name);
         identity.path=p.exe_path?stat_wide(*p.exe_path):L"";
-        if(!system_ && statistics_is_system(identity.name,identity.path)) continue;
+        if(statistics_is_system(identity.name,identity.path)) continue;
         CurrentReadings values;
         values.cpu=stat_percent(p.cpu_percent);
         values.ram=stat_memory(p.working_set);
@@ -1156,7 +1166,7 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
         if(LOWORD(wp)==system_id && HIWORD(wp)==BN_CLICKED) {
             system_=SendMessageW(show_system_,BM_GETCHECK,0,0)==BST_CHECKED;
             WritePrivateProfileStringW(L"overlay",L"stats_show_system",system_?L"1":L"0",settings_.c_str());
-            live_.clear();request();return 0;
+            request(true);return 0; // Requery only uptime; graphs retain their data and positions.
         }
         break;
     case WM_NOTIFY: {

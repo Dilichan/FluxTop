@@ -34,7 +34,7 @@ private:
     void set_history_limit(unsigned limit);
     void set_uptime_limit(unsigned limit);
     void layout();
-    void request();
+    void request(bool uptime_only=false);
     void accept();
     void populate_table();
     void open_table();
@@ -110,7 +110,7 @@ private:
     struct Query {
         std::int64_t from{},to{},uptime_from{},uptime_to{};
         unsigned limit{},history_limit{},uptime_limit{};
-        bool system{}; unsigned serial{};
+        bool system{},uptime_only{}; unsigned serial{};
     };
     HWND hwnd_{},period_{},from_{},to_{},uptime_period_{},uptime_from_{},uptime_to_{},
         show_system_{},first_label_{},table_{},limit_label_{},limit_slider_{};

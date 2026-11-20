@@ -52,6 +52,14 @@ int main(int argc,char** argv){
             require(at>=base && score>=0 && score<=100,"historical point range");
         auto all=fluxtop::read_statistics(path,base,base+4*fluxtop::history_day_ms,10,true,{});
         require(all.error.empty() && all.uptime.size()==2,"system filter toggle");
+        require(all.history.size()==history.history.size() &&
+            all.history[0].id==history.history[0].id,
+            "Uptime-only system filter must not change historical graph ranking");
+        const auto uptime_only=fluxtop::read_statistics(path,base,base+4*fluxtop::history_day_ms,
+            10,10,10,base,base+4*fluxtop::history_day_ms,true,{},true);
+        require(uptime_only.error.empty() && uptime_only.uptime.size()==2 &&
+            uptime_only.history.empty() && uptime_only.recent.empty(),
+            "Uptime checkbox must not query or rebuild charts");
         auto separated=fluxtop::read_statistics(path,base,base+4*fluxtop::history_day_ms,
             1,2,1,true,{});
         require(separated.error.empty() && separated.uptime.size()==2 &&
