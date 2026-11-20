@@ -48,6 +48,24 @@ void draw_time_grid(HDC dc,const RECT& area,std::int64_t from,std::int64_t to,in
         MoveToEx(dc,x,area.top,nullptr);LineTo(dc,x,area.bottom);
     }
 }
+// Extend only fresh, observed values to the live viewport boundary. The extension
+// is a drawing-only hold; it does not create or persist artificial samples.
+void extend_recent_line(std::vector<POINT>& line,LONG right,
+    std::int64_t last_sample,std::int64_t view_end,unsigned interval_ms) {
+    if(line.empty() || line.back().x>=right || view_end<last_sample)return;
+    const auto grace=2*static_cast<std::int64_t>(std::clamp(interval_ms,250U,10000U));
+    if(view_end-last_sample>grace)return; // Do not hide stalled sampling.
+    line.push_back(POINT{right,line.back().y});
+}
+// Ease only the newly sampled endpoint; historical points keep their real values.
+double eased_latest_value(double previous,double measured,ULONGLONG animation_start,
+    unsigned animation_ms) {
+    if(!animation_start)return measured;
+    const double fraction=std::clamp(static_cast<double>(GetTickCount64()-animation_start)/
+        std::max(1.0,static_cast<double>(animation_ms)),0.0,1.0);
+    const double smooth=fraction*fraction*(3.0-2.0*fraction);
+    return previous+(measured-previous)*smooth;
+}
 std::int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -906,6 +924,9 @@ void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<Statis
             line.back().x=previous.x+static_cast<LONG>(std::lround((final.x-previous.x)*t));
             line.back().y=previous.y+static_cast<LONG>(std::lround((final.y-previous.y)*t));
         }
+        // All current AutoScore series meet the same right edge as the system series.
+        if(is_live && !line.empty() && points.back().first==last_live_timestamp_)
+            extend_recent_line(line,area.right,points.back().first,to,animation_duration_ms_);
         if(!line.empty())plots.push_back({std::move(line),series_color(apps[i],i)});
     }
     // An opacity budget keeps tens of overlapping fills from obscuring the chart.
@@ -1119,16 +1140,36 @@ void StatisticsPage::draw_sidebar(HDC dc) {
             double max_y=section==2?1.0:100.0;
             if(section==2)for(const auto& sample:system_points_)
                 if(sample.values[2])max_y=std::max(max_y,*sample.values[2]*1.15);
-            for(const auto& sample:system_points_)if(sample.values[section])
-                add(sample.time,*sample.values[section],latest-60000,latest,max_y);
+            std::optional<double> previous_measurement;
+            for(const auto& sample:system_points_)if(sample.values[section]) {
+                const double actual=*sample.values[section];
+                const double displayed=(&sample==&system_points_.back() && previous_measurement)?
+                    eased_latest_value(*previous_measurement,actual,
+                        animation_started_,animation_duration_ms_):actual;
+                add(sample.time,displayed,latest-60000,latest,max_y);
+                previous_measurement=actual;
+            }
+            if(!system_points_.empty() && system_points_.back().values[section])
+                extend_recent_line(points,spark.right,system_points_.back().time,
+                    latest,animation_duration_ms_);
+            double previous_vram=0.0;
             if(section==3)for(const auto& sample:system_points_)if(sample.values[4] &&
                 sample.time>=latest-60000 && sample.time<=latest) {
                 const auto x=spark.left+static_cast<LONG>((sample.time-(latest-60000))*
                     (spark.right-spark.left)/60000.0);
+                const double actual=*sample.values[4];
+                const double displayed=(!second_gpu_line.empty() &&
+                    &sample==&system_points_.back())?
+                    eased_latest_value(previous_vram,actual,
+                        animation_started_,animation_duration_ms_):actual;
                 const auto ypoint=spark.bottom-2-static_cast<LONG>(
-                    std::clamp(*sample.values[4]/100.0,0.0,1.0)*(spark.bottom-spark.top-5));
+                    std::clamp(displayed/100.0,0.0,1.0)*(spark.bottom-spark.top-5));
                 second_gpu_line.push_back({x,ypoint});
+                previous_vram=actual;
             }
+            if(!system_points_.empty() && system_points_.back().values[4])
+                extend_recent_line(second_gpu_line,spark.right,system_points_.back().time,
+                    latest,animation_duration_ms_);
         } else if(section==4 || section==5) {
             const auto& apps=section==4?live_apps_:history_.history;
             const auto start=section==4?latest-60000:window_from_;
@@ -1171,7 +1212,7 @@ void StatisticsPage::draw_sidebar(HDC dc) {
 }
 void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
     std::int64_t from,std::int64_t to,bool autoscale,double manual_zoom,POINT hover,
-    const std::deque<SystemPoint>* frozen) {
+    const std::deque<SystemPoint>* frozen,bool detached) {
     const auto& samples=frozen?*frozen:system_points_;
     (void)hover; // The old on-graph readings have moved to the native hover bubble.
     if(metric>=5)return;
@@ -1189,14 +1230,35 @@ void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
         if(metric!=2)max_y=std::min(100.0,std::ceil(max_y/5.0)*5.0);
     } else max_y/=std::clamp(manual_zoom,1.0,100.0);
     max_y=std::max(max_y,.001);
+    if(autoscale && !frozen) {
+        const unsigned context=detached?1U:0U;
+        auto& shown=smooth_system_axis_max_[context][metric];
+        auto& previous_tick=smooth_system_axis_tick_[context][metric];
+        const auto tick=GetTickCount64();
+        if(shown<=0.0 || !std::isfinite(shown) || previous_tick==0 ||
+            tick-previous_tick>1000ULL)shown=max_y;
+        else if(tick>previous_tick) {
+            const double ms=std::min(100.0,static_cast<double>(tick-previous_tick));
+            const double blend=1.0-std::exp(-ms/240.0);
+            shown+=(max_y-shown)*blend;
+            if(std::abs(shown-max_y)<.01)shown=max_y;
+        }
+        previous_tick=tick;
+        max_y=shown;
+    }
     if(to<=from)to=from+1;
     const int clip=SaveDC(dc);
     IntersectClipRect(dc,area.left,area.top,area.right,area.bottom);
     for(unsigned s=0;s<count;++s) {
         const unsigned index=metric+s;
         std::vector<POINT> line;
+        std::optional<double> previous_measurement;
+        std::int64_t segment_end=0;
         const auto paint_line=[&]() {
             if(line.empty())return;
+            // Only the final contiguous live segment can reach the current edge.
+            if(!samples.empty() && segment_end==samples.back().time)
+                extend_recent_line(line,area.right,segment_end,to,animation_duration_ms_);
             fill_under(dc,line,area.bottom,ink[index]);
             const HPEN pen=graph_pen(ink[index],false);
             const auto previous=pen?SelectObject(dc,pen):nullptr;
@@ -1204,13 +1266,22 @@ void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
             else Ellipse(dc,line[0].x-2,line[0].y-2,line[0].x+2,line[0].y+2);
             if(pen)SelectObject(dc,previous);
             line.clear();
+            previous_measurement.reset();
+            segment_end=0;
         };
         for(const auto& sample:samples) {
             if(sample.time<from || sample.time>to || !sample.values[index]){paint_line();continue;}
             const double fraction=static_cast<double>(sample.time-from)/static_cast<double>(to-from);
-            const double normalized=std::clamp(*sample.values[index]/max_y,0.0,1.0);
+            const double actual=*sample.values[index];
+            double displayed=actual;
+            if(!frozen && !samples.empty() && &sample==&samples.back() && previous_measurement)
+                displayed=eased_latest_value(*previous_measurement,actual,
+                    animation_started_,animation_duration_ms_);
+            const double normalized=std::clamp(displayed/max_y,0.0,1.0);
             line.push_back({area.left+static_cast<LONG>(fraction*(area.right-area.left)),
                 area.bottom-static_cast<LONG>(normalized*(area.bottom-area.top))});
+            previous_measurement=actual;
+            segment_end=sample.time;
         }
         paint_line();
     }

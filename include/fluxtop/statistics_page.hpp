@@ -52,7 +52,7 @@ private:
     std::int64_t live_view_end() const;
     void draw_system_graph(HDC dc,const RECT& area,unsigned metric,std::int64_t from,
         std::int64_t to,bool autoscale,double manual_zoom,POINT hover,
-        const std::deque<SystemPoint>* frozen=nullptr);
+        const std::deque<SystemPoint>* frozen=nullptr,bool detached=false);
     void select_section(unsigned section);
     unsigned selected_popup_kind() const;
     bool has_popup() const;
@@ -125,6 +125,9 @@ private:
     unsigned selected_section_{0}; // CPU, RAM, network, GPU, AutoScore, history, uptime
     unsigned system_range_{0}; // 1, 5, 15 minutes
     bool system_autoscale_{true};
+    // Independent axis easing for embedded and detached system charts (five metrics).
+    std::array<std::array<double,5>,2> smooth_system_axis_max_{};
+    std::array<std::array<ULONGLONG,5>,2> smooth_system_axis_tick_{};
     HWND system_period_{},system_auto_{},system_popout_{},fill_toggle_{},pause_toggle_{};
     void toggle_section_pause();
     void refresh_pause_control();

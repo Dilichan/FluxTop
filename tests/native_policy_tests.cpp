@@ -103,13 +103,21 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "LPtoDP(dc,polygon.data()", "ExtSelectClipRgn(dc,mask,RGN_AND)",
             "for(const auto& plot:plots)fill_under(", "for(const auto& plot:plots) {",
             "stats_chart_fill"});
+        need(page,{"void extend_recent_line(std::vector<POINT>& line,LONG right,",
+            "eased_latest_value(double previous,double measured,ULONGLONG animation_start,",
+            "extend_recent_line(line,area.right,points.back().first,to,animation_duration_ms_)",
+            "extend_recent_line(line,area.right,segment_end,to,animation_duration_ms_)",
+            "eased_latest_value(*previous_measurement,actual,"});
         need(page,{"void draw_time_grid(HDC dc,const RECT& area,",
             "draw_time_grid(dc,area,from,to,8);",
             "draw_time_grid(dc,area,from,to,10);",
             "const bool live_page=active_ && selected_section_<5",
             "const double current_wall_time=static_cast<double>(now_ms());",
             "const bool viewport_animating=advance_time_view(elapsed);"});
-        need(popup,{"popup->fill_toggle", "popup_auto_id+1", "show_system_hover(popup->kind-2"});
+        need(header,{"std::array<std::array<double,5>,2> smooth_system_axis_max_",
+            "const std::deque<SystemPoint>* frozen=nullptr,bool detached=false"});
+        need(popup,{"popup->fill_toggle", "popup_auto_id+1", "show_system_hover(popup->kind-2",
+            "frozen_system,true"});
         need(page,{"FluxTop.SystemDashboard.Stage1","system_points_.push_back(point)",
             "stats_selected_section","case WM_LBUTTONUP:","system_popout_id"});
         need(popup,{"popup.kind>=2","draw_system_graph(dc,graph,popup.kind-2",

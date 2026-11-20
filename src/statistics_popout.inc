@@ -72,9 +72,9 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
             const RECT vram{68,middle+26,client.right-30,client.bottom-60};
             label(dc,L"Загрузка GPU",170,90,RGB(131,54,156));
             label(dc,L"Использование VRAM",170,middle+4,RGB(194,89,178));
-            draw_system_graph(dc,gpu,3,from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system);
-            draw_system_graph(dc,vram,4,from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system);
-        } else draw_system_graph(dc,graph,popup.kind-2,from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system);
+            draw_system_graph(dc,gpu,3,from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system,true);
+            draw_system_graph(dc,vram,4,from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system,true);
+        } else draw_system_graph(dc,graph,popup.kind-2,from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system,true);
         SelectObject(dc,old_font);
         return;
     }
@@ -89,7 +89,7 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
         SetTimer(hwnd_,animate_message,33,nullptr);
     }
     const double vertical_zoom=popup.auto_scale?popup.cached_auto_zoom:popup.zoom_y;
-    draw_graph(dc,graph,apps,from,to,L"",popup.kind==0,vertical_zoom,true);
+    draw_graph(dc,graph,apps,from,to,L"",popup.kind==0 && !popup.paused,vertical_zoom,true);
     // Hover uses the very same series and plotting scale as the detached graph.
     if(popup.cursor.x>=graph.left && popup.cursor.x<=graph.right
         && popup.cursor.y>=graph.top && popup.cursor.y<=graph.bottom && to>from) {
