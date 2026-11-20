@@ -529,7 +529,7 @@ void Overlay::layout_client() {
         SendMessageW(child.window, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         MoveWindow(child.window, px(child.bounds.left), px(child.bounds.top+40), px(child.bounds.right-child.bounds.left), px(child.bounds.bottom-child.bounds.top), TRUE);
     }
-    const int page_width=client_page_==1?880:680;
+    const int page_width=client_page_==1?1180:680;
     const int page_height=client_page_==1?920:840;
     if(tabs_) MoveWindow(tabs_,0,0,px(page_width),px(page_height),TRUE);
     if(statistics_) statistics_->resize(px(12),px(40),px(page_width-24),px(page_height-52));
@@ -642,7 +642,7 @@ void Overlay::receive() {
         grouped_processes_=aggregate_application_processes(snapshot_->processes);
         grouped_spikes_.update(grouped_processes_,snapshot_->total_ram_capacity,
             snapshot_->total_gpu_memory_capacity);
-        if(statistics_) statistics_->on_snapshot(snapshot_->timestamp_ms,grouped_processes_,options_.interval_ms);
+        if(statistics_) statistics_->on_snapshot(snapshot_->timestamp_ms,grouped_processes_,options_.interval_ms,*snapshot_);
     }
     update_view(); client_stats();
     if (visible_) InvalidateRect(hwnd_, nullptr, FALSE);

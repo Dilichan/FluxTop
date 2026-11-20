@@ -95,7 +95,11 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         const auto page=read(root/"src/statistics_page.cpp");
         const auto header=read(root/"include/fluxtop/statistics_page.hpp");
         const auto popup=read(root/"src/statistics_popout.inc");
-        need(header,{"PopupState","target_auto_zoom_"});
+        need(header,{"PopupState","target_auto_zoom_","std::array<PopupState,6> popups_"});
+        need(page,{"FluxTop.SystemDashboard.Stage1","system_points_.push_back(point)",
+            "stats_selected_section","case WM_LBUTTONUP:","system_popout_id"});
+        need(popup,{"popup.kind>=2","draw_system_graph(dc,graph,popup.kind-2",
+            "stats_popup_auto_cpu"});
         need(page,{"popout_live_id","popout_history_id","rebuild_live_series()",
             "animation_duration_ms_","GetTickCount64()-animation_started_","IntersectClipRect",
             "stats_limit_id","stats_history_top","stats_uptime_top","animate_message",
@@ -120,7 +124,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "double eased_axis(double current,double target,double elapsed_ms)",
             "popup.cached_auto_zoom=eased_axis(","const bool axis_animating=advance_axes(elapsed);",
             "if((!animating && !axis_animating) ||",
-            "(!active_ && !popups_[0].window && !popups_[1].window))",
+            "(!active_ && !has_popup()))",
             "KillTimer(hwnd_,animate_message);"});
         one_of(page,{"stat_network(process->rx_bytes_per_second,process->tx_bytes_per_second)",
             "stat_network(p.rx_bytes_per_second,p.tx_bytes_per_second)"});
@@ -138,12 +142,12 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "sorted.size(),100U","StatisticsPage::hover_dispatch",
             "WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE",
             "case WM_NCHITTEST:return HTTRANSPARENT;",
-            "put(limit_label_,18,43,248,27);","put(history_limit_label_,18,296,147,27);",
-            "put(period_,18,345,165,230);","put(uptime_limit_label_,18,611,147,27);",
-            "put(show_system_,418,607,265,35);","request(true);return 0;",
+            "put(limit_label_,292,66,260,28);","put(history_limit_label_,292,65,230,28);",
+            "put(period_,292,111,158,200);","put(uptime_limit_label_,292,66,205,28);",
+            "put(show_system_,722,64,229,31);","request(true);return 0;",
             "if(uptime_only) {","history_.uptime=std::move(item->second.uptime);",
             "if(statistics_is_system(identity.name,identity.path)) continue;",
-            "put(uptime_period_,18,650,165,190);",
+            "put(uptime_period_,292,111,158,190);",
             "uptime_period_id && HIWORD(wp)==CBN_SELCHANGE",
             "requested_={from,to,uptime_from,uptime_to,",
             "const auto [uptime_from,uptime_to]=range(uptime_period_index_,uptime_from_,uptime_to_);"});

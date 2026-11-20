@@ -24,7 +24,7 @@ public:
     void resize(int x,int y,int width,int height);
     void activate(bool active);
     void set_limit(unsigned limit);
-    void on_snapshot(std::int64_t timestamp_ms,const std::vector<Process>& grouped,unsigned interval_ms);
+    void on_snapshot(std::int64_t timestamp_ms,const std::vector<Process>& grouped,unsigned interval_ms,const Snapshot& system);
 private:
     static LRESULT CALLBACK dispatch(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp);
     static LRESULT CALLBACK hover_dispatch(HWND window,UINT msg,WPARAM wp,LPARAM lp);
@@ -41,6 +41,12 @@ private:
     void layout_table_window();
     void update_dates();
     void draw(HDC dc);
+    void draw_sidebar(HDC dc);
+    void draw_system_graph(HDC dc,const RECT& area,unsigned metric,std::int64_t from,
+        std::int64_t to,bool autoscale,double manual_zoom,POINT hover);
+    void select_section(unsigned section);
+    unsigned selected_popup_kind() const;
+    bool has_popup() const;
     void rebuild_live_series();
     void draw_graph(HDC dc,const RECT& area,const std::vector<StatisticsApplication>& apps,
         std::int64_t from,std::int64_t to,const wchar_t* caption,bool is_live,
@@ -91,7 +97,19 @@ private:
         POINT last{},cursor{-1,-1};
     };
     PaintBuffer page_buffer_;
-    std::array<PopupState,2> popups_{};
+    std::array<PopupState,6> popups_{}; // AutoScore live/history, CPU, RAM, network, GPU
+    // FluxTop.SystemDashboard.Stage1: bounded, sampler-fed system history.
+    struct SystemPoint {
+        std::int64_t time{};
+        std::array<std::optional<double>,4> values{}; // CPU%, RAM%, network Mbps, GPU%
+    };
+    std::deque<SystemPoint> system_points_;
+    ULONGLONG hover_last_frame_{};
+    POINT system_hover_{-1,-1};
+    unsigned selected_section_{0}; // CPU, RAM, network, GPU, AutoScore, history, uptime
+    unsigned system_range_{0}; // 1, 5, 15 minutes
+    bool system_autoscale_{true};
+    HWND system_period_{},system_auto_{},system_popout_{};
     HWND popout_live_{},popout_history_{},popout_table_{};
     HWND auto_live_{},auto_history_{};
     std::array<bool,2> auto_scale_{{true,true}};

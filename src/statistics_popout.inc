@@ -1,7 +1,9 @@
 // Reuse the StatisticsPage model and colour map: detached windows never collect data.
 void StatisticsPage::popup_range(const PopupState& popup,std::int64_t& from,std::int64_t& to) const {
-    const auto end=popup.kind==0?(last_live_timestamp_>0?last_live_timestamp_:now_ms()):window_to_;
-    const auto begin=popup.kind==0?end-60000:window_from_;
+    const auto end=popup.kind>=2?(system_points_.empty()?now_ms():system_points_.back().time):
+        popup.kind==0?(last_live_timestamp_>0?last_live_timestamp_:now_ms()):window_to_;
+    const auto begin=popup.kind>=2?end-std::array<std::int64_t,3>{{60000,300000,900000}}[system_range_]:
+        popup.kind==0?end-60000:window_from_;
     const double total=static_cast<double>(std::max<std::int64_t>(1000,end-begin));
     const double span=std::max(1000.0,total/std::clamp(popup.zoom_x,1.0,128.0));
     const double room=std::max(0.0,(total-span)/2.0);
@@ -12,7 +14,7 @@ void StatisticsPage::popup_range(const PopupState& popup,std::int64_t& from,std:
     if(to<=from) to=from+1000;
 }
 void StatisticsPage::open_popup(unsigned kind) {
-    if(kind>1) return;
+    if(kind>=popups_.size()) return;
     auto& popup=popups_[kind];
     if(popup.window && IsWindow(popup.window)) {
         ShowWindow(popup.window,SW_RESTORE);
@@ -32,11 +34,14 @@ void StatisticsPage::open_popup(unsigned kind) {
         throw windows_error("Register detached statistics graph");
     popup.owner=this;popup.kind=kind;
     popup.zoom_x=1.0;popup.zoom_y=1.0;popup.pan_ms=0;
-    popup.auto_scale=GetPrivateProfileIntW(L"overlay",
-        kind==0?L"stats_popup_auto_live":L"stats_popup_auto_history",1,settings_.c_str())!=0;
+    constexpr std::array<const wchar_t*,6> auto_keys{{L"stats_popup_auto_live",L"stats_popup_auto_history",
+        L"stats_popup_auto_cpu",L"stats_popup_auto_ram",L"stats_popup_auto_network",L"stats_popup_auto_gpu"}};
+    popup.auto_scale=GetPrivateProfileIntW(L"overlay",auto_keys[kind],1,settings_.c_str())!=0;
     popup.dragging=false;popup.cursor={-1,-1};
-    const wchar_t* title=kind==0?L"FluxTop — последняя минута (AutoScore)"
-        :L"FluxTop — история (AutoScore)";
+    const std::array<const wchar_t*,6> titles{{L"FluxTop — последняя минута (AutoScore)",
+        L"FluxTop — история (AutoScore)",L"FluxTop — ЦП",L"FluxTop — память",
+        L"FluxTop — сеть",L"FluxTop — GPU"}};
+    const wchar_t* title=titles[kind];
     popup.window=CreateWindowExW(0,window_class,title,WS_OVERLAPPEDWINDOW|WS_VISIBLE,
         CW_USEDEFAULT,CW_USEDEFAULT,1050,590,nullptr,nullptr,GetModuleHandleW(nullptr),&popup);
     if(!popup.window) throw windows_error("Create detached statistics graph");
@@ -53,10 +58,17 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
     if(!popup_font_) popup_font_=CreateFontW(-17,0,0,0,FW_SEMIBOLD,0,0,0,DEFAULT_CHARSET,0,0,
         CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
     const auto old_font=SelectObject(dc,popup_font_?popup_font_:GetStockObject(DEFAULT_GUI_FONT));
-    label(dc,popup.kind==0?L"AutoScore · последняя минута":L"AutoScore · история",22,18);
+    const std::array<const wchar_t*,6> names{{L"AutoScore · последняя минута",L"AutoScore · история",
+        L"ЦП",L"Память",L"Сеть",L"GPU"}};
+    label(dc,names[popup.kind],22,18);
     // Controls are native Win32; navigation instructions are intentionally absent.
     std::int64_t from{},to{};popup_range(popup,from,to);
-    const RECT graph{68,83,client.right-30,client.bottom-35};
+    const RECT graph{68,83,client.right-30,client.bottom-60};
+    if(popup.kind>=2) {
+        draw_system_graph(dc,graph,popup.kind-2,from,to,popup.auto_scale,popup.zoom_y,popup.cursor);
+        SelectObject(dc,old_font);
+        return;
+    }
     const auto& apps=popup.kind==0?live_apps_:history_.history;
     if(popup.auto_scale && popup.axis_dirty) {
         popup.target_auto_zoom=auto_vertical_zoom(apps,from,to);
@@ -135,8 +147,9 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
         if(LOWORD(wp)==popup_auto_id && HIWORD(wp)==BN_CLICKED) {
             popup->auto_scale=SendMessageW(popup->auto_toggle,BM_GETCHECK,0,0)==BST_CHECKED;
             popup->axis_dirty=true;
-            WritePrivateProfileStringW(L"overlay",
-                popup->kind==0?L"stats_popup_auto_live":L"stats_popup_auto_history",
+            constexpr std::array<const wchar_t*,6> keys{{L"stats_popup_auto_live",L"stats_popup_auto_history",
+                L"stats_popup_auto_cpu",L"stats_popup_auto_ram",L"stats_popup_auto_network",L"stats_popup_auto_gpu"}};
+            WritePrivateProfileStringW(L"overlay",keys[popup->kind],
                 popup->auto_scale?L"1":L"0",page->settings_.c_str());
             InvalidateRect(window,nullptr,FALSE);
             return 0;
@@ -159,13 +172,15 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
         if(GET_KEYSTATE_WPARAM(wp)&MK_CONTROL) {
             if(popup->auto_scale) {
                 std::int64_t from{},to{};page->popup_range(*popup,from,to);
-                const auto& apps=popup->kind==0?page->live_apps_:page->history_.history;
-                popup->zoom_y=auto_vertical_zoom(apps,from,to);
+                if(popup->kind<2) {
+                    const auto& apps=popup->kind==0?page->live_apps_:page->history_.history;
+                    popup->zoom_y=auto_vertical_zoom(apps,from,to);
+                } else popup->zoom_y=1.0;
                 popup->auto_scale=false;
                 SendMessageW(popup->auto_toggle,BM_SETCHECK,BST_UNCHECKED,0);
-                WritePrivateProfileStringW(L"overlay",
-                    popup->kind==0?L"stats_popup_auto_live":L"stats_popup_auto_history",
-                    L"0",page->settings_.c_str());
+                constexpr std::array<const wchar_t*,6> keys{{L"stats_popup_auto_live",L"stats_popup_auto_history",
+                    L"stats_popup_auto_cpu",L"stats_popup_auto_ram",L"stats_popup_auto_network",L"stats_popup_auto_gpu"}};
+                WritePrivateProfileStringW(L"overlay",keys[popup->kind],L"0",page->settings_.c_str());
             }
             popup->zoom_y=std::clamp(popup->zoom_y*factor,1.0,100.0);
         } else {
@@ -187,15 +202,16 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
         popup->axis_dirty=true;
         InvalidateRect(window,nullptr,FALSE);return 0;
     }
-    case WM_LBUTTONDBLCLK:
+    case WM_LBUTTONDBLCLK: {
         popup->zoom_x=1;popup->zoom_y=1;popup->pan_ms=0;
         popup->auto_scale=true;
         popup->axis_dirty=true;
         SendMessageW(popup->auto_toggle,BM_SETCHECK,BST_CHECKED,0);
-        WritePrivateProfileStringW(L"overlay",
-            popup->kind==0?L"stats_popup_auto_live":L"stats_popup_auto_history",
-            L"1",page->settings_.c_str());
+        constexpr std::array<const wchar_t*,6> keys{{L"stats_popup_auto_live",L"stats_popup_auto_history",
+            L"stats_popup_auto_cpu",L"stats_popup_auto_ram",L"stats_popup_auto_network",L"stats_popup_auto_gpu"}};
+        WritePrivateProfileStringW(L"overlay",keys[popup->kind],L"1",page->settings_.c_str());
         InvalidateRect(window,nullptr,FALSE);return 0;
+    }
     case WM_LBUTTONDOWN:
         popup->dragging=true;popup->last={GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
         SetCapture(window);return 0;
@@ -216,7 +232,9 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
             const auto width=std::max<LONG>(1,r.right-98);
             popup->pan_ms-=static_cast<double>(current.x-popup->last.x)
                 *static_cast<double>(to-from)/static_cast<double>(width);
-            const auto full=popup->kind==0?60000.0:
+            const auto full=popup->kind>=2?
+                static_cast<double>(std::array<std::int64_t,3>{{60000,300000,900000}}[page->system_range_]):
+                popup->kind==0?60000.0:
                 static_cast<double>(std::max<std::int64_t>(1000,page->window_to_-page->window_from_));
             const double half_range=std::max(0.0,(full-full/popup->zoom_x)/2.0);
             popup->pan_ms=std::clamp(popup->pan_ms,-half_range,half_range);

@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <set>
 #include <unordered_map>
+#include <numeric>
 
 namespace fluxtop {
 namespace {
@@ -27,10 +28,10 @@ constexpr UINT ready_message=WM_APP+201;
 constexpr UINT_PTR animate_message=2201;
 enum : int { period_id=1001,from_id,to_id,system_id,table_id,stats_limit_id,popout_live_id,popout_history_id,popout_table_id,history_limit_id,uptime_limit_id,uptime_period_id,uptime_from_id,uptime_to_id };
 // Logical page dimensions; chart labels and Win32 controls share the same grid.
-constexpr int page_width=860, page_height=860;
-constexpr int auto_live_id=1201, auto_history_id=1202, popup_auto_id=1203;
-constexpr RECT one_minute{54,96,828,238};
-constexpr RECT history_chart{54,402,828,544};
+constexpr int page_width=1160, page_height=860;
+constexpr int auto_live_id=1201, auto_history_id=1202, popup_auto_id=1203, system_period_id=1210, system_auto_id=1211, system_popout_id=1212;
+constexpr RECT one_minute{310,171,1124,755};
+constexpr RECT history_chart{310,171,1124,755};
 std::int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -166,8 +167,12 @@ StatisticsPage::StatisticsPage(HWND parent,std::filesystem::path database,
     system_=GetPrivateProfileIntW(L"overlay",L"stats_show_system",0,settings_.c_str())!=0;
     auto_scale_[0]=GetPrivateProfileIntW(L"overlay",L"stats_auto_live",1,settings_.c_str())!=0;
     auto_scale_[1]=GetPrivateProfileIntW(L"overlay",L"stats_auto_history",1,settings_.c_str())!=0;
-    popups_[0].owner=this;popups_[0].kind=0;
-    popups_[1].owner=this;popups_[1].kind=1;
+    selected_section_=static_cast<unsigned>(std::clamp(GetPrivateProfileIntW(L"overlay",L"stats_selected_section",0,settings_.c_str()),0U,6U));
+    system_range_=static_cast<unsigned>(std::clamp(GetPrivateProfileIntW(L"overlay",L"stats_system_range",0,settings_.c_str()),0U,2U));
+    system_autoscale_=GetPrivateProfileIntW(L"overlay",L"stats_system_auto",1,settings_.c_str())!=0;
+    for(unsigned kind=0;kind<popups_.size();++kind) {
+        popups_[kind].owner=this;popups_[kind].kind=kind;
+    }
     WNDCLASSEXW cls{}; cls.cbSize=sizeof(cls);cls.hInstance=GetModuleHandleW(nullptr);
     cls.lpfnWndProc=dispatch;cls.lpszClassName=page_class;cls.hCursor=LoadCursorW(nullptr,IDC_ARROW);
     cls.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_BTNFACE+1);
@@ -291,6 +296,13 @@ void StatisticsPage::make_controls() {
     SendMessageW(auto_live_,BM_SETCHECK,auto_scale_[0]?BST_CHECKED:BST_UNCHECKED,0);
     SendMessageW(auto_history_,BM_SETCHECK,auto_scale_[1]?BST_CHECKED:BST_UNCHECKED,0);
     popout_table_=add(L"BUTTON",L"Открыть отдельно",WS_TABSTOP,popout_table_id);
+    system_period_=add(L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP|WS_VSCROLL,system_period_id);
+    for(const auto* caption:{L"1 минута",L"5 минут",L"15 минут"})
+        SendMessageW(system_period_,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(caption));
+    SendMessageW(system_period_,CB_SETCURSEL,system_range_,0);
+    system_auto_=add(L"BUTTON",L"Автомасштаб",BS_AUTOCHECKBOX|WS_TABSTOP,system_auto_id);
+    SendMessageW(system_auto_,BM_SETCHECK,system_autoscale_?BST_CHECKED:BST_UNCHECKED,0);
+    system_popout_=add(L"BUTTON",L"Открыть отдельно",WS_TABSTOP,system_popout_id);
     layout();update_dates();
 }
 void StatisticsPage::resize(int x,int y,int width,int height) {
@@ -299,51 +311,66 @@ void StatisticsPage::resize(int x,int y,int width,int height) {
 void StatisticsPage::layout() {
     if(!hwnd_ || !period_) return;
     RECT r{};GetClientRect(hwnd_,&r);
-    const auto sx=[&](int x){return MulDiv(x,r.right,page_width);};
-    const auto sy=[&](int y){return MulDiv(y,r.bottom,page_height);};
-    const auto put=[&](HWND w,int x,int y,int width,int height){
-        MoveWindow(w,sx(x),sy(y),sx(width),sy(height),TRUE);
+    const auto sx=[&](int x){return MulDiv(x,std::max<LONG>(1,r.right),page_width);};
+    const auto sy=[&](int y){return MulDiv(y,std::max<LONG>(1,r.bottom),page_height);};
+    const auto put=[&](HWND control,int x,int y,int w,int h){
+        MoveWindow(control,sx(x),sy(y),sx(w),sy(h),TRUE);
     };
-    // Every section has its own heading, controls, then plot/list.
-    // Live chart: share this trackbar's value with overlay's "Количество приложений".
-    put(show_system_,418,607,265,35);
-    put(limit_label_,18,43,248,27);
-    put(limit_slider_,274,40,210,35);
-    put(auto_live_,530,41,148,29);
-    put(popout_live_,696,41,140,29);
-    // Historical AutoScore: independent limit and calendar immediately above chart.
-    put(history_limit_label_,18,296,147,27);
-    put(history_limit_slider_,166,292,231,35);
-    put(auto_history_,530,294,148,29);
-    put(popout_history_,696,294,140,29);
-    put(period_,18,345,165,230);
-    put(from_,210,346,150,27);
-    put(to_,385,346,150,27);
-    put(first_label_,18,379,824,20);
-    // Uptime: own application limit, own date range, detached-table action.
-    put(uptime_limit_label_,18,611,147,27);
-    put(uptime_limit_slider_,166,607,231,35);
-    put(popout_table_,696,568,140,29);
-    put(uptime_period_,18,650,165,190);
-    put(uptime_from_,210,651,150,27);
-    put(uptime_to_,385,651,150,27);
-    put(table_,18,702,816,144);
-    ListView_SetColumnWidth(table_,0,sx(360));
-    ListView_SetColumnWidth(table_,1,sx(155));
-    ListView_SetColumnWidth(table_,2,sx(282));
-    // Child controls must receive a fresh font after the settings window changes DPI.
+    const bool live=selected_section_==4,history=selected_section_==5,uptime=selected_section_==6;
+    const bool system=selected_section_<4;
+    // Old per-graph options are preserved above the selected chart, never in its popup only.
+    put(limit_label_,292,66,260,28);
+    put(limit_slider_,546,63,225,33);
+    put(auto_live_,792,65,130,28);
+    put(popout_live_,952,64,172,30);
+    put(history_limit_label_,292,65,230,28);
+    put(history_limit_slider_,500,63,225,33);
+    put(auto_history_,792,65,130,28);
+    put(popout_history_,952,64,172,30);
+    put(period_,292,111,158,200);
+    put(from_,474,112,150,27);
+    put(to_,642,112,150,27);
+    put(first_label_,292,146,600,18);
+    put(uptime_limit_label_,292,66,205,28);
+    put(uptime_limit_slider_,490,63,210,33);
+    put(show_system_,722,64,229,31);
+    put(popout_table_,952,64,172,30);
+    put(uptime_period_,292,111,158,190);
+    put(uptime_from_,474,112,150,27);
+    put(uptime_to_,642,112,150,27);
+    put(table_,292,171,838,620);
+    put(system_period_,292,65,170,200);
+    put(system_auto_,540,65,180,30);
+    put(system_popout_,952,64,172,30);
+    for(HWND control:{limit_label_,limit_slider_,auto_live_,popout_live_})
+        ShowWindow(control,live?SW_SHOW:SW_HIDE);
+    for(HWND control:{history_limit_label_,history_limit_slider_,auto_history_,popout_history_,period_})
+        ShowWindow(control,history?SW_SHOW:SW_HIDE);
+    for(HWND control:{from_,to_})
+        ShowWindow(control,history?SW_SHOW:SW_HIDE);
+    for(HWND control:{uptime_limit_label_,uptime_limit_slider_,show_system_,popout_table_,uptime_period_})
+        ShowWindow(control,uptime?SW_SHOW:SW_HIDE);
+    for(HWND control:{uptime_from_,uptime_to_})
+        ShowWindow(control,uptime?SW_SHOW:SW_HIDE);
+    for(HWND control:{system_period_,system_auto_,system_popout_})
+        ShowWindow(control,system?SW_SHOW:SW_HIDE);
+    ShowWindow(table_,uptime?SW_SHOW:SW_HIDE);
+    ShowWindow(first_label_,SW_HIDE);
+    ListView_SetColumnWidth(table_,0,sx(370));
+    ListView_SetColumnWidth(table_,1,sx(165));
+    ListView_SetColumnWidth(table_,2,sx(265));
     HFONT stale_font=nullptr;
-    const UINT current_dpi=GetDpiForWindow(hwnd_);
-    if(!font_ || controls_font_dpi_!=current_dpi) {
-        HFONT replacement=CreateFontW(-MulDiv(14,current_dpi,96),0,0,0,FW_NORMAL,0,0,0,
+    const UINT dpi=GetDpiForWindow(hwnd_);
+    if(!font_ || controls_font_dpi_!=dpi) {
+        HFONT replacement=CreateFontW(-MulDiv(14,dpi,96),0,0,0,FW_NORMAL,0,0,0,
             DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
-        if(replacement) {stale_font=font_;font_=replacement;controls_font_dpi_=current_dpi;}
+        if(replacement){stale_font=font_;font_=replacement;controls_font_dpi_=dpi;}
     }
-    for(auto child:{period_,from_,to_,uptime_period_,uptime_from_,uptime_to_,first_label_,
+    for(HWND control:{period_,from_,to_,uptime_period_,uptime_from_,uptime_to_,first_label_,
         show_system_,limit_label_,limit_slider_,history_limit_label_,history_limit_slider_,
         uptime_limit_label_,uptime_limit_slider_,table_,popout_live_,popout_history_,
-        popout_table_,auto_live_,auto_history_})
-        SendMessageW(child,WM_SETFONT,reinterpret_cast<WPARAM>(font_),TRUE);
+        popout_table_,auto_live_,auto_history_,system_period_,system_auto_,system_popout_})
+        SendMessageW(control,WM_SETFONT,reinterpret_cast<WPARAM>(font_),TRUE);
     if(stale_font) DeleteObject(stale_font);
     ListView_SetBkColor(table_,GetSysColor(COLOR_WINDOW));
     ListView_SetTextBkColor(table_,GetSysColor(COLOR_WINDOW));
@@ -353,7 +380,7 @@ void StatisticsPage::activate(bool active) {
     active_=active;ShowWindow(hwnd_,active?SW_SHOW:SW_HIDE);
     if(!active) page_buffer_.clear(); // Release offscreen memory in other settings tabs.
     if(!active && tooltip_) ShowWindow(tooltip_,SW_HIDE);
-    if(!active && !popups_[0].window) KillTimer(hwnd_,animate_message);
+    if(!active && !has_popup()) KillTimer(hwnd_,animate_message);
     if(active) request();
 }
 void StatisticsPage::set_limit(unsigned limit) {
@@ -409,7 +436,7 @@ std::int64_t StatisticsPage::custom_timestamp(HWND picker,bool until_end) {
 }
 void StatisticsPage::request(bool uptime_only) {
     diagnostics::write(diagnostics::Level::trace,"ui.statistics","statistics query requested");
-    if(!active_ && !popups_[0].window && !popups_[1].window && !table_window_) return;
+    if(!active_ && !has_popup() && !table_window_) return;
     const auto now=now_ms();
     const auto range=[&](int index,HWND begin_picker,HWND end_picker){
         std::int64_t begin=index==0?now-86400000:now-604800000;
@@ -439,6 +466,7 @@ void StatisticsPage::update_dates() {
     const bool uptime_custom=uptime_period_index_==2;
     EnableWindow(from_,custom);EnableWindow(to_,custom);
     EnableWindow(uptime_from_,uptime_custom);EnableWindow(uptime_to_,uptime_custom);
+    if(hwnd_) layout();
     if(first_record_) {
         SYSTEMTIME bounds[2]{local_time(first_record_),local_time(now_ms())};
         for(HWND picker:{from_,to_,uptime_from_,uptime_to_})
@@ -617,18 +645,49 @@ HICON StatisticsPage::application_icon(const std::wstring& path) {
     auto icon=ok?info.hIcon:nullptr;
     icon_cache_.emplace(path,icon);return icon;
 }
-void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Process>& grouped,unsigned interval_ms) {
-    if(!active_ && !popups_[0].window && !popups_[1].window && !table_window_) return;
+bool StatisticsPage::has_popup() const {
+    return std::any_of(popups_.begin(),popups_.end(),[](const auto& p){return p.window!=nullptr;});
+}
+unsigned StatisticsPage::selected_popup_kind() const {
+    constexpr std::array<unsigned,6> mapping{{2,3,4,5,0,1}};
+    return mapping[std::min<std::size_t>(selected_section_,5)];
+}
+void StatisticsPage::select_section(unsigned index) {
+    if(index>=7 || index==selected_section_)return;
+    selected_section_=index;
+    WritePrivateProfileStringW(L"overlay",L"stats_selected_section",
+        std::to_wstring(index).c_str(),settings_.c_str());
+    hover_section_=-1;
+    if(tooltip_)ShowWindow(tooltip_,SW_HIDE);
+    system_hover_={-1,-1};
+    layout();
+    if(index>=4)request();
+    InvalidateRect(hwnd_,nullptr,FALSE);
+}
+void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Process>& grouped,
+    unsigned interval_ms,const Snapshot& system) {
+    if(!active_ && !has_popup() && !table_window_) return;
     // A standalone uptime table only needs periodic database refreshes, not
     // rebuilding and repainting the one-minute graph for every sample.
-    if(!active_ && !popups_[0].window && !popups_[1].window) {
+    if(!active_ && !has_popup()) {
         if(now_ms()-last_history_refresh_>30000) request();
         return;
     }
+    SystemPoint point;point.time=timestamp_ms;
+    point.values[0]=system.total_cpu_percent;
+    if(system.total_ram_used && system.total_ram_capacity && *system.total_ram_capacity)
+        point.values[1]=100.0*static_cast<double>(*system.total_ram_used)/static_cast<double>(*system.total_ram_capacity);
+    if(system.total_rx_bytes_per_second && system.total_tx_bytes_per_second)
+        point.values[2]=8.0*(*system.total_rx_bytes_per_second+*system.total_tx_bytes_per_second)/1000000.0;
+    point.values[3]=system.total_gpu_percent;
+    system_points_.push_back(point);
+    while(!system_points_.empty() && system_points_.front().time<timestamp_ms-900000)
+        system_points_.pop_front();
+    while(system_points_.size()>900U)system_points_.pop_front();
     animation_started_=GetTickCount64();
     animation_duration_ms_=std::clamp(interval_ms,250U,10000U);
     last_live_timestamp_=timestamp_ms;
-    if(active_ || popups_[0].window) SetTimer(hwnd_,animate_message,33,nullptr);
+    if(active_ || has_popup()) SetTimer(hwnd_,animate_message,33,nullptr);
     struct Ranked { const Process* process; double score; };
     std::vector<Ranked> sorted;
     sorted.reserve(grouped.size());
@@ -884,38 +943,187 @@ void StatisticsPage::rebuild_live_series() {
     if(active_ || popups_[0].window || popups_[1].window)
         SetTimer(hwnd_,animate_message,33,nullptr);
 }
+// FluxTop.SystemDashboard.Stage1: sidebar+in-page chart; old popouts remain available.
+void StatisticsPage::draw_sidebar(HDC dc) {
+    const std::array<const wchar_t*,7> names{{L"ЦП",L"Память",L"Сеть",L"GPU",L"Авто",L"История",L"Аптайм"}};
+    const std::array<COLORREF,7> colors{{RGB(14,132,177),RGB(67,105,181),RGB(184,55,114),
+        RGB(131,54,156),RGB(34,133,123),RGB(85,112,142),RGB(99,123,96)}};
+    const std::int64_t latest=system_points_.empty()?now_ms():system_points_.back().time;
+    for(unsigned section=0;section<names.size();++section) {
+        const int y=18+static_cast<int>(section)*114;
+        const RECT item{14,y,266,y+105};
+        HBRUSH face=CreateSolidBrush(section==selected_section_?RGB(225,233,241):RGB(245,246,247));
+        FillRect(dc,&item,face);DeleteObject(face);
+        HBRUSH border=CreateSolidBrush(section==selected_section_?RGB(52,115,156):RGB(206,211,214));
+        FrameRect(dc,&item,border);DeleteObject(border);
+        label(dc,names[section],26,y+9,RGB(32,44,52));
+        std::wstring reading=L"—";
+        if(section<4 && !system_points_.empty()) {
+            const auto& value=system_points_.back().values[section];
+            if(value)reading=stat_decimal(*value)+(section==2?L" Mbps":L"%");
+        } else if(section==4)reading=L"1 мин";
+        else if(section==5)reading=L"История";
+        else if(section==6)reading=std::to_wstring(history_.uptime.size())+L" прил.";
+        RECT value_area{92,y+7,250,y+30};
+        SetTextColor(dc,colors[section]);SetBkMode(dc,TRANSPARENT);
+        DrawTextW(dc,reading.c_str(),-1,&value_area,DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
+        const RECT spark{26,y+38,249,y+94};
+        HBRUSH paper=CreateSolidBrush(RGB(255,255,255));FillRect(dc,&spark,paper);DeleteObject(paper);
+        std::vector<POINT> points;
+        const auto add=[&](std::int64_t at,double value,std::int64_t begin,std::int64_t end,double max_y){
+            if(at<begin || at>end || end<=begin || max_y<=0)return;
+            const auto x=spark.left+static_cast<LONG>((at-begin)*(spark.right-spark.left)/static_cast<double>(end-begin));
+            const auto ypoint=spark.bottom-2-static_cast<LONG>(std::clamp(value/max_y,0.0,1.0)*(spark.bottom-spark.top-5));
+            points.push_back({x,ypoint});
+        };
+        if(section<4) {
+            double max_y=section==2?1.0:100.0;
+            if(section==2)for(const auto& sample:system_points_)
+                if(sample.values[2])max_y=std::max(max_y,*sample.values[2]*1.15);
+            for(const auto& sample:system_points_)if(sample.values[section])
+                add(sample.time,*sample.values[section],latest-60000,latest,max_y);
+        } else if(section==4 || section==5) {
+            const auto& apps=section==4?live_apps_:history_.history;
+            const auto start=section==4?latest-60000:window_from_;
+            const auto end=section==4?latest:window_to_;
+            if(!apps.empty())for(const auto& point:apps.front().points)
+                add(point.first,point.second,start,end,100.0);
+        } else if(section==6 && !history_.uptime.empty()) {
+            double max_time=1;
+            for(const auto& app:history_.uptime)max_time=std::max(max_time,app.observed_seconds);
+            const std::size_t count=std::min<std::size_t>(history_.uptime.size(),10);
+            for(std::size_t i=0;i<count;++i) {
+                const auto x=spark.left+static_cast<int>(i)*((spark.right-spark.left)/10);
+                const auto height=static_cast<int>((spark.bottom-spark.top-5)*history_.uptime[i].observed_seconds/max_time);
+                RECT bar{x,spark.bottom-height,x+12,spark.bottom};
+                HBRUSH brush=CreateSolidBrush(colors[section]);FillRect(dc,&bar,brush);DeleteObject(brush);
+            }
+        }
+        if(points.size()>1) {
+            HPEN line=graph_pen(colors[section],false);
+            const auto old=line?SelectObject(dc,line):nullptr;
+            Polyline(dc,points.data(),static_cast<int>(points.size()));
+            if(line)SelectObject(dc,old);
+        }
+    }
+}
+void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
+    std::int64_t from,std::int64_t to,bool autoscale,double manual_zoom,POINT hover) {
+    if(metric>=4)return;
+    const std::array<COLORREF,4> ink{{RGB(14,132,177),RGB(67,105,181),RGB(184,55,114),RGB(131,54,156)}};
+    const HBRUSH paper=CreateSolidBrush(RGB(250,250,250));FillRect(dc,&area,paper);DeleteObject(paper);
+    const HPEN grid=graph_pen(RGB(211,217,220),true);
+    const auto old_grid=grid?SelectObject(dc,grid):nullptr;
+    for(int row=0;row<=5;++row){
+        const int y=area.top+(area.bottom-area.top)*row/5;
+        MoveToEx(dc,area.left,y,nullptr);LineTo(dc,area.right,y);
+    }
+    for(int col=0;col<=10;++col){
+        const int x=area.left+(area.right-area.left)*col/10;
+        MoveToEx(dc,x,area.top,nullptr);LineTo(dc,x,area.bottom);
+    }
+    if(grid)SelectObject(dc,old_grid);
+    double maximum=metric==2?1.0:100.0;
+    if(autoscale) {
+        maximum=metric==2?0.1:5.0;
+        for(const auto& sample:system_points_)if(sample.time>=from && sample.time<=to && sample.values[metric])
+            maximum=std::max(maximum,*sample.values[metric]*(metric==2?1.2:1.12));
+        if(metric!=2)maximum=std::min(100.0,std::ceil(maximum/5.0)*5.0);
+    } else maximum/=std::clamp(manual_zoom,1.0,100.0);
+    const std::wstring top_label=stat_decimal(maximum)+(metric==2?L" Mbps":L"%");
+    label(dc,top_label.c_str(),area.left,area.top-24,RGB(76,81,84));
+    label(dc,L"0",area.left,area.bottom+4,RGB(76,81,84));
+    std::vector<POINT> points;
+    if(to<=from)to=from+1;
+    for(const auto& sample:system_points_) {
+        if(sample.time<from || sample.time>to || !sample.values[metric]){
+            if(!points.empty()) {
+                const HPEN pen=graph_pen(ink[metric],false);
+                const auto old=pen?SelectObject(dc,pen):nullptr;
+                if(points.size()>1)Polyline(dc,points.data(),static_cast<int>(points.size()));
+                if(pen)SelectObject(dc,old);
+                points.clear();
+            }
+            continue;
+        }
+        const auto x=area.left+static_cast<LONG>((sample.time-from)*(area.right-area.left)/static_cast<double>(to-from));
+        const auto y=area.bottom-static_cast<LONG>(std::clamp(*sample.values[metric]/maximum,0.0,1.0)*(area.bottom-area.top));
+        points.push_back({x,y});
+    }
+    if(!points.empty()) {
+        const HPEN pen=graph_pen(ink[metric],false);
+        const auto old=pen?SelectObject(dc,pen):nullptr;
+        if(points.size()>1)Polyline(dc,points.data(),static_cast<int>(points.size()));
+        else Ellipse(dc,points.front().x-2,points.front().y-2,points.front().x+2,points.front().y+2);
+        if(pen)SelectObject(dc,old);
+    }
+    if(system_points_.empty())label(dc,L"Ожидание показаний Windows…",area.left+20,area.top+50,RGB(120,119,116));
+    const auto left=local_label(from),right=local_label(to);
+    label(dc,left.c_str(),area.left,area.bottom+24);
+    SIZE size{};GetTextExtentPoint32W(dc,right.c_str(),static_cast<int>(right.size()),&size);
+    label(dc,right.c_str(),area.right-size.cx,area.bottom+24);
+    if(hover.x>=area.left && hover.x<=area.right && hover.y>=area.top && hover.y<=area.bottom) {
+        const auto timestamp=from+static_cast<std::int64_t>((hover.x-area.left)*static_cast<double>(to-from)/std::max(1L,area.right-area.left));
+        const SystemPoint* closest=nullptr;
+        for(const auto& sample:system_points_)if(sample.values[metric] && sample.time>=from && sample.time<=to &&
+            (!closest || std::abs(sample.time-timestamp)<std::abs(closest->time-timestamp)))closest=&sample;
+        if(closest) {
+            const auto text=local_sample_label(closest->time)+L"  ·  "+stat_decimal(*closest->values[metric])+
+                (metric==2?L" Mbps":L"%");
+            label(dc,text.c_str(),area.left+12,area.top+11,ink[metric]);
+        }
+    }
+}
 void StatisticsPage::draw(HDC dc) {
     RECT physical{};GetClientRect(hwnd_,&physical);
     SetMapMode(dc,MM_ANISOTROPIC);SetWindowExtEx(dc,page_width,page_height,nullptr);
     SetViewportExtEx(dc,std::max<LONG>(1,physical.right),std::max<LONG>(1,physical.bottom),nullptr);
-    // StatisticsPage native-theme refinement v2: only chart areas are custom-drawn.
     const RECT background{0,0,page_width,page_height};
     FillRect(dc,&background,GetSysColorBrush(COLOR_BTNFACE));
-    if(!paint_font_) paint_font_=CreateFontW(-15,0,0,0,FW_SEMIBOLD,0,0,0,DEFAULT_CHARSET,0,0,
-        CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
-    const auto old_font=SelectObject(dc,paint_font_?paint_font_:GetStockObject(DEFAULT_GUI_FONT));
-    // FluxTop stable auto-axis / separate popout window v2:
-    // The same sample timestamp is used by graph painting and hit-testing.
-    // Mouse movement must not scroll the axis or change the auto-scale.
+    if(!paint_font_)paint_font_=CreateFontW(-16,0,0,0,FW_SEMIBOLD,0,0,0,DEFAULT_CHARSET,
+        0,0,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+    const auto old=SelectObject(dc,paint_font_?paint_font_:GetStockObject(DEFAULT_GUI_FONT));
+    draw_sidebar(dc);
+    const std::array<const wchar_t*,7> titles{{L"ЦП",L"ПАМЯТЬ",L"СЕТЬ",L"ГРАФИЧЕСКИЙ ПРОЦЕССОР",
+        L"ПОСЛЕДНЯЯ МИНУТА · AutoScore",L"ИСТОРИЯ · AutoScore",L"НАБЛЮДАЕМЫЙ АПТАЙМ"}};
+    label(dc,titles[selected_section_],292,18,RGB(40,47,55));
+    // Only one graph is visible; the original range, auto-scale and popout controls
+    // remain above the graph and keep their existing settings and handlers.
     const auto now=last_live_timestamp_>0?last_live_timestamp_:now_ms();
-    const double live_zoom=auto_scale_[0]?cached_auto_zoom_[0]:1.0;
-    const double history_zoom=auto_scale_[1]?cached_auto_zoom_[1]:1.0;
-    // Titles sit ABOVE each section's controls; charts no longer own their heading rows.
-    label(dc,L"ПОСЛЕДНЯЯ МИНУТА · AutoScore",18,14);
-    label(dc,L"ИСТОРИЯ · СРЕДНИЙ БАЛЛ AutoScore",18,263);
-    label(dc,L"НАБЛЮДАЕМЫЙ АПТАЙМ ПРИЛОЖЕНИЙ",18,575);
-    draw_graph(dc,one_minute,live_apps_,now-60000,now,L"",true,live_zoom);
-    draw_graph(dc,history_chart,history_.history,window_from_,window_to_,L"",false,history_zoom);
-    if(!history_.error.empty()) label(dc,history_.error.c_str(),18,552,RGB(162,50,40));
-    // Tooltip is a topmost popup, never painted underneath native controls.
-    SelectObject(dc,old_font);
+    if(selected_section_<4) {
+        const auto range=std::array<std::int64_t,3>{{60000,300000,900000}}[system_range_];
+        const auto right=system_points_.empty()?now:system_points_.back().time;
+        draw_system_graph(dc,one_minute,selected_section_,right-range,right,
+            system_autoscale_,1.0,system_hover_);
+    } else if(selected_section_==4) {
+        draw_graph(dc,one_minute,live_apps_,now-60000,now,L"",true,
+            auto_scale_[0]?cached_auto_zoom_[0]:1.0);
+    } else if(selected_section_==5) {
+        draw_graph(dc,history_chart,history_.history,window_from_,window_to_,L"",false,
+            auto_scale_[1]?cached_auto_zoom_[1]:1.0);
+        if(!history_.error.empty())label(dc,history_.error.c_str(),292,819,RGB(162,50,40));
+    } else label(dc,L"Таблица аптайма сохраняет независимые фильтры и период.",292,813,RGB(100,105,108));
+    SelectObject(dc,old);
 }
 void StatisticsPage::mouse(int x,int y) {
     RECT physical{};GetClientRect(hwnd_,&physical);
     if(physical.right<=0 || physical.bottom<=0) return;
     x=MulDiv(x,page_width,physical.right);y=MulDiv(y,page_height,physical.bottom);
-    const bool in_live=y>=one_minute.top && y<=one_minute.bottom;
-    const bool in_history=y>=history_chart.top && y<=history_chart.bottom;
+    const bool hover_changed=system_hover_.x!=x || system_hover_.y!=y;
+    const bool was_graph=system_hover_.x>=one_minute.left && system_hover_.x<=one_minute.right &&
+        system_hover_.y>=one_minute.top && system_hover_.y<=one_minute.bottom;
+    system_hover_={x,y};
+    const bool in_graph=x>=one_minute.left && x<=one_minute.right &&
+        y>=one_minute.top && y<=one_minute.bottom;
+    const auto tick=GetTickCount64();
+    if(selected_section_<4 && hover_changed && (was_graph || in_graph) &&
+        tick-hover_last_frame_>=40) {
+        hover_last_frame_=tick;InvalidateRect(hwnd_,nullptr,FALSE);
+    }
+    const bool in_live=selected_section_==4 && x>=one_minute.left && x<=one_minute.right
+        && y>=one_minute.top && y<=one_minute.bottom;
+    const bool in_history=selected_section_==5 && x>=history_chart.left && x<=history_chart.right
+        && y>=history_chart.top && y<=history_chart.bottom;
     if(!in_live && !in_history) {
         if(hover_section_!=-1) {hover_section_=-1;if(tooltip_) ShowWindow(tooltip_,SW_HIDE);}
         return;
@@ -1090,6 +1298,19 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
         }
         EndPaint(hwnd_,&ps);return 0;
     }
+    case WM_LBUTTONUP: {
+        RECT physical{};GetClientRect(hwnd_,&physical);
+        if(physical.right && physical.bottom) {
+            const int x=MulDiv(GET_X_LPARAM(lp),page_width,physical.right);
+            const int y=MulDiv(GET_Y_LPARAM(lp),page_height,physical.bottom);
+            if(x>=14 && x<=266 && y>=18) {
+                const auto row=static_cast<unsigned>((y-18)/114);
+                const auto top=18+static_cast<int>(row)*114;
+                if(row<7 && y<top+105)select_section(row);
+            }
+        }
+        return 0;
+    }
     case WM_MOUSEMOVE: {
         TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,hwnd_,0};
         TrackMouseEvent(&tracking);
@@ -1107,7 +1328,7 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
             if(active_) InvalidateRect(hwnd_,nullptr,FALSE);
             for(auto& popup:popups_) if(popup.window) InvalidateRect(popup.window,nullptr,FALSE);
             if((!animating && !axis_animating) ||
-                (!active_ && !popups_[0].window && !popups_[1].window))
+                (!active_ && !has_popup()))
                 KillTimer(hwnd_,animate_message);
             return 0;
         }
@@ -1137,6 +1358,7 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
         }
         break;
     case WM_MOUSELEAVE:
+        system_hover_={-1,-1};
         hover_section_=-1;
         if(tooltip_) ShowWindow(tooltip_,SW_HIDE);
         return 0;
@@ -1155,13 +1377,29 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
         if(HIWORD(wp)==BN_CLICKED && LOWORD(wp)==popout_live_id) {open_popup(0);return 0;}
         if(HIWORD(wp)==BN_CLICKED && LOWORD(wp)==popout_history_id) {open_popup(1);return 0;}
         if(HIWORD(wp)==BN_CLICKED && LOWORD(wp)==popout_table_id) {open_table();return 0;}
+        if(LOWORD(wp)==system_period_id && HIWORD(wp)==CBN_SELCHANGE) {
+            system_range_=static_cast<unsigned>(std::clamp<int>(
+                static_cast<int>(SendMessageW(system_period_,CB_GETCURSEL,0,0)),0,2));
+            WritePrivateProfileStringW(L"overlay",L"stats_system_range",
+                std::to_wstring(system_range_).c_str(),settings_.c_str());
+            InvalidateRect(hwnd_,nullptr,FALSE);return 0;
+        }
+        if(LOWORD(wp)==system_auto_id && HIWORD(wp)==BN_CLICKED) {
+            system_autoscale_=SendMessageW(system_auto_,BM_GETCHECK,0,0)==BST_CHECKED;
+            WritePrivateProfileStringW(L"overlay",L"stats_system_auto",
+                system_autoscale_?L"1":L"0",settings_.c_str());
+            InvalidateRect(hwnd_,nullptr,FALSE);return 0;
+        }
+        if(LOWORD(wp)==system_popout_id && HIWORD(wp)==BN_CLICKED) {
+            open_popup(selected_popup_kind());return 0;
+        }
         if(LOWORD(wp)==period_id && HIWORD(wp)==CBN_SELCHANGE) {
             period_index_=static_cast<int>(SendMessageW(period_,CB_GETCURSEL,0,0));
-            update_dates();request();return 0;
+            update_dates();layout();request();return 0;
         }
         if(LOWORD(wp)==uptime_period_id && HIWORD(wp)==CBN_SELCHANGE) {
             uptime_period_index_=static_cast<int>(SendMessageW(uptime_period_,CB_GETCURSEL,0,0));
-            update_dates();request();return 0;
+            update_dates();layout();request();return 0;
         }
         if(LOWORD(wp)==system_id && HIWORD(wp)==BN_CLICKED) {
             system_=SendMessageW(show_system_,BM_GETCHECK,0,0)==BST_CHECKED;
