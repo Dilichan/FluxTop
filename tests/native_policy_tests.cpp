@@ -109,13 +109,22 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "extend_recent_line(line,area.right,segment_end,to,animation_duration_ms_)",
             "eased_latest_value(*previous_measurement,actual,"});
         need(page,{"void draw_time_grid(HDC dc,const RECT& area,",
-            "draw_time_grid(dc,area,from,to,8);",
-            "draw_time_grid(dc,area,from,to,10);",
+            "void StatisticsPage::draw_chart_core(",
+            "draw_time_grid(dc,area,style.from,style.to,style.time_divisions);",
+            "style.time_divisions=8;", "style.time_divisions=10;",
             "const bool live_page=active_ && selected_section_<5",
             "const double current_wall_time=static_cast<double>(now_ms());",
             "const bool viewport_animating=advance_time_view(elapsed);"});
         need(header,{"std::array<std::array<double,5>,2> smooth_system_axis_max_",
             "const std::deque<SystemPoint>* frozen=nullptr,bool detached=false"});
+        // AutoScore, system graphs and sidebar mini-charts must share the same
+        // renderer instead of introducing private per-view GDI painting loops.
+        std::size_t shared_calls=0;
+        for(std::size_t at=0;(at=page.find("draw_chart_core(dc,style,plots",at))
+            !=std::string::npos;at+=sizeof("draw_chart_core(dc,style,plots")-1)
+            ++shared_calls;
+        if(shared_calls!=3U)
+            throw std::runtime_error("Expected exactly three shared chart renderer call sites");
         need(popup,{"popup->fill_toggle", "popup_auto_id+1", "show_system_hover(popup->kind-2",
             "frozen_system,true"});
         need(page,{"FluxTop.SystemDashboard.Stage1","system_points_.push_back(point)",

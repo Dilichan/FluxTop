@@ -43,6 +43,30 @@ private:
     void update_dates();
     void draw(HDC dc);
     void draw_sidebar(HDC dc);
+    // All chart variants share this drawing pipeline. Callers supply geometry,
+    // prepared pixel-series and visual modifiers, never GDI drawing loops.
+    struct ChartStroke {
+        std::vector<POINT> points;
+        COLORREF color{};
+    };
+    struct ChartBar {
+        RECT area{};
+        COLORREF color{};
+    };
+    struct ChartStyle {
+        RECT area{};
+        std::int64_t from{},to{};
+        int horizontal_rows{};
+        int time_divisions{};
+        COLORREF paper{RGB(250,250,250)};
+        COLORREF grid{RGB(211,217,220)};
+        BYTE fill_opacity{31};
+        bool adaptive_fill{};
+        bool ink_detail{};
+        bool point_markers{true};
+    };
+    void draw_chart_core(HDC dc,const ChartStyle& style,
+        const std::vector<ChartStroke>& plots,const std::vector<ChartBar>& bars={});
     void fill_under(HDC dc,const std::vector<POINT>& points,LONG baseline,COLORREF color,BYTE opacity=31);
     void draw_system_details(HDC dc,unsigned metric);
     void show_system_hover(unsigned metric,POINT cursor,const RECT& area,std::int64_t from,std::int64_t to,const std::deque<SystemPoint>* frozen=nullptr);

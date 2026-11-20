@@ -868,31 +868,67 @@ HPEN StatisticsPage::graph_pen(COLORREF color,bool dotted) {
     if(pen) cache.emplace(color,pen);
     return pen;
 }
+// Shared visual renderer: background, time grid, alpha fills and all strokes.
+// Chart providers only prepare series and set ChartStyle; no alternate paint path.
+void StatisticsPage::draw_chart_core(HDC dc,const ChartStyle& style,
+    const std::vector<ChartStroke>& plots,const std::vector<ChartBar>& bars) {
+    const RECT& area=style.area;
+    if(area.right<=area.left || area.bottom<=area.top)return;
+    const HBRUSH paper=CreateSolidBrush(style.paper);
+    if(paper) {FillRect(dc,&area,paper);DeleteObject(paper);}
+    const int saved=SaveDC(dc);
+    if(!saved)return;
+    IntersectClipRect(dc,area.left,area.top,area.right,area.bottom);
+    if(style.horizontal_rows>0 || style.time_divisions>0) {
+        const HPEN grid=graph_pen(style.grid,true);
+        const HGDIOBJ previous=grid?SelectObject(dc,grid):nullptr;
+        if(style.horizontal_rows>0)for(int row=0;row<=style.horizontal_rows;++row) {
+            const LONG y=area.top+(area.bottom-area.top)*row/style.horizontal_rows;
+            MoveToEx(dc,area.left,y,nullptr);LineTo(dc,area.right,y);
+        }
+        if(style.time_divisions>0)
+            draw_time_grid(dc,area,style.from,style.to,style.time_divisions);
+        if(grid)SelectObject(dc,previous);
+    }
+    if(fill_enabled_ && style.fill_opacity>0 && !plots.empty()) {
+        BYTE opacity=style.fill_opacity;
+        if(style.adaptive_fill)
+            opacity=static_cast<BYTE>(std::min<std::size_t>(opacity,
+                std::max<std::size_t>(1,72/plots.size())));
+        // Draw every fill before every stroke, preserving overlapping curves.
+        for(const auto& plot:plots)fill_under(dc,plot.points,area.bottom,plot.color,opacity);
+    }
+    // Bars are drawn through the same clipping, background and renderer.
+    for(const auto& bar:bars) {
+        const HBRUSH brush=CreateSolidBrush(bar.color);
+        if(brush) {FillRect(dc,&bar.area,brush);DeleteObject(brush);}
+    }
+    SelectObject(dc,GetStockObject(NULL_BRUSH));
+    for(const auto& plot:plots) {
+        const auto& line=plot.points;
+        if(line.empty())continue;
+        const HPEN stroke=graph_pen(plot.color,false);
+        const HGDIOBJ previous=stroke?SelectObject(dc,stroke):nullptr;
+        if(line.size()>1)
+            Polyline(dc,line.data(),static_cast<int>(line.size()));
+        else if(style.point_markers)
+            Ellipse(dc,line[0].x-2,line[0].y-2,line[0].x+2,line[0].y+2);
+        if(stroke)SelectObject(dc,previous);
+        if(style.ink_detail && line.size()>1) {
+            const HPEN detail=graph_pen(plot.color,true);
+            const HGDIOBJ previous_detail=detail?SelectObject(dc,detail):nullptr;
+            Polyline(dc,line.data(),static_cast<int>(line.size()));
+            if(detail)SelectObject(dc,previous_detail);
+        }
+    }
+    RestoreDC(dc,saved);
+}
 void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<StatisticsApplication>& apps,
     std::int64_t from,std::int64_t to,const wchar_t* caption,bool is_live,
     double vertical_zoom,bool detached) {
-    const HBRUSH paper=CreateSolidBrush(RGB(250,250,250));
-    FillRect(dc,&area,paper);DeleteObject(paper);
-    const auto original=SelectObject(dc,GetStockObject(NULL_BRUSH));
-    const HPEN grid=graph_pen(RGB(210,217,221),true);
-    auto old=grid?SelectObject(dc,grid):GetCurrentObject(dc,OBJ_PEN);
-    for(int row=0;row<=4;++row) {
-        const auto y=area.top+(area.bottom-area.top)*row/4;
-        MoveToEx(dc,area.left,y,nullptr);LineTo(dc,area.right,y);
-    }
-    draw_time_grid(dc,area,from,to,8);
-    if(grid) SelectObject(dc,old);
-    label(dc,caption,area.left,area.top-28,RGB(64,63,61));
-    const auto top_value=std::to_wstring(static_cast<int>(std::lround(100.0/vertical_zoom)));
-    label(dc,top_value.c_str(),area.left-33,area.top-3);
-    label(dc,L"0",area.left-15,area.bottom-13);
-    if(to<=from) to=from+1;
-    const int clip=SaveDC(dc);
-    IntersectClipRect(dc,area.left,area.top,area.right,area.bottom);
-    // Prepare the paths once. Rendering in two passes prevents a later series fill
-    // from covering a previously drawn line (including the GPU/VRAM and AutoScore views).
-    struct Plot { std::vector<POINT> points; COLORREF color{}; };
-    std::vector<Plot> plots;
+    if(to<=from)to=from+1;
+    // AutoScore only maps time/value samples to pixels; all painting uses the core.
+    std::vector<ChartStroke> plots;
     plots.reserve(apps.size());
     for(std::size_t i=0;i<apps.size();++i) {
         const auto& points=apps[i].points;
@@ -929,30 +965,16 @@ void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<Statis
             extend_recent_line(line,area.right,points.back().first,to,animation_duration_ms_);
         if(!line.empty())plots.push_back({std::move(line),series_color(apps[i],i)});
     }
-    // An opacity budget keeps tens of overlapping fills from obscuring the chart.
-    // One line: 31/255 (~12%). Many lines: each gets proportionally less alpha.
-    if(fill_enabled_ && !plots.empty()) {
-        const BYTE opacity=static_cast<BYTE>(std::min<std::size_t>(31,
-            std::max<std::size_t>(1,72/plots.size())));
-        for(const auto& plot:plots)fill_under(dc,plot.points,area.bottom,plot.color,opacity);
-    }
-    // Always paint every stroke after every fill: no series can hide another line.
-    for(const auto& plot:plots) {
-        const HPEN stroke=graph_pen(plot.color,false);
-        if(stroke)old=SelectObject(dc,stroke);
-        if(plot.points.size()>1)
-            Polyline(dc,plot.points.data(),static_cast<int>(plot.points.size()));
-        else Ellipse(dc,plot.points[0].x-2,plot.points[0].y-2,
-            plot.points[0].x+2,plot.points[0].y+2);
-        if(stroke)SelectObject(dc,old);
-        if(plot.points.size()>1) {
-            const HPEN detail=graph_pen(plot.color,true);
-            if(detail)old=SelectObject(dc,detail);
-            Polyline(dc,plot.points.data(),static_cast<int>(plot.points.size()));
-            if(detail)SelectObject(dc,old);
-        }
-    }
-    RestoreDC(dc,clip);
+    ChartStyle style{};
+    style.area=area;style.from=from;style.to=to;
+    style.horizontal_rows=4;style.time_divisions=8;
+    style.grid=RGB(210,217,221);
+    style.adaptive_fill=true;style.ink_detail=true;
+    draw_chart_core(dc,style,plots);
+    label(dc,caption,area.left,area.top-28,RGB(64,63,61));
+    const auto top_value=std::to_wstring(static_cast<int>(std::lround(100.0/vertical_zoom)));
+    label(dc,top_value.c_str(),area.left-33,area.top-3);
+    label(dc,L"0",area.left-15,area.bottom-13);
     if(apps.empty() || std::none_of(apps.begin(),apps.end(),[](const auto& a){return !a.points.empty();}))
         label(dc,is_live?L"Ожидание данных…":L"Нет данных за выбранный период",
             area.left+20,area.top+55,RGB(119,111,98));
@@ -962,7 +984,6 @@ void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<Statis
     SIZE extent{};
     GetTextExtentPoint32W(dc,end_label.c_str(),static_cast<int>(end_label.size()),&extent);
     label(dc,end_label.c_str(),area.right-extent.cx,area.bottom+3,RGB(97,91,82));
-    SelectObject(dc,original);
 }
 void StatisticsPage::rebuild_live_series() {
     const auto now=now_ms();
@@ -1128,8 +1149,8 @@ void StatisticsPage::draw_sidebar(HDC dc) {
         SetTextColor(dc,colors[section]);SetBkMode(dc,TRANSPARENT);
         DrawTextW(dc,reading.c_str(),-1,&value_area,DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
         const RECT spark{26,y+38,249,y+94};
-        HBRUSH paper=CreateSolidBrush(RGB(255,255,255));FillRect(dc,&spark,paper);DeleteObject(paper);
         std::vector<POINT> points,second_gpu_line;
+        std::vector<ChartBar> bars;
         const auto add=[&](std::int64_t at,double value,std::int64_t begin,std::int64_t end,double max_y){
             if(at<begin || at>end || end<=begin || max_y<=0)return;
             const auto x=spark.left+static_cast<LONG>((at-begin)*(spark.right-spark.left)/static_cast<double>(end-begin));
@@ -1184,30 +1205,20 @@ void StatisticsPage::draw_sidebar(HDC dc) {
                 const auto x=spark.left+static_cast<int>(i)*((spark.right-spark.left)/10);
                 const auto height=static_cast<int>((spark.bottom-spark.top-5)*history_.uptime[i].observed_seconds/max_time);
                 RECT bar{x,spark.bottom-height,x+12,spark.bottom};
-                HBRUSH brush=CreateSolidBrush(colors[section]);FillRect(dc,&bar,brush);DeleteObject(brush);
+                bars.push_back({bar,colors[section]});
             }
         }
-        // Both GPU mini-chart fills must be behind BOTH strokes.
-        if(points.size()>1 || (section==3 && second_gpu_line.size()>1)) {
-            const int saved=SaveDC(dc);
-            IntersectClipRect(dc,spark.left,spark.top,spark.right,spark.bottom);
-            if(points.size()>1)fill_under(dc,points,spark.bottom,colors[section],26);
-            if(section==3 && second_gpu_line.size()>1)
-                fill_under(dc,second_gpu_line,spark.bottom,RGB(194,89,178),26);
-            if(points.size()>1) {
-                HPEN pen=graph_pen(colors[section],false);
-                const auto previous=pen?SelectObject(dc,pen):nullptr;
-                Polyline(dc,points.data(),static_cast<int>(points.size()));
-                if(pen)SelectObject(dc,previous);
-            }
-            if(section==3 && second_gpu_line.size()>1) {
-                HPEN pen=graph_pen(RGB(194,89,178),false);
-                const auto previous=pen?SelectObject(dc,pen):nullptr;
-                Polyline(dc,second_gpu_line.data(),static_cast<int>(second_gpu_line.size()));
-                if(pen)SelectObject(dc,previous);
-            }
-            RestoreDC(dc,saved);
-        }
+        // Mini-charts use the very same renderer, with a white paper and no grid.
+        // The GPU pair is passed as two series, so both fills remain below both lines.
+        std::vector<ChartStroke> plots;
+        plots.reserve(section==3?2U:1U);
+        if(points.size()>1)plots.push_back({std::move(points),colors[section]});
+        if(section==3 && second_gpu_line.size()>1)
+            plots.push_back({std::move(second_gpu_line),RGB(194,89,178)});
+        ChartStyle style{};
+        style.area=spark;style.paper=RGB(255,255,255);
+        style.fill_opacity=26;style.point_markers=false;
+        draw_chart_core(dc,style,plots,bars);
     }
 }
 void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
@@ -1218,8 +1229,6 @@ void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
     if(metric>=5)return;
     constexpr std::array<COLORREF,5> ink{{RGB(14,132,177),RGB(67,105,181),RGB(184,55,114),
         RGB(131,54,156),RGB(194,89,178)}};
-    const HBRUSH paper=CreateSolidBrush(RGB(250,250,250));
-    FillRect(dc,&area,paper);DeleteObject(paper);
     const unsigned count=1U;
     double max_y=metric==2?1.0:100.0;
     if(autoscale) {
@@ -1247,30 +1256,28 @@ void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
         max_y=shown;
     }
     if(to<=from)to=from+1;
-    const int clip=SaveDC(dc);
-    IntersectClipRect(dc,area.left,area.top,area.right,area.bottom);
+    // System metrics only prepare contiguous pixel segments. Missing readings
+    // terminate segments rather than bridging gaps with fabricated values.
+    std::vector<ChartStroke> plots;
+    plots.reserve(8);
     for(unsigned s=0;s<count;++s) {
         const unsigned index=metric+s;
         std::vector<POINT> line;
         std::optional<double> previous_measurement;
         std::int64_t segment_end=0;
-        const auto paint_line=[&]() {
+        const auto finish_segment=[&]() {
             if(line.empty())return;
-            // Only the final contiguous live segment can reach the current edge.
             if(!samples.empty() && segment_end==samples.back().time)
                 extend_recent_line(line,area.right,segment_end,to,animation_duration_ms_);
-            fill_under(dc,line,area.bottom,ink[index]);
-            const HPEN pen=graph_pen(ink[index],false);
-            const auto previous=pen?SelectObject(dc,pen):nullptr;
-            if(line.size()>1)Polyline(dc,line.data(),static_cast<int>(line.size()));
-            else Ellipse(dc,line[0].x-2,line[0].y-2,line[0].x+2,line[0].y+2);
-            if(pen)SelectObject(dc,previous);
+            plots.push_back({std::move(line),ink[index]});
             line.clear();
             previous_measurement.reset();
             segment_end=0;
         };
         for(const auto& sample:samples) {
-            if(sample.time<from || sample.time>to || !sample.values[index]){paint_line();continue;}
+            if(sample.time<from || sample.time>to || !sample.values[index]) {
+                finish_segment();continue;
+            }
             const double fraction=static_cast<double>(sample.time-from)/static_cast<double>(to-from);
             const double actual=*sample.values[index];
             double displayed=actual;
@@ -1283,17 +1290,12 @@ void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
             previous_measurement=actual;
             segment_end=sample.time;
         }
-        paint_line();
+        finish_segment();
     }
-    const HPEN grid=graph_pen(RGB(211,217,220),true);
-    const auto old_grid=grid?SelectObject(dc,grid):nullptr;
-    for(int row=0;row<=5;++row){
-        const int y=area.top+(area.bottom-area.top)*row/5;
-        MoveToEx(dc,area.left,y,nullptr);LineTo(dc,area.right,y);
-    }
-    draw_time_grid(dc,area,from,to,10);
-    if(grid)SelectObject(dc,old_grid);
-    RestoreDC(dc,clip);
+    ChartStyle style{};
+    style.area=area;style.from=from;style.to=to;
+    style.horizontal_rows=5;style.time_divisions=10;
+    draw_chart_core(dc,style,plots);
     const auto cap=stat_decimal(max_y)+(metric==2?L" Mbps":L"%");
     label(dc,cap.c_str(),area.left,area.top-24,RGB(76,81,84));
     label(dc,L"0",area.left,area.bottom+4,RGB(76,81,84));
