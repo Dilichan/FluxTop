@@ -43,7 +43,7 @@ private:
     void update_dates();
     void draw(HDC dc);
     void draw_sidebar(HDC dc);
-    void fill_under(HDC dc,const std::vector<POINT>& points,LONG baseline,COLORREF color);
+    void fill_under(HDC dc,const std::vector<POINT>& points,LONG baseline,COLORREF color,BYTE opacity=31);
     void draw_system_details(HDC dc,unsigned metric);
     void show_system_hover(unsigned metric,POINT cursor,const RECT& area,std::int64_t from,std::int64_t to,const std::deque<SystemPoint>* frozen=nullptr);
     void draw_system_hover(HDC dc,const RECT& bounds);
@@ -116,6 +116,7 @@ private:
         POINT last{},cursor{-1,-1};
     };
     PaintBuffer page_buffer_;
+    PaintBuffer fill_color_buffer_; // Reused 1x1 bitmap for GDI alpha blending.
     std::array<PopupState,6> popups_{}; // AutoScore live/history, CPU, RAM, network, GPU
     // FluxTop.SystemDashboard.Stage1: bounded, sampler-fed system history.
     std::deque<SystemPoint> system_points_;
@@ -127,7 +128,7 @@ private:
     HWND system_period_{},system_auto_{},system_popout_{},fill_toggle_{},pause_toggle_{};
     void toggle_section_pause();
     void refresh_pause_control();
-    bool fill_enabled_{true}; // 22% tint; shared by embedded and detached graphs.
+    bool fill_enabled_{true}; // Actual alpha blending; shared by embedded and detached graphs.
     double smooth_system_end_{},smooth_live_end_{};
     struct SystemInfo {
         std::optional<std::uint64_t> ram_used,ram_capacity,gpu_memory,gpu_capacity;

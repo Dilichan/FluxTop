@@ -32,6 +32,22 @@ constexpr int page_width=1160, page_height=860;
 constexpr int auto_live_id=1201, auto_history_id=1202, popup_auto_id=1203, system_period_id=1210, system_auto_id=1211, system_popout_id=1212;
 constexpr RECT one_minute{310,171,1124,665};
 constexpr RECT history_chart{310,171,1124,665};
+// Vertical grid markers are tied to UTC timestamps, not fixed chart columns.
+// Advancing the live time window moves the grid and its series by the same pixels.
+void draw_time_grid(HDC dc,const RECT& area,std::int64_t from,std::int64_t to,int columns) {
+    if(to<=from || columns<=0 || area.right<=area.left)return;
+    const auto wanted=std::max<std::int64_t>(1000,(to-from)/columns);
+    std::int64_t decade=1000;
+    while(decade<wanted/10 && decade<1000000000000LL)decade*=10;
+    const auto step=wanted<=decade?decade:
+        wanted<=2*decade?2*decade:wanted<=5*decade?5*decade:10*decade;
+    // Unix millisecond timestamps are positive for the Windows versions supported here.
+    for(auto at=(from/step+1)*step;at<to;at+=step) {
+        const auto relative=static_cast<double>(at-from)/static_cast<double>(to-from);
+        const auto x=area.left+static_cast<LONG>(std::llround(relative*(area.right-area.left)));
+        MoveToEx(dc,x,area.top,nullptr);LineTo(dc,x,area.bottom);
+    }
+}
 std::int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -846,10 +862,7 @@ void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<Statis
         const auto y=area.top+(area.bottom-area.top)*row/4;
         MoveToEx(dc,area.left,y,nullptr);LineTo(dc,area.right,y);
     }
-    for(int col=0;col<=6;++col) {
-        const auto x=area.left+(area.right-area.left)*col/6;
-        MoveToEx(dc,x,area.top,nullptr);LineTo(dc,x,area.bottom);
-    }
+    draw_time_grid(dc,area,from,to,8);
     if(grid) SelectObject(dc,old);
     label(dc,caption,area.left,area.top-28,RGB(64,63,61));
     const auto top_value=std::to_wstring(static_cast<int>(std::lround(100.0/vertical_zoom)));
@@ -858,13 +871,16 @@ void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<Statis
     if(to<=from) to=from+1;
     const int clip=SaveDC(dc);
     IntersectClipRect(dc,area.left,area.top,area.right,area.bottom);
+    // Prepare the paths once. Rendering in two passes prevents a later series fill
+    // from covering a previously drawn line (including the GPU/VRAM and AutoScore views).
+    struct Plot { std::vector<POINT> points; COLORREF color{}; };
+    std::vector<Plot> plots;
+    plots.reserve(apps.size());
     for(std::size_t i=0;i<apps.size();++i) {
         const auto& points=apps[i].points;
-        if(points.empty()) continue;
+        if(points.empty())continue;
         std::vector<POINT> line;
         line.reserve(points.size());
-        // Plot only the visible time span plus a boundary point on each side.
-        // This matters when a detached chart is zoomed into a long history.
         const auto lower=std::lower_bound(points.begin(),points.end(),from,
             [](const auto& point,std::int64_t time){return point.first<time;});
         const auto first=lower==points.begin()?lower:std::prev(lower);
@@ -876,12 +892,12 @@ void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<Statis
             const auto fraction=static_cast<double>(at-from)/static_cast<double>(to-from);
             const auto jitter=.9*std::sin(static_cast<double>(at%5003)*.019+i*2.3);
             const auto xx=static_cast<double>(area.left)+fraction*(area.right-area.left);
-            const auto yy=static_cast<double>(area.bottom)-std::clamp(score*vertical_zoom,0.0,100.0)/100.0*(area.bottom-area.top);
+            const auto yy=static_cast<double>(area.bottom)-
+                std::clamp(score*vertical_zoom,0.0,100.0)/100.0*(area.bottom-area.top);
             line.push_back(POINT{static_cast<LONG>(std::lround(std::clamp(xx,-1000000.0,1000000.0))),
                 static_cast<LONG>(std::lround(yy+jitter))});
         }
-        // Only the newest sampled segment is revealed progressively. No fake samples
-        // are generated and the underlying AutoScore history remains unchanged.
+        // Keep the original live-series interpolation, without introducing fake samples.
         if(is_live && line.size()>1 && std::prev(last)->first==last_live_timestamp_
             && points.back().first==last_live_timestamp_ && animation_started_) {
             const auto elapsed=GetTickCount64()-animation_started_;
@@ -890,19 +906,29 @@ void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<Statis
             line.back().x=previous.x+static_cast<LONG>(std::lround((final.x-previous.x)*t));
             line.back().y=previous.y+static_cast<LONG>(std::lround((final.y-previous.y)*t));
         }
-        const auto ink=series_color(apps[i],i);
-        if(fill_enabled_)fill_under(dc,line,area.bottom,ink);
-        const HPEN stroke=graph_pen(ink,false);
-        if(stroke) old=SelectObject(dc,stroke);
-        if(line.size()>1) Polyline(dc,line.data(),static_cast<int>(line.size()));
-        else Ellipse(dc,line[0].x-2,line[0].y-2,line[0].x+2,line[0].y+2);
-        if(stroke) SelectObject(dc,old);
-        // Small uneven ink marks evoke hand-drawn notebook charts without a graphics engine.
-        if(line.size()>1) {
-            const HPEN detail=graph_pen(ink,true);
-            if(detail) old=SelectObject(dc,detail);
-            Polyline(dc,line.data(),static_cast<int>(line.size()));
-            if(detail) SelectObject(dc,old);
+        if(!line.empty())plots.push_back({std::move(line),series_color(apps[i],i)});
+    }
+    // An opacity budget keeps tens of overlapping fills from obscuring the chart.
+    // One line: 31/255 (~12%). Many lines: each gets proportionally less alpha.
+    if(fill_enabled_ && !plots.empty()) {
+        const BYTE opacity=static_cast<BYTE>(std::min<std::size_t>(31,
+            std::max<std::size_t>(1,72/plots.size())));
+        for(const auto& plot:plots)fill_under(dc,plot.points,area.bottom,plot.color,opacity);
+    }
+    // Always paint every stroke after every fill: no series can hide another line.
+    for(const auto& plot:plots) {
+        const HPEN stroke=graph_pen(plot.color,false);
+        if(stroke)old=SelectObject(dc,stroke);
+        if(plot.points.size()>1)
+            Polyline(dc,plot.points.data(),static_cast<int>(plot.points.size()));
+        else Ellipse(dc,plot.points[0].x-2,plot.points[0].y-2,
+            plot.points[0].x+2,plot.points[0].y+2);
+        if(stroke)SelectObject(dc,old);
+        if(plot.points.size()>1) {
+            const HPEN detail=graph_pen(plot.color,true);
+            if(detail)old=SelectObject(dc,detail);
+            Polyline(dc,plot.points.data(),static_cast<int>(plot.points.size()));
+            if(detail)SelectObject(dc,old);
         }
     }
     RestoreDC(dc,clip);
@@ -980,43 +1006,80 @@ std::int64_t StatisticsPage::live_view_end() const {
     return last_live_timestamp_>0?last_live_timestamp_:now_ms();
 }
 bool StatisticsPage::advance_time_view(double elapsed_ms) {
-    const double blend=1.0-std::exp(-std::clamp(elapsed_ms,0.0,100.0)/330.0);
-    bool moving=false;
-    const auto step=[&](double& current,double desired) {
-        if(desired<=0.0)return;
-        if(current<=0.0)current=desired;
-        const double delta=desired-current;
-        if(std::abs(delta)<1.0)current=desired;
-        else {current+=blend*delta;moving=true;}
+    // Do not stop the viewport when it catches up with the latest collected sample:
+    // time must keep passing between samples, independent of the polling interval.
+    const bool live_page=active_ && selected_section_<5 &&
+        !frozen_views_[selected_section_].paused;
+    bool live_popup=false;
+    for(const auto& popup:popups_)if(popup.window && !popup.paused && popup.kind!=1) {
+        live_popup=true;break;
+    }
+    if(!live_page && !live_popup)return false;
+    const double current_wall_time=static_cast<double>(now_ms());
+    const double frame=std::clamp(elapsed_ms,1.0,100.0);
+    const auto advance=[&](double& cursor,double latest_sample) {
+        if(latest_sample<=0.0)return;
+        const double target=std::max(current_wall_time,latest_sample);
+        // A hidden tab or sleeping computer may have missed many frames.
+        if(cursor<=0.0 || !std::isfinite(cursor) || std::abs(target-cursor)>5000.0) {
+            cursor=target;return;
+        }
+        // Move forward every frame. Only adjust the phase gradually so a new
+        // sampler tick never teleports the fill, line or timestamp grid.
+        const double predicted=cursor+frame;
+        const double correction=std::clamp((target-predicted)*.12,-frame*.5,frame*1.5);
+        cursor=predicted+correction;
     };
-    if(!system_points_.empty())step(smooth_system_end_,static_cast<double>(system_points_.back().time));
-    if(last_live_timestamp_>0)step(smooth_live_end_,static_cast<double>(last_live_timestamp_));
-    return moving;
+    if(!system_points_.empty())
+        advance(smooth_system_end_,static_cast<double>(system_points_.back().time));
+    if(last_live_timestamp_>0)advance(smooth_live_end_,static_cast<double>(last_live_timestamp_));
+    return smooth_system_end_>0.0 || smooth_live_end_>0.0;
 }
-void StatisticsPage::fill_under(HDC dc,const std::vector<POINT>& line,LONG baseline,COLORREF color) {
-    if(!fill_enabled_ || line.size()<2)return;
-    // Visually equivalent to ~22%-opacity ink on the white chart paper; no alpha surface.
-    constexpr double strength=.22;
-    // RGB(250,250,250) is the chart paper. Using Get*Value on a
-    // constant COLORREF triggers MSVC C4310 via Windows narrowing macros.
-    constexpr BYTE paper_channel=250;
-    const auto channel=[&](BYTE foreground,BYTE background) {
-        return std::clamp(static_cast<int>(std::lround(strength*foreground+(1.0-strength)*background)),0,255);
-    };
-    const COLORREF tint=static_cast<COLORREF>(channel(GetRValue(color),paper_channel)) |
-        (static_cast<COLORREF>(channel(GetGValue(color),paper_channel)) << 8) |
-        (static_cast<COLORREF>(channel(GetBValue(color),paper_channel)) << 16);
-    const HBRUSH fill=CreateSolidBrush(tint);
-    if(!fill)return;
+void StatisticsPage::fill_under(HDC dc,const std::vector<POINT>& line,LONG baseline,
+    COLORREF color,BYTE opacity) {
+    if(!fill_enabled_ || line.size()<2 || opacity==0)return;
+    // Alpha-composite into the existing chart pixels instead of drawing an opaque
+    // pastel polygon. Other curves and grid remain visible through this fill.
+    RECT bounds{};
+    if(GetClipBox(dc,&bounds)==ERROR)return;
+    LONG minimum_x=line.front().x,maximum_x=line.front().x,minimum_y=baseline;
+    for(const auto& point:line) {
+        minimum_x=std::min(minimum_x,point.x);
+        maximum_x=std::max(maximum_x,point.x);
+        minimum_y=std::min(minimum_y,point.y);
+    }
+    const LONG left=std::max(minimum_x,bounds.left);
+    const LONG top=std::max(minimum_y,bounds.top);
+    const LONG right=std::min(maximum_x,bounds.right);
+    const LONG bottom=std::min(baseline,bounds.bottom);
+    if(left>=right || top>=bottom)return;
     std::vector<POINT> polygon;
     polygon.reserve(line.size()+2);
     polygon.push_back({line.front().x,baseline});
     polygon.insert(polygon.end(),line.begin(),line.end());
     polygon.push_back({line.back().x,baseline});
-    const auto old_brush=SelectObject(dc,fill);
-    const auto old_pen=SelectObject(dc,GetStockObject(NULL_PEN));
-    Polygon(dc,polygon.data(),static_cast<int>(polygon.size()));
-    SelectObject(dc,old_pen);SelectObject(dc,old_brush);DeleteObject(fill);
+    // ExtSelectClipRgn expects DEVICE coordinates, while the page uses an
+    // anisotropic map mode. Without this conversion, resized graphs clip badly.
+    if(!LPtoDP(dc,polygon.data(),static_cast<int>(polygon.size())))return;
+    const HRGN mask=CreatePolygonRgn(polygon.data(),static_cast<int>(polygon.size()),WINDING);
+    if(!mask)return;
+    const int state=SaveDC(dc);
+    if(state!=0) {
+        if(ExtSelectClipRgn(dc,mask,RGN_AND)!=ERROR) {
+            // PaintBuffer caches one 1x1 bitmap; no full-frame alpha surface and
+            // no repeated CreateCompatibleDC/CreateCompatibleBitmap per series.
+            HDC source=fill_color_buffer_.prepare(dc,1,1);
+            if(source && SetPixelV(source,0,0,color)) {
+                BLENDFUNCTION blend{};
+                blend.BlendOp=AC_SRC_OVER;
+                blend.SourceConstantAlpha=opacity;
+                blend.AlphaFormat=0; // Constant alpha; no premultiplied source pixels.
+                GdiAlphaBlend(dc,left,top,right-left,bottom-top,source,0,0,1,1,blend);
+            }
+        }
+        RestoreDC(dc,state);
+    }
+    DeleteObject(mask);
 }
 
 // FluxTop.SystemDashboard.Stage1: sidebar+in-page chart; old popouts remain available.
@@ -1083,24 +1146,25 @@ void StatisticsPage::draw_sidebar(HDC dc) {
                 HBRUSH brush=CreateSolidBrush(colors[section]);FillRect(dc,&bar,brush);DeleteObject(brush);
             }
         }
-        if(points.size()>1) {
+        // Both GPU mini-chart fills must be behind BOTH strokes.
+        if(points.size()>1 || (section==3 && second_gpu_line.size()>1)) {
             const int saved=SaveDC(dc);
             IntersectClipRect(dc,spark.left,spark.top,spark.right,spark.bottom);
-            fill_under(dc,points,spark.bottom,colors[section]);
-            HPEN line=graph_pen(colors[section],false);
-            const auto old=line?SelectObject(dc,line):nullptr;
-            Polyline(dc,points.data(),static_cast<int>(points.size()));
-            if(line)SelectObject(dc,old);
-            RestoreDC(dc,saved);
-        }
-        if(section==3 && second_gpu_line.size()>1) {
-            const int saved=SaveDC(dc);
-            IntersectClipRect(dc,spark.left,spark.top,spark.right,spark.bottom);
-            fill_under(dc,second_gpu_line,spark.bottom,RGB(194,89,178));
-            HPEN line=graph_pen(RGB(194,89,178),false);
-            const auto old=line?SelectObject(dc,line):nullptr;
-            Polyline(dc,second_gpu_line.data(),static_cast<int>(second_gpu_line.size()));
-            if(line)SelectObject(dc,old);
+            if(points.size()>1)fill_under(dc,points,spark.bottom,colors[section],26);
+            if(section==3 && second_gpu_line.size()>1)
+                fill_under(dc,second_gpu_line,spark.bottom,RGB(194,89,178),26);
+            if(points.size()>1) {
+                HPEN pen=graph_pen(colors[section],false);
+                const auto previous=pen?SelectObject(dc,pen):nullptr;
+                Polyline(dc,points.data(),static_cast<int>(points.size()));
+                if(pen)SelectObject(dc,previous);
+            }
+            if(section==3 && second_gpu_line.size()>1) {
+                HPEN pen=graph_pen(RGB(194,89,178),false);
+                const auto previous=pen?SelectObject(dc,pen):nullptr;
+                Polyline(dc,second_gpu_line.data(),static_cast<int>(second_gpu_line.size()));
+                if(pen)SelectObject(dc,previous);
+            }
             RestoreDC(dc,saved);
         }
     }
@@ -1156,10 +1220,7 @@ void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
         const int y=area.top+(area.bottom-area.top)*row/5;
         MoveToEx(dc,area.left,y,nullptr);LineTo(dc,area.right,y);
     }
-    for(int col=0;col<=10;++col){
-        const int x=area.left+(area.right-area.left)*col/10;
-        MoveToEx(dc,x,area.top,nullptr);LineTo(dc,x,area.bottom);
-    }
+    draw_time_grid(dc,area,from,to,10);
     if(grid)SelectObject(dc,old_grid);
     RestoreDC(dc,clip);
     const auto cap=stat_decimal(max_y)+(metric==2?L" Mbps":L"%");
@@ -1600,8 +1661,14 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
             axis_tick_=tick;
             const bool axis_animating=advance_axes(elapsed);
             const bool viewport_animating=advance_time_view(elapsed);
-            if(active_) InvalidateRect(hwnd_,nullptr,FALSE);
-            for(auto& popup:popups_) if(popup.window) InvalidateRect(popup.window,nullptr,FALSE);
+            const bool live_page=selected_section_<5 &&
+                !frozen_views_[selected_section_].paused;
+            if(active_ && (axis_animating ||
+                (live_page && (animating || viewport_animating))))
+                InvalidateRect(hwnd_,nullptr,FALSE);
+            for(auto& popup:popups_)if(popup.window && (axis_animating ||
+                (!popup.paused && popup.kind!=1 && (animating || viewport_animating))))
+                InvalidateRect(popup.window,nullptr,FALSE);
             if((!animating && !axis_animating && !viewport_animating) ||
                 (!active_ && !has_popup()))
                 KillTimer(hwnd_,animate_message);

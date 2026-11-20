@@ -99,8 +99,16 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "std::array<std::optional<double>,5> values", "fill_enabled_", "smooth_system_end_",
             "frozen_views_", "toggle_section_pause()", "pause_toggle_"});
         need(page,{"FluxTop.SystemDashboard.VisualRefinement.v1", "draw_system_hover(dc,rect)",
-            "fill_under(dc,line,area.bottom,ink)", "point.values[4]", "advance_time_view(elapsed)",
+            "GdiAlphaBlend(dc,left,top,right-left,bottom-top", "point.values[4]", "advance_time_view(elapsed)",
+            "LPtoDP(dc,polygon.data()", "ExtSelectClipRgn(dc,mask,RGN_AND)",
+            "for(const auto& plot:plots)fill_under(", "for(const auto& plot:plots) {",
             "stats_chart_fill"});
+        need(page,{"void draw_time_grid(HDC dc,const RECT& area,",
+            "draw_time_grid(dc,area,from,to,8);",
+            "draw_time_grid(dc,area,from,to,10);",
+            "const bool live_page=active_ && selected_section_<5",
+            "const double current_wall_time=static_cast<double>(now_ms());",
+            "const bool viewport_animating=advance_time_view(elapsed);"});
         need(popup,{"popup->fill_toggle", "popup_auto_id+1", "show_system_hover(popup->kind-2"});
         need(page,{"FluxTop.SystemDashboard.Stage1","system_points_.push_back(point)",
             "stats_selected_section","case WM_LBUTTONUP:","system_popout_id"});
