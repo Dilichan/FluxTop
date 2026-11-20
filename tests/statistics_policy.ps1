@@ -20,7 +20,7 @@ $checks=[ordered]@{
  'System application toggle' = ($reader.Contains('statistics_is_system(') -and $page.Contains('stats_show_system'))
  'System toggle isolated from both charts' = ($page.Contains('request(true);return 0;') -and $page.Contains('history_.uptime=std::move(item->second.uptime);') -and $reader.Contains('if(uptime_only || stop.stop_requested())return out;'))
  'Custom date bounds' = $page.Contains('DTM_SETRANGE')
- 'FPS and overlay untouched' = $overlay.Contains('statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,10U)')
+ 'Live statistics inherits saved overlay Top' = $overlay.Contains('statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,options_.top)')
  'Shared overlay/live Top' = ($page.Contains('stats_limit_id') -and $overlay.Contains('statistics_->set_limit(options_.top)') -and $page.Contains('PostMessageW(GetParent(hwnd_),WM_APP+215'))
  'Independent history and uptime Top' = ($page.Contains('stats_history_top') -and $page.Contains('stats_uptime_top') -and $reader.Contains('history_limit=std::clamp') -and $reader.Contains('uptime_limit=std::clamp'))
 }

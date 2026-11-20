@@ -498,12 +498,22 @@ void Overlay::init_client() {
     control(L"STATIC", L"", 0, stats_control, 22, 599, 536, 104);
     control(L"STATIC", L"Ctrl+Alt+F9 — клиент   ·   Ctrl+Alt+F10 — оверлей", 0, 0, 22, 711, 540, 24);
     control(L"BUTTON", L"Завершить работу", WS_TABSTOP, quit_app, 373, 743, 185, 32);
-    statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,10U);
+    statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,options_.top);
     statistics_->activate(false);
     initializing_client_ = false; client_stats();
 }
 void Overlay::switch_page(unsigned page) {
     diagnostics::write(diagnostics::Level::info,"ui.page","tab="+std::to_string(page));
+    if(page==1 && client_page_!=1) {
+        // A quick tab switch can precede the delayed Settings trackbar commit.
+        const auto pending_top=SendDlgItemMessageW(client_,top_control,TBM_GETPOS,0,0);
+        if(pending_top>=1 && pending_top<=100 &&
+            static_cast<unsigned>(pending_top)!=options_.top) {
+            KillTimer(client_,settings_timer);
+            apply_client();
+        }
+        if(statistics_) statistics_->set_limit(options_.top);
+    }
     client_page_=page==1?1:0;
     for(const auto& child:controls_) ShowWindow(child.window,client_page_==0?SW_SHOW:SW_HIDE);
     // Statistics gets a readable workspace; Settings retains its compact dimensions.
