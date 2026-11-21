@@ -1,5 +1,6 @@
 #include "fluxtop/diagnostics.hpp"
 #include "fluxtop/statistics_page.hpp"
+#include "fluxtop/history_identity.hpp"
 #include "fluxtop/statistics_axis.hpp"
 #include "fluxtop/statistics_sidebar_order.hpp"
 #include "fluxtop/windows.hpp"
@@ -794,6 +795,7 @@ void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Pro
         StatisticsApplication identity;
         identity.name=stat_wide(p.name);
         identity.path=p.exe_path?stat_wide(*p.exe_path):L"";
+        identity.identity=stat_wide(history_identity(p));
         if(statistics_is_system(identity.name,identity.path)) continue;
         CurrentReadings values;
         values.cpu=stat_percent(p.cpu_percent);
@@ -802,7 +804,8 @@ void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Pro
         values.vram=stat_memory(p.dedicated_gpu_bytes);
         values.network=stat_network(p.rx_bytes_per_second,p.tx_bytes_per_second);
         current_readings_.emplace(color_key(identity),std::move(values));
-        sorted.push_back({&p,auto_rank(p,31U).score});
+        if(history_score_available(p))
+            sorted.push_back({&p,auto_rank(p,31U).score});
     }
     // The bubble keeps showing up-to-date readings even when the cursor rests
     // on the same sample. One invalidation per real snapshot, not per animation.
@@ -813,7 +816,8 @@ void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Pro
     // Keep up to 100 live series so increasing stats_top does not need a new collection.
     for(std::size_t i=0;i<std::min<std::size_t>(sorted.size(),100U);++i) {
         const auto* p=sorted[i].process;
-        live_.push_back({timestamp_ms,stat_wide(p->name),p->exe_path?stat_wide(*p->exe_path):L"",sorted[i].score});
+        live_.push_back({timestamp_ms,stat_wide(p->name),p->exe_path?stat_wide(*p->exe_path):L"",
+            stat_wide(history_identity(*p)),sorted[i].score});
     }
     while(!live_.empty() && live_.front().time<timestamp_ms-60000) live_.pop_front();
     // Bounds a burst of very short sampling intervals or an unexpected clock rollback.
@@ -864,7 +868,8 @@ double StatisticsPage::icon_hue(const std::wstring& key,const std::wstring& path
     return hue;
 }
 std::wstring StatisticsPage::color_key(const StatisticsApplication& app) {
-    return app.path.empty()?L"name:"+app.name:L"path:"+app.path;
+    return !app.identity.empty()?app.identity:
+        (app.path.empty()?L"name:"+app.name:L"path:"+app.path);
 }
 void StatisticsPage::prepare_colors(const std::vector<StatisticsApplication>& minute) {
     // Assign the SAME colour to an executable in both live and history charts.
@@ -1076,10 +1081,10 @@ void StatisticsPage::rebuild_live_series() {
     // Merge the last minute read from SQLite with fresh in-memory samples.
     for(const auto& event:live_) {
         if(event.time<now-60000) continue;
-        const auto identity=event.path.empty()?L"name:"+event.name:L"path:"+event.path;
+        const auto& identity=event.identity;
         auto found=positions.find(identity);
         if(found==positions.end()) {
-            StatisticsApplication app;app.name=event.name;app.path=event.path;
+            StatisticsApplication app;app.name=event.name;app.path=event.path;app.identity=identity;
             minute.push_back(std::move(app));
             found=positions.emplace(identity,minute.size()-1).first;
         }

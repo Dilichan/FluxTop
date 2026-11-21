@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <sstream>
+#include <algorithm>
 
 namespace {
 void require(bool condition,const char* message) {if(!condition)throw std::runtime_error(message);}
@@ -38,18 +39,48 @@ std::string capture(const std::filesystem::path& program,const std::filesystem::
     CloseHandle(error_stream);
     if(!created){CloseHandle(reader);throw std::runtime_error("Unable to start collector: "+std::to_string(launch_error));}
     std::string output;char buffer[4096];DWORD count{};
-    while(ReadFile(reader,buffer,static_cast<DWORD>(sizeof(buffer)),&count,nullptr)&&count>0) {
-        output.append(buffer,count);
-        if(output.size()>1024*1024){TerminateProcess(proc.hProcess,1);break;}
+    const auto deadline=GetTickCount64()+30000ULL;
+    DWORD waited=WAIT_TIMEOUT;
+    bool overflow=false,pipe_error=false;
+    // Poll pipe availability: blocking ReadFile must not bypass the child deadline.
+    while(GetTickCount64()<deadline) {
+        DWORD available=0;
+        if(!PeekNamedPipe(reader,nullptr,0,nullptr,&available,nullptr)) {
+            const auto err=GetLastError();
+            if(err!=ERROR_BROKEN_PIPE)pipe_error=true;
+            else {
+                const auto now=GetTickCount64();
+                waited=WaitForSingleObject(proc.hProcess,
+                    now<deadline?static_cast<DWORD>(deadline-now):0);
+            }
+            break;
+        }
+        if(available) {
+            const DWORD to_read=std::min<DWORD>(available,static_cast<DWORD>(sizeof(buffer)));
+            if(!ReadFile(reader,buffer,to_read,&count,nullptr)) {pipe_error=true;break;}
+            output.append(buffer,count);
+            if(output.size()>1024*1024) {overflow=true;break;}
+            continue;
+        }
+        waited=WaitForSingleObject(proc.hProcess,10);
+        if(waited==WAIT_FAILED) {pipe_error=true;break;}
+        // Drain any bytes remaining in the pipe after process exit.
+        if(waited==WAIT_OBJECT_0) {
+            DWORD remaining=0;
+            if(!PeekNamedPipe(reader,nullptr,0,nullptr,&remaining,nullptr)||remaining==0)break;
+        }
+    }
+    if(waited!=WAIT_OBJECT_0 || overflow || pipe_error) {
+        TerminateProcess(proc.hProcess,1);
+        WaitForSingleObject(proc.hProcess,5000);
     }
     CloseHandle(reader);
-    const auto waited=WaitForSingleObject(proc.hProcess,30000);
-    if(waited!=WAIT_OBJECT_0)TerminateProcess(proc.hProcess,1);
     DWORD status{};GetExitCodeProcess(proc.hProcess,&status);
     CloseHandle(proc.hThread);CloseHandle(proc.hProcess);
-    if(waited!=WAIT_OBJECT_0 || status!=0) {
+    if(waited!=WAIT_OBJECT_0 || status!=0 || overflow || pipe_error) {
         std::ostringstream problem;
-        problem<<"Collector failed: wait="<<waited<<" exit_code=0x"<<std::hex
+        problem<<"Collector failed: timeout_or_wait="<<waited<<" overflow="<<overflow
+            <<" pipe_error="<<pipe_error<<" exit_code=0x"<<std::hex
             <<status<<std::dec<<" ("<<status<<")";
         std::ifstream error(error_path,std::ios::binary);
         if(error) {

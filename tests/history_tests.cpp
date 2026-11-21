@@ -1,5 +1,6 @@
 #include "fluxtop/history.hpp"
 #include "fluxtop/history_math.hpp"
+#include "fluxtop/history_identity.hpp"
 #include <winsqlite/winsqlite3.h>
 #include <chrono>
 #include <cmath>
@@ -80,6 +81,34 @@ int main(int argc,char** argv){
             Database db(path);
             check(db.integer("SELECT SUM(uptime_ms) FROM history_rollups")==6000,"resume after downtime");
             check(db.integer("SELECT COUNT(*) FROM history_rollups WHERE level=2")>0,"daily data still available");
+        }
+        // Regression: two independent unresolvable images cannot share uptime.
+        // Unknown scores must not contribute durations or fabricated zeroes.
+        const auto regression=root/L"identity-v36.db";
+        {
+            HistoryWriter writer(regression);
+            Snapshot snap;
+            snap.timestamp_ms=base+8*history_day_ms+1000;
+            snap.interval_ms=1000;
+            Process a,b;
+            a.pid=301;a.creation_time=30101;a.name="Same.exe";
+            b.pid=302;b.creation_time=30202;b.name="Same.exe";
+            check(history_identity(a)!=history_identity(b),"independent process identity");
+            check(!history_score_available(a),"unknown measurement");
+            a.cpu_percent=0.0;
+            check(history_score_available(a),"measured zero is present");
+            snap.processes={a,b};
+            writer.append(snap);
+            check(snap.history_error.empty(),"regression writer error");
+        }
+        {
+            Database db(regression);
+            check(db.integer("SELECT COUNT(*) FROM applications")==2,"same-name processes must stay separate");
+            check(db.integer("SELECT SUM(uptime_ms) FROM history_rollups")==2000,"independent uptime");
+            check(db.integer("SELECT SUM(score_duration_ms) FROM history_rollups")==1000,
+                "unknown score must not count as measured zero");
+            check(db.integer("SELECT COUNT(*) FROM history_rollups WHERE score_duration_ms=0")==1,
+                "unknown process has no score duration");
         }
         std::filesystem::remove_all(root);
         std::cout<<"Constant-space weighted aggregation, minute/hour/day conveyor, restart, gaps and WAL fixture passed\n";

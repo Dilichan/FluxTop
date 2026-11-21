@@ -70,19 +70,23 @@ std::int64_t search_from(std::int64_t from){return from-history_day_ms;}
 std::vector<StatisticsApplication> top_apps(sqlite3* db,std::int64_t from,std::int64_t to,
     unsigned limit,bool include_system,bool by_score,std::stop_token stop){
     constexpr char score_sql[]=
-        "SELECT a.id,a.name,a.exe_path,"
+        "SELECT a.id,a.name,a.exe_path,a.identity,"
         "SUM(r.score_integral)/NULLIF(SUM(r.score_duration_ms),0),MAX(r.last_seen_ms) "
         "FROM history_rollups r JOIN applications a ON a.id=r.application_id "
         "WHERE r.bucket_ms>=?1 AND r.bucket_ms<?2 "
         "AND r.bucket_ms+(CASE r.level WHEN 0 THEN 60000 WHEN 1 THEN 3600000 ELSE 86400000 END)>?3 "
         "GROUP BY a.id ORDER BY SUM(r.score_integral)/NULLIF(SUM(r.score_duration_ms),0) DESC LIMIT ?4";
     constexpr char uptime_sql[]=
-        "SELECT a.id,a.name,a.exe_path,SUM(r.uptime_ms)/1000.0,MAX(r.last_seen_ms) "
+        "SELECT a.id,a.name,a.exe_path,a.identity,SUM(r.uptime_ms)/1000.0,MAX(r.last_seen_ms) "
         "FROM history_rollups r JOIN applications a ON a.id=r.application_id "
         "WHERE r.bucket_ms>=?1 AND r.bucket_ms<?2 "
         "AND r.bucket_ms+(CASE r.level WHEN 0 THEN 60000 WHEN 1 THEN 3600000 ELSE 86400000 END)>?3 "
         "GROUP BY a.id ORDER BY SUM(r.uptime_ms) DESC LIMIT ?4";
     Query q(db,by_score?score_sql:uptime_sql);
+    // Both SQL variants must expose id, name, path, identity, metric, last_seen.
+    // Never interpret a timestamp as an uptime or score if projections diverge.
+    if(sqlite3_column_count(q.s)!=6)
+        throw std::runtime_error("Unexpected statistics application query layout");
     q.number(1,search_from(from));q.number(2,to);q.number(3,from);
     q.number(4,std::max<unsigned>(200U,std::min<unsigned>(2000U,limit*8U)));
     std::vector<StatisticsApplication> result;
@@ -91,8 +95,9 @@ std::vector<StatisticsApplication> top_apps(sqlite3* db,std::int64_t from,std::i
         row.id=sqlite3_column_int64(q.s,0);
         row.name=utf16(sqlite3_column_text(q.s,1));
         row.path=utf16(sqlite3_column_text(q.s,2));
-        row.observed_seconds=sqlite3_column_double(q.s,3);
-        row.last_seen_ms=sqlite3_column_int64(q.s,4);
+        row.identity=utf16(sqlite3_column_text(q.s,3));
+        row.observed_seconds=sqlite3_column_double(q.s,4);
+        row.last_seen_ms=sqlite3_column_int64(q.s,5);
         if(!include_system && statistics_is_system(row.name,row.path))continue;
         result.push_back(std::move(row));
         if(result.size()>=limit)break;

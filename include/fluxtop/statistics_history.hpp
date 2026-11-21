@@ -15,6 +15,7 @@ struct StatisticsApplication {
     std::int64_t id{};
     std::wstring name;
     std::wstring path;
+    std::wstring identity; // Exact persisted identity, including lifetime fallback.
     double observed_seconds{};
     std::int64_t last_seen_ms{};
     std::vector<std::pair<std::int64_t,double>> points;

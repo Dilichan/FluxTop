@@ -46,6 +46,8 @@ int main(int argc,char** argv){
         require(history.error.empty(),"reader returned error");
         require(history.scores_available,"historical scores available");
         require(history.uptime.size()==1,"system filter or app dedup failed");
+        require(history.uptime[0].identity==L"path:C:\\Games\\UserGame.exe",
+            "uptime query must return application identity, not metric as identity");
         require(std::abs(history.uptime[0].observed_seconds-5.0)<0.0001,"one uptime per application, not per PID");
         require(history.history.size()==1 && !history.history[0].points.empty(),"historical graph survives compaction");
         for(const auto& [at,score]:history.history[0].points)

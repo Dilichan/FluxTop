@@ -202,7 +202,7 @@ private:
     ULONGLONG animation_started_{};
     unsigned animation_duration_ms_{1000};
     std::int64_t last_live_timestamp_{};
-    struct LiveEvent { std::int64_t time{}; std::wstring name,path; double score{}; };
+    struct LiveEvent { std::int64_t time{}; std::wstring name,path,identity; double score{}; };
     struct Query {
         std::int64_t from{},to{},uptime_from{},uptime_to{};
         unsigned limit{},history_limit{},uptime_limit{};

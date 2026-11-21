@@ -2,6 +2,7 @@
 
 #include "fluxtop/diagnostics.hpp"
 #include "fluxtop/history_math.hpp"
+#include "fluxtop/history_identity.hpp"
 #include <winsqlite/winsqlite3.h>
 #include <algorithm>
 #include <array>
@@ -126,7 +127,8 @@ struct Observation {
 };
 std::array<std::optional<double>,history_metric_count> metrics_of(const Process& group){
     std::array<std::optional<double>,history_metric_count> v{};
-    v[0]=auto_rank(group,63U).score; // Physical-disk score appears only with trustworthy ETW data.
+    if(history_score_available(group))
+        v[0]=auto_rank(group,63U).score; // Unknown is NULL, not a measured zero.
     v[1]=group.cpu_percent;
     if(group.working_set) v[2]=static_cast<double>(*group.working_set);
     v[3]=group.gpu_percent;
@@ -377,7 +379,7 @@ struct HistoryWriter::Impl {
         std::vector<Observation> observations;observations.reserve(groups.size());
         for(const auto& group:groups){
             Observation o;
-            o.identity=group.exe_path?"path:"+*group.exe_path:"name:"+group.name;
+            o.identity=history_identity(group);
             o.name=group.name;o.path=group.exe_path.value_or("");
             o.metrics=metrics_of(group);
             observations.push_back(std::move(o));
