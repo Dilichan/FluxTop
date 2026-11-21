@@ -356,20 +356,32 @@ void unknown_group_metric_tests() {
     check(partial.size()==1U, "partial metrics keep their application group");
     if(partial.size()!=1U)return;
     const auto& group=partial[0];
-    check(!group.working_set && !group.private_bytes && !group.gpu_percent
-        && !group.dedicated_gpu_bytes && !group.rx_bytes_per_second
-        && !group.io_bytes_per_second,
-        "unknown member makes only its exact aggregate metrics unknown");
     check(group.cpu_percent && *group.cpu_percent==15.0
-        && group.tx_bytes_per_second && *group.tx_bytes_per_second==260.0,
-        "available CPU and Tx remain visible when other metrics are unknown");
-    check(group.confirmed_gpu_percent && *group.confirmed_gpu_percent==21.0
-        && group.confirmed_dedicated_gpu_bytes && *group.confirmed_dedicated_gpu_bytes==60U,
-        "partial GPU uses highest confirmed PID load and GPU RAM sums confirmed bytes");
+        && group.working_set && *group.working_set==120U
+        && group.private_bytes && *group.private_bytes==80U
+        && group.gpu_percent && *group.gpu_percent==21.0
+        && group.dedicated_gpu_bytes && *group.dedicated_gpu_bytes==60U
+        && group.rx_bytes_per_second && *group.rx_bytes_per_second==140.0
+        && group.tx_bytes_per_second && *group.tx_bytes_per_second==260.0
+        && group.io_bytes_per_second && *group.io_bytes_per_second==340.0,
+        "all metrics retain confirmed sibling contributions if one PID is unknown");
+    check(fluxtop::auto_metric_load_percent(group,fluxtop::AutoMetric::cpu,8192U,8192U)
+        && fluxtop::auto_metric_load_percent(group,fluxtop::AutoMetric::ram,8192U,8192U)
+        && fluxtop::auto_metric_load_percent(group,fluxtop::AutoMetric::gpu,8192U,8192U)
+        && fluxtop::auto_metric_load_percent(group,fluxtop::AutoMetric::vram,8192U,8192U),
+        "existing overlay color bands receive partial-group measurements");
     auto partial_sorted=partial;
     fluxtop::Process lower;
-    lower.pid=9600;lower.gpu_percent=3.0;lower.dedicated_gpu_bytes=5;
+    lower.pid=9600;lower.cpu_percent=1.0;lower.working_set=10;
+    lower.rx_bytes_per_second=1.0;lower.tx_bytes_per_second=1.0;
+    lower.gpu_percent=3.0;lower.dedicated_gpu_bytes=5;
     partial_sorted.push_back(lower);
+    for(const auto mode:{fluxtop::Sort::cpu,fluxtop::Sort::ram,
+        fluxtop::Sort::rx,fluxtop::Sort::tx,fluxtop::Sort::network}) {
+        fluxtop::sort_processes(partial_sorted,mode);
+        check(partial_sorted.front().pid==group.pid,
+            "existing CPU/RAM/network sorts retain partial measured groups");
+    }
     fluxtop::sort_processes(partial_sorted,fluxtop::Sort::gpu);
     check(partial_sorted.front().pid==group.pid,
         "partial GPU measurement remains visible in GPU sort");
@@ -379,9 +391,9 @@ void unknown_group_metric_tests() {
     fluxtop::SpikeTracker tracker;
     auto scores=partial;
     tracker.update(scores,std::uint64_t{8192},std::uint64_t{8192});
-    check(scores[0].auto_scores[1]==0.0 && scores[0].auto_scores[3]==0.0
-        && scores[0].auto_scores[4]==0.0,
-        "unknown aggregate metrics do not enter AutoScore");
+    check(scores[0].auto_scores[1]>0.0 && scores[0].auto_scores[2]>0.0
+        && scores[0].auto_scores[3]>0.0 && scores[0].auto_scores[4]>0.0,
+        "AutoScore retains measured RAM, GPU, VRAM, and Rx in partial groups");
     b.working_set=0; b.private_bytes=0; b.gpu_percent=0.0;
     b.dedicated_gpu_bytes=0; b.rx_bytes_per_second=0.0;
     b.io_bytes_per_second=0.0;
@@ -390,16 +402,16 @@ void unknown_group_metric_tests() {
         && zero[0].dedicated_gpu_bytes && *zero[0].dedicated_gpu_bytes==60U
         && zero[0].rx_bytes_per_second && *zero[0].rx_bytes_per_second==140.0,
         "measured zero is valid and is not confused with unknown");
-    check(zero.size()==1U && zero[0].confirmed_gpu_percent
-        && *zero[0].confirmed_gpu_percent==21.0
-        && zero[0].confirmed_dedicated_gpu_bytes && *zero[0].confirmed_dedicated_gpu_bytes==60U,
-        "complete groups retain exact readings as confirmed values");
     a.gpu_percent.reset(); a.dedicated_gpu_bytes.reset();
     b.gpu_percent.reset(); b.dedicated_gpu_bytes.reset();
     const auto entirely_unknown=fluxtop::aggregate_application_processes({a,b});
-    check(entirely_unknown.size()==1U && !entirely_unknown[0].confirmed_gpu_percent
-        && !entirely_unknown[0].confirmed_dedicated_gpu_bytes,
+    check(entirely_unknown.size()==1U && !entirely_unknown[0].gpu_percent
+        && !entirely_unknown[0].dedicated_gpu_bytes,
         "no measured GPU or VRAM remains unknown, not fabricated zero");
+    a.working_set.reset(); b.working_set.reset();
+    const auto missing_ram=fluxtop::aggregate_application_processes({a,b});
+    check(missing_ram.size()==1U && !missing_ram[0].working_set,
+        "all missing RAM stays unknown and renders as a dash");
 }
 void gpu_process_memory_tests() {
     using fluxtop::gpu_process_memory_consistent;

@@ -265,14 +265,9 @@ std::vector<Process> aggregate_application_processes(const std::vector<Process>&
     lineage_groups.reserve(rows.size());
     std::vector<Process> result;
     result.reserve(rows.size());
-    // Exact grouped values require every constituent process to have a valid
-    // reading. An absent sample is not 0; unknown must propagate per metric.
-    struct GroupCompleteness {
-        bool cpu=true, ram=true, private_memory=true, gpu=true, vram=true;
-        bool rx=true, tx=true, generic_io=true;
-    };
-    std::vector<GroupCompleteness> completeness;
-    completeness.reserve(rows.size());
+    // Sum only successful per-PID measurements. A missing child contributes
+    // nothing, but does not invalidate independently verified sibling data.
+    // The optional stays empty (displayed as a dash) if NO PID was measured.
     for (std::size_t i=0;i<rows.size();++i) {
         const Process& root=rows[roots[i]];
         const auto& image=rows[i].exe_path ? rows[i].exe_path : root.exe_path;
@@ -296,19 +291,9 @@ std::vector<Process> aggregate_application_processes(const std::vector<Process>&
             combined.spike_score=0; combined.auto_scores.fill(0); combined.burst_scores.fill(0);
             combined.member_pids.clear();
             result.push_back(std::move(combined));
-            completeness.emplace_back();
         }
         auto& combined=result[group_index];
         const auto& part=rows[i];
-        auto& known=completeness[group_index];
-        known.cpu = known.cpu && part.cpu_percent && std::isfinite(*part.cpu_percent) && *part.cpu_percent >= 0.0;
-        known.ram = known.ram && part.working_set.has_value();
-        known.private_memory = known.private_memory && part.private_bytes.has_value();
-        known.gpu = known.gpu && part.gpu_percent && std::isfinite(*part.gpu_percent) && *part.gpu_percent >= 0.0;
-        known.vram = known.vram && part.dedicated_gpu_bytes.has_value();
-        known.rx = known.rx && part.rx_bytes_per_second && std::isfinite(*part.rx_bytes_per_second) && *part.rx_bytes_per_second >= 0.0;
-        known.tx = known.tx && part.tx_bytes_per_second && std::isfinite(*part.tx_bytes_per_second) && *part.tx_bytes_per_second >= 0.0;
-        known.generic_io = known.generic_io && part.io_bytes_per_second && std::isfinite(*part.io_bytes_per_second) && *part.io_bytes_per_second >= 0.0;
         combined.member_pids.push_back(part.pid);
         add_positive(combined.cpu_percent,part.cpu_percent);
         add_bytes(combined.working_set,part.working_set);
@@ -325,22 +310,9 @@ std::vector<Process> aggregate_application_processes(const std::vector<Process>&
             add_positive(combined.disk_volume_pressure_percent[v],part.disk_volume_pressure_percent[v]);
         }
     }
-    for (std::size_t i=0;i<result.size();++i) {
-        auto& group=result[i];
-        const auto& known=completeness[i];
-        // Preserve verified sub-process readings for the application's UI even
-        // when an exact group-wide reading is unavailable. AutoScore/history
-        // continue to use exact group fields, which are nulled below.
-        group.confirmed_gpu_percent=group.gpu_percent;
-        group.confirmed_dedicated_gpu_bytes=group.dedicated_gpu_bytes;
-        if(!known.cpu)group.cpu_percent.reset();
-        if(!known.ram)group.working_set.reset();
-        if(!known.private_memory)group.private_bytes.reset();
-        if(!known.gpu)group.gpu_percent.reset();
-        if(!known.vram)group.dedicated_gpu_bytes.reset();
-        if(!known.rx)group.rx_bytes_per_second.reset();
-        if(!known.tx)group.tx_bytes_per_second.reset();
-        if(!known.generic_io)group.io_bytes_per_second.reset();
+    for (auto& group : result) {
+        // These are observed-subset figures, NOT estimates of inaccessible PIDs.
+        // Reuse the original fields throughout ranking, colors and history.
         // Physical ETW disk values are a verified LOWER BOUND, explicitly
         // marked by the overlay as >= when global attribution is partial.
         // Do not suppress positive verified disk transfers from other members.
@@ -359,11 +331,8 @@ bool process_before(const Process& a,const Process& b,Sort sort,unsigned visible
         switch (sort) {
         case Sort::cpu: return row.cpu_percent;
         case Sort::ram: return row.working_set ? std::optional<double>(static_cast<double>(*row.working_set)) : std::nullopt;
-        case Sort::gpu: return row.gpu_percent ? row.gpu_percent : row.confirmed_gpu_percent;
-        case Sort::vram: {
-            const auto bytes=row.dedicated_gpu_bytes ? row.dedicated_gpu_bytes : row.confirmed_dedicated_gpu_bytes;
-            return bytes ? std::optional<double>(static_cast<double>(*bytes)) : std::nullopt;
-        }
+        case Sort::gpu: return row.gpu_percent;
+        case Sort::vram: return row.dedicated_gpu_bytes ? std::optional<double>(static_cast<double>(*row.dedicated_gpu_bytes)) : std::nullopt;
         case Sort::automatic: return auto_rank(row, visible_metrics).score;
         case Sort::rx: return row.rx_bytes_per_second;
         case Sort::tx: return row.tx_bytes_per_second;

@@ -741,16 +741,11 @@ void Overlay::receive() {
             " history_error="+snapshot_->history_error);
         // Keep process-level history untouched. Aggregate only the displayed family rows.
         grouped_processes_=aggregate_application_processes(snapshot_->processes);
-        for(auto& group:grouped_processes_) {
-            // Apply the same adapter sanity check to the confirmed subset.
-            // Never display an impossible partial VRAM sum.
-            if(group.confirmed_dedicated_gpu_bytes && !gpu_process_memory_consistent(
-                *group.confirmed_dedicated_gpu_bytes,snapshot_->total_gpu_memory,
-                snapshot_->total_gpu_memory_capacity)) {
+        for(auto& group:grouped_processes_)
+            if(group.dedicated_gpu_bytes && !gpu_process_memory_consistent(
+                *group.dedicated_gpu_bytes,snapshot_->total_gpu_memory,
+                snapshot_->total_gpu_memory_capacity))
                 group.dedicated_gpu_bytes.reset();
-                group.confirmed_dedicated_gpu_bytes.reset();
-            }
-        }
         grouped_spikes_.update(grouped_processes_,snapshot_->total_ram_capacity,
             snapshot_->total_gpu_memory_capacity);
         if(statistics_) statistics_->on_snapshot(snapshot_->timestamp_ms,grouped_processes_,options_.interval_ms,*snapshot_);
@@ -833,13 +828,10 @@ void Overlay::update_view() {
                 s.total_ram_capacity,s.total_gpu_memory_capacity);
         // No blink/flash effects in the overlay. AutoScore still uses burst data for ranking.
         std::array<bool,6> bursts{};
-        // Display only confirmed GPU readings. Partial groups show the known
-        // numeric result (no ">=" prefix); a group with no sample shows "-".
-        // Exact group fields stay unknown for AutoScore and history.
-        const auto display_gpu=p.gpu_percent ? p.gpu_percent : p.confirmed_gpu_percent;
-        const auto display_vram=p.dedicated_gpu_bytes ? p.dedicated_gpu_bytes : p.confirmed_dedicated_gpu_bytes;
+        // All display values use the same verified-subset fields as the
+        // existing load colors, AutoScore, live statistics and history.
         next.push_back({p.pid,p.creation_time,std::move(name),percent(p.cpu_percent),
-            memory(p.working_set),percent(display_gpu),memory(display_vram),
+            memory(p.working_set),percent(p.gpu_percent),memory(p.dedicated_gpu_bytes),
             network_rate(p.rx_bytes_per_second,p.tx_bytes_per_second),
             p.disk_read_bytes_per_second,p.disk_write_bytes_per_second,
             p.disk_volume_bytes_per_second,loads,bursts});
