@@ -36,8 +36,8 @@ struct Process : RawProcess {
     std::optional<std::uint64_t> dedicated_gpu_bytes;
     bool has_baseline{};
     double spike_score{};
-    std::array<double,7> auto_scores{}; // CPU, RAM, GPU, GPU RAM, Rx, Tx, process I/O
-    std::array<double,7> burst_scores{}; // Immediate growth, separate from sustained load
+    std::array<double,7> auto_scores{}; // First six: CPU, RAM, GPU, VRAM, Rx, Tx; last slot reserved, not scored.
+    std::array<double,7> burst_scores{}; // First six: attributable resource bursts; last slot reserved.
     std::optional<double> io_bytes_per_second; // Total process I/O (disk/device/network); never assigned to a drive.
     std::optional<double> rx_bytes_per_second, tx_bytes_per_second;
     std::vector<std::uint32_t> member_pids; // Only populated in UI-level aggregate, never raw history.

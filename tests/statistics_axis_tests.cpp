@@ -28,6 +28,11 @@ int main(){
             "Single in-view point must scale");
         check(fluxtop::statistics_auto_vertical_zoom(series,21000,19000)==1.0,
             "Invalid viewport must be safe");
+        series[0].points={{0,0.4},{10000,0.4},{20000,90.0}};
+        const double quiet_period=fluxtop::statistics_auto_vertical_zoom(series,0,10000);
+        const double busy_period=fluxtop::statistics_auto_vertical_zoom(series,10000,20000);
+        check(quiet_period>busy_period && quiet_period>1.0 && busy_period==1.0,
+            "History autoscale must use the selected period, not stale earlier peaks");
         // The left edge never moves; the latest sample is painted offscreen.
         const double left=42.0,right=842.0,guard=18.0;
         const auto project=[&](double x){

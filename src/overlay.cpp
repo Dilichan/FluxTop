@@ -163,7 +163,7 @@ private:
     bool has_enabled_disks() const { return !enabled_disk_letters().empty(); }
     bool summary_only() const { return summary_ || (!metrics_ && !has_enabled_disks()); }
     unsigned active_metrics() const { return metrics_ ? metrics_ : (has_enabled_disks()?0U:all_metrics); }
-    unsigned ranking_metrics() const { return active_metrics() | (has_enabled_disks()?32U:0U); }
+    unsigned ranking_metrics() const { return active_metrics(); } // Disk columns are system-wide, not per-process AutoScore inputs.
     float table_width() const {
         const auto base=calculate_overlay_columns(text_size(),active_metrics(),summary_only(),show_icons_).total_width;
         const auto n=enabled_disk_letters().size();

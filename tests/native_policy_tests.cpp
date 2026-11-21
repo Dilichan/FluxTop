@@ -170,6 +170,11 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         need(popup,{"popup.kind>=2","draw_system_graph(dc,graph,popup.kind>=6?popup.kind-1:popup.kind-2",
             "popup_auto_scale_keys"});
         need(page,{"popup_auto_scale_keys","stats_popup_auto_cpu"});
+        need(page,{"void StatisticsPage::refresh_auto_axis(unsigned index,bool immediate)",
+            "refresh_auto_axis(0,false);","refresh_auto_axis(1,false);",
+            "refresh_auto_axis(index,true);","if(history_axis_refit_pending_) {",
+            "if(first_history_data)history_axis_refit_pending_=true;",
+            "held.zoom=auto_scale_[index]?","history_axis_refit_pending_=true;"});
         need(page,{"popout_live_id","popout_history_id","rebuild_live_series()",
             "animation_duration_ms_","GetTickCount64()-animation_started_","IntersectClipRect",
             "stats_limit_id","stats_history_top","stats_uptime_top","animate_message",

@@ -82,6 +82,7 @@ private:
     void select_section(unsigned section);
     unsigned selected_popup_kind() const;
     bool has_popup() const;
+    void refresh_auto_axis(unsigned index,bool immediate);
     void rebuild_live_series();
     void draw_graph(HDC dc,const RECT& area,const std::vector<StatisticsApplication>& apps,
         std::int64_t from,std::int64_t to,const wchar_t* caption,bool is_live,
@@ -192,6 +193,7 @@ private:
     std::array<double,2> cached_auto_zoom_{{1.0,1.0}};
     std::array<double,2> target_auto_zoom_{{1.0,1.0}};
     std::array<bool,2> axis_initialized_{{false,false}};
+    bool history_axis_refit_pending_{}; // Commit new period scale only after DB results.
     ULONGLONG axis_tick_{};
     HWND tooltip_{};
     HWND table_window_{},table_window_list_{},table_window_info_{};

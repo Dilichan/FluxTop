@@ -85,11 +85,40 @@ void disk_io_tests() {
         "process I/O delta is bytes per second, not a cumulative count");
     fluxtop::SpikeTracker tracker;
     tracker.update(rows);
-    check(fluxtop::auto_rank(rows[0],63U).score>0.0 &&
-        fluxtop::auto_rank(rows[0],63U).metric==fluxtop::AutoMetric::io,
-        "enabled disk metric makes process I/O contribute to AutoScore");
+    check(fluxtop::auto_rank(rows[0],63U).score==0.0 &&
+        fluxtop::auto_rank(rows[0],63U).metric==fluxtop::AutoMetric::none,
+        "generic process I/O cannot masquerade as disk pressure");
     check(fluxtop::auto_rank(rows[0],31U).score==0.0,
-        "hidden disk metrics do not affect AutoScore");
+        "system disk visibility cannot change process AutoScore");
+    rows[0].cpu_percent=12.0;
+    tracker.update(rows);
+    // CPU changed from 0% to 12%: detecting that real CPU burst is correct.
+    const auto rising_cpu=fluxtop::auto_rank(rows[0],31U);
+    check(rising_cpu.burst && rising_cpu.metric==fluxtop::AutoMetric::cpu,
+        "a real CPU spike must remain detectable after excluding generic I/O");
+    // Let the CPU burst decay; the EWMA pressure may still be converging.
+    for(int settle=0;settle<4;++settle)tracker.update(rows);
+    const auto normal=fluxtop::auto_rank(rows[0],31U);
+    const auto with_disks=fluxtop::auto_rank(rows[0],63U);
+    check(std::abs(normal.score-with_disks.score)<1e-9 &&
+        normal.metric==with_disks.metric && !with_disks.burst,
+        "enabling disk columns cannot change CPU-based process rank");
+    rows[0].io_bytes_per_second=128.0*1048576.0; // Includes pipes, network, devices.
+    tracker.update(rows);
+    // Compare the SAME snapshot: adjacent snapshots have different EWMA values.
+    const auto cpu_reference=fluxtop::auto_rank(rows[0],31U);
+    const auto large_io=fluxtop::auto_rank(rows[0],63U);
+    check(std::abs(large_io.score-cpu_reference.score)<1e-9 && !large_io.burst &&
+        large_io.metric==cpu_reference.metric,
+        "an arbitrary I/O spike cannot create false disk alerts or dominate CPU");
+    check(!fluxtop::auto_metric_has_burst(rows[0],fluxtop::AutoMetric::io),
+        "generic process I/O never creates a disk burst indicator");
+    rows[0].auto_scores[6]=100.0;
+    rows[0].burst_scores[6]=100.0;
+    const auto invalid_seventh=fluxtop::auto_rank(rows[0],63U);
+    check(std::abs(invalid_seventh.score-cpu_reference.score)<1e-9 &&
+        !invalid_seventh.burst && invalid_seventh.metric==cpu_reference.metric,
+        "reserved seventh score slot cannot leak into AutoScore via legacy mask 63");
     raw.creation_time=124;raw.sampled_ns=3000000000;
     rows=counter.update({raw},4);
     check(!rows[0].io_bytes_per_second,"PID reuse resets process I/O baseline");

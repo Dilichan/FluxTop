@@ -43,15 +43,16 @@ std::vector<Process> CpuTracker::update(std::vector<RawProcess> raw, unsigned pr
 }
 
 namespace {
-// FluxTop AutoScore 0.2.1 scientific heuristic:
-// capacity normalization + dominant resource + bounded complementary score
-// + EWMA for retained pressure + separate short-lived rising-edge detector.
-// These weights are engineering choices to be calibrated, not research constants.
+// FluxTop AutoScore: capacity normalization, dominant load, bounded secondary
+// demand, EWMA and a separate rising-edge detector. Coefficients are empirical.
+// Score only attributable CPU/RAM/GPU/VRAM/network. GetProcessIoCounters()
+// reports generic process I/O (devices/network included), not physical disk
+// activity. Keep its raw rate for diagnostics, but NEVER score it as disk I/O.
 constexpr double mib = 1048576.0;
 constexpr double gib = 1073741824.0;
 // Visual alert threshold; distinct from the large ranking-bonus threshold (20).
 constexpr double orange_burst_threshold = 5.0;
-constexpr std::array<unsigned,7> visible_bits{1U,2U,4U,8U,16U,16U,32U};
+constexpr std::array<unsigned,6> visible_bits{1U,2U,4U,8U,16U,16U};
 std::array<std::optional<double>,7> metric_values(const Process& row) {
     return {row.cpu_percent,
         row.working_set ? std::optional<double>(static_cast<double>(*row.working_set)) : std::nullopt,
@@ -73,7 +74,7 @@ double activity_score(std::size_t metric, double value,
     case 1: return fraction_score(value,ram_capacity,0.70);
     case 2: return std::clamp(value,0.0,100.0);       // GPU engine utilization
     case 3: return fraction_score(value,gpu_capacity,0.65);
-    case 6: return std::clamp(90.0*(1.0-std::exp(-value/(4.0*mib))),0.0,90.0);
+    // Generic process I/O is deliberately excluded from disk scoring.
     default: return std::clamp(90.0 * (1.0 - std::exp(-value / (2.0*mib))),0.0,90.0);
     }
 }
@@ -87,7 +88,7 @@ double change_score(std::size_t metric, double increase,
     case 2: return std::min(100.0,increase * 2.0);
     case 3: return std::min(100.0,30.0*increase /
         std::max(256.0*mib,gpu_capacity ? static_cast<double>(*gpu_capacity)*.08 : gib));
-    case 6: return std::min(100.0,100.0*(1.0-std::exp(-increase/(3.0*mib))));
+    // No I/O rising-edge bonus without attributable disk I/O.
     default: return std::min(100.0,100.0*(1.0-std::exp(-increase/(2.0*mib))));
     }
 }
@@ -107,7 +108,7 @@ void SpikeTracker::update(std::vector<Process>& rows,
         const auto measurements = metric_values(row);
         const auto old = same ? found->second.metrics
             : std::array<std::optional<double>,7>{};
-        for (std::size_t i=0; i<measurements.size(); ++i) {
+        for (std::size_t i=0; i<visible_bits.size(); ++i) {
             if (!measurements[i] || !std::isfinite(*measurements[i]) || *measurements[i] < 0) continue;
             const double now = positive(measurements[i]);
             const double pressure = activity_score(i,now,ram_capacity,gpu_capacity);
@@ -134,7 +135,7 @@ AutoRank auto_rank(const Process& row, unsigned visible_metrics) {
     AutoMetric top_metric = AutoMetric::none, burst_metric = AutoMetric::none;
     int leading_group = -1;
     // Rx and Tx form one network category; do not double-count network.
-    for (std::size_t i=0;i<row.auto_scores.size();++i) {
+    for (std::size_t i=0;i<visible_bits.size();++i) {
         if (!(visible_metrics & visible_bits[i])) continue;
         const double current = row.auto_scores[i];
         const int group = i >= 6 ? 5 : (i >= 4 ? 4 : static_cast<int>(i));

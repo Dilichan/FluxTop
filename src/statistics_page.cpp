@@ -449,6 +449,7 @@ void StatisticsPage::set_history_limit(unsigned value) {
     SendMessageW(history_limit_slider_,TBM_SETPOS,TRUE,value);
     SetWindowTextW(history_limit_label_,(L"История: "+std::to_wstring(value)+L" / 100").c_str());
     ini_overlay_write(settings_,L"stats_history_top",static_cast<int>(value));
+    history_axis_refit_pending_=true; // New selection changes the history Y-axis peak.
     diagnostics::write(diagnostics::Level::info,"ui.history_limit","limit="+std::to_string(value));
     if(active_ || popups_[1].window) request();
 }
@@ -537,11 +538,17 @@ void StatisticsPage::accept() {
         populate_table();
         return;
     }
+    const bool first_history_data=history_.history.empty() && !item->second.history.empty();
     history_=std::move(item->second);
+    if(first_history_data)history_axis_refit_pending_=true;
     if(history_.first_record_ms && first_record_!=history_.first_record_ms) {
         first_record_=history_.first_record_ms;update_dates();
     }
     rebuild_live_series();
+    if(history_axis_refit_pending_) {
+        refresh_auto_axis(1,true);
+        history_axis_refit_pending_=false;
+    }
     populate_table();InvalidateRect(hwnd_,nullptr,FALSE);
     for(auto& popup:popups_) if(popup.window) InvalidateRect(popup.window,nullptr,FALSE);
 }
@@ -795,7 +802,7 @@ void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Pro
         values.vram=stat_memory(p.dedicated_gpu_bytes);
         values.network=stat_network(p.rx_bytes_per_second,p.tx_bytes_per_second);
         current_readings_.emplace(color_key(identity),std::move(values));
-        sorted.push_back({&p,auto_rank(p,63U).score});
+        sorted.push_back({&p,auto_rank(p,31U).score});
     }
     // The bubble keeps showing up-to-date readings even when the cursor rests
     // on the same sample. One invalidation per real snapshot, not per animation.
@@ -1041,6 +1048,23 @@ void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<Statis
     GetTextExtentPoint32W(dc,end_label.c_str(),static_cast<int>(end_label.size()),&extent);
     label(dc,end_label.c_str(),area.right-extent.cx,area.bottom+3,RGB(97,91,82));
 }
+// Refit from the same series and period that draw_graph() uses. Switching
+// the checkbox back on snaps immediately; subsequent samples retain easing.
+void StatisticsPage::refresh_auto_axis(unsigned index,bool immediate) {
+    if(index>=auto_scale_.size())return;
+    const auto anchor=last_live_timestamp_>0?last_live_timestamp_:now_ms();
+    const double desired=index==0?
+        auto_vertical_zoom(live_apps_,anchor-60000,anchor):
+        auto_vertical_zoom(history_.history,window_from_,window_to_);
+    target_auto_zoom_[index]=desired;
+    if(immediate || !axis_initialized_[index]) {
+        cached_auto_zoom_[index]=desired;
+        axis_initialized_[index]=true;
+    }
+    if(auto_scale_[index] && !immediate && (active_ || has_popup()) &&
+        std::abs(cached_auto_zoom_[index]-desired)>0.002)
+        SetTimer(hwnd_,animate_message,33,nullptr);
+}
 void StatisticsPage::rebuild_live_series() {
     const auto now=now_ms();
     std::vector<StatisticsApplication> minute=history_.recent;
@@ -1079,17 +1103,9 @@ void StatisticsPage::rebuild_live_series() {
     if(minute.size()>limit_) minute.resize(limit_);
     live_apps_=minute; // Mouse hit-testing uses the exact graph order/series colors.
     prepare_colors(live_apps_);
-    // Auto-axis limits only change with new data, not WM_MOUSEMOVE/WM_PAINT.
-    const auto anchor=last_live_timestamp_>0?last_live_timestamp_:now_ms();
-    const std::array<double,2> desired{{auto_vertical_zoom(live_apps_,anchor-60000,anchor),
-        auto_vertical_zoom(history_.history,window_from_,window_to_)}};
-    for(std::size_t index=0;index<2;++index) {
-        target_auto_zoom_[index]=desired[index];
-        if(!axis_initialized_[index]) {
-            cached_auto_zoom_[index]=desired[index];
-            axis_initialized_[index]=true;
-        }
-    }
+    // Only new snapshots and completed database queries update the axis target.
+    refresh_auto_axis(0,false);
+    if(!history_axis_refit_pending_)refresh_auto_axis(1,false);
     for(auto& popup:popups_) popup.axis_dirty=true;
     if(active_ || popups_[0].window || popups_[1].window)
         SetTimer(hwnd_,animate_message,33,nullptr);
@@ -2020,6 +2036,12 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
             const unsigned index=LOWORD(wp)==auto_live_id?0U:1U;
             const HWND control=index==0?auto_live_:auto_history_;
             auto_scale_[index]=SendMessageW(control,BM_GETCHECK,0,0)==BST_CHECKED;
+            if(auto_scale_[index] && (index!=1 || !history_axis_refit_pending_))
+                refresh_auto_axis(index,true);
+            auto& held=frozen_views_[4U+index];
+            if(held.paused)
+                held.zoom=auto_scale_[index]?
+                    auto_vertical_zoom(held.apps,held.from,held.to):1.0;
             ini_overlay_write(settings_,index==0?L"stats_auto_live":L"stats_auto_history",
                 auto_scale_[index]);
             InvalidateRect(hwnd_,nullptr,FALSE);
@@ -2046,6 +2068,7 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
         }
         if(LOWORD(wp)==period_id && HIWORD(wp)==CBN_SELCHANGE) {
             period_index_=static_cast<int>(SendMessageW(period_,CB_GETCURSEL,0,0));
+            history_axis_refit_pending_=true; // Refit only after the new DB result.
             update_dates();layout();request();return 0;
         }
         if(LOWORD(wp)==uptime_period_id && HIWORD(wp)==CBN_SELCHANGE) {
@@ -2063,6 +2086,8 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
         if(hdr->code==DTN_DATETIMECHANGE &&
             (((hdr->idFrom==from_id || hdr->idFrom==to_id) && period_index_==2) ||
              ((hdr->idFrom==uptime_from_id || hdr->idFrom==uptime_to_id) && uptime_period_index_==2))) {
+            if((hdr->idFrom==from_id || hdr->idFrom==to_id) && period_index_==2)
+                history_axis_refit_pending_=true;
             request();return 0;
         }
         break;
