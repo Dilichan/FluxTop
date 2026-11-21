@@ -17,14 +17,26 @@ std::string capture(const std::filesystem::path& program,const std::filesystem::
     require(CreatePipe(&reader,&writer,&sa,0)!=0,"Unable to make capture pipe");
     if(!SetHandleInformation(reader,HANDLE_FLAG_INHERIT,0)){CloseHandle(reader);CloseHandle(writer);throw std::runtime_error("Pipe protection failed");}
     std::wstring command=L"\""+program.wstring()+L"\" --samples 2 --interval-ms 250 --no-gpu --jsonl";
+    // Keep the child's real error text even when CTest does not provide a
+    // usable inherited console handle. Do not merge stderr into JSONL stdout.
+    const auto error_path=fixture/L"ci-jsonl-child-stderr.log";
+    HANDLE error_stream=CreateFileW(error_path.c_str(),GENERIC_WRITE,FILE_SHARE_READ,
+        &sa,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(error_stream==INVALID_HANDLE_VALUE) {
+        const DWORD code=GetLastError();
+        CloseHandle(reader);CloseHandle(writer);
+        throw std::runtime_error("Unable to create child stderr: "+std::to_string(code));
+    }
     STARTUPINFOW start{};start.cb=sizeof(start);start.dwFlags=STARTF_USESTDHANDLES;
-    start.hStdOutput=writer;start.hStdError=GetStdHandle(STD_ERROR_HANDLE);
+    start.hStdOutput=writer;start.hStdError=error_stream;
     start.hStdInput=GetStdHandle(STD_INPUT_HANDLE);
     PROCESS_INFORMATION proc{};
     const auto created=CreateProcessW(program.c_str(),command.data(),nullptr,nullptr,TRUE,
         CREATE_NO_WINDOW,nullptr,fixture.c_str(),&start,&proc);
+    const DWORD launch_error=created?0:GetLastError();
     CloseHandle(writer);
-    if(!created){CloseHandle(reader);throw std::runtime_error("Unable to start collector: "+std::to_string(GetLastError()));}
+    CloseHandle(error_stream);
+    if(!created){CloseHandle(reader);throw std::runtime_error("Unable to start collector: "+std::to_string(launch_error));}
     std::string output;char buffer[4096];DWORD count{};
     while(ReadFile(reader,buffer,static_cast<DWORD>(sizeof(buffer)),&count,nullptr)&&count>0) {
         output.append(buffer,count);
@@ -35,7 +47,20 @@ std::string capture(const std::filesystem::path& program,const std::filesystem::
     if(waited!=WAIT_OBJECT_0)TerminateProcess(proc.hProcess,1);
     DWORD status{};GetExitCodeProcess(proc.hProcess,&status);
     CloseHandle(proc.hThread);CloseHandle(proc.hProcess);
-    require(waited==WAIT_OBJECT_0 && status==0,"Collector failed or timed out");
+    if(waited!=WAIT_OBJECT_0 || status!=0) {
+        std::ostringstream problem;
+        problem<<"Collector failed: wait="<<waited<<" exit_code=0x"<<std::hex
+            <<status<<std::dec<<" ("<<status<<")";
+        std::ifstream error(error_path,std::ios::binary);
+        if(error) {
+            char excerpt[4096]{};
+            error.read(excerpt,static_cast<std::streamsize>(sizeof(excerpt)));
+            const auto bytes=error.gcount();
+            if(bytes>0)problem<<" stderr="<<std::string(excerpt,static_cast<std::size_t>(bytes));
+        }
+        if(!output.empty())problem<<" stdout_prefix="<<output.substr(0,512);
+        throw std::runtime_error(problem.str());
+    }
     return output;
 }
 }

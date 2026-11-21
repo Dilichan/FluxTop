@@ -413,6 +413,27 @@ void unknown_group_metric_tests() {
     check(missing_ram.size()==1U && !missing_ram[0].working_set,
         "all missing RAM stays unknown and renders as a dash");
 }
+// Receives two valid per-PID GPU RAM readings that can overlap in adapter
+// residency. Reports failures if the confirmed group sum is lost.
+void grouped_gpu_shared_memory_tests() {
+    using fluxtop::Process;
+    constexpr std::uint64_t gib=1073741824ULL;
+    Process browser, renderer;
+    browser.pid=12001;browser.name="browser.exe";
+    browser.exe_path="c:/browser/browser.exe";
+    browser.creation_time=10;
+    browser.dedicated_gpu_bytes=3*gib/2;
+    renderer=browser;renderer.pid=12002;renderer.creation_time=11;
+    check(fluxtop::gpu_process_memory_consistent(*browser.dedicated_gpu_bytes,2*gib,8*gib)
+        && fluxtop::gpu_process_memory_consistent(*renderer.dedicated_gpu_bytes,2*gib,8*gib),
+        "both individual GPU memory readings are valid against adapter usage");
+    const auto group=fluxtop::aggregate_application_processes({browser,renderer});
+    check(group.size()==1 && group[0].dedicated_gpu_bytes &&
+        *group[0].dedicated_gpu_bytes==3*gib,
+        "combined verified memory must retain all process allocations");
+    check(!fluxtop::gpu_process_memory_consistent(3*gib,2*gib,8*gib),
+        "per-PID validator is deliberately not applicable to the group sum");
+}
 void gpu_process_memory_tests() {
     using fluxtop::gpu_process_memory_consistent;
     constexpr std::uint64_t gib=1073741824ULL;
@@ -649,6 +670,7 @@ int main() {
     sort_tests();
     focused_process_tests();
     multiprocess_aggregation_tests();
+    grouped_gpu_shared_memory_tests();
     spike_tests();
     orange_burst_visibility_tests();
     per_metric_colors_and_bursts_tests();

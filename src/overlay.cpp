@@ -1,7 +1,7 @@
 #include "fluxtop/overlay.hpp"
 #include "fluxtop/diagnostics.hpp"
 #include "fluxtop/overlay_layout.hpp"
-#include "fluxtop/gpu_process_memory.hpp"
+
 #include "fluxtop/statistics_page.hpp"
 #include "fluxtop/app_icons.hpp"
 #include "fluxtop/autostart.hpp"
@@ -741,11 +741,10 @@ void Overlay::receive() {
             " history_error="+snapshot_->history_error);
         // Keep process-level history untouched. Aggregate only the displayed family rows.
         grouped_processes_=aggregate_application_processes(snapshot_->processes);
-        for(auto& group:grouped_processes_)
-            if(group.dedicated_gpu_bytes && !gpu_process_memory_consistent(
-                *group.dedicated_gpu_bytes,snapshot_->total_gpu_memory,
-                snapshot_->total_gpu_memory_capacity))
-                group.dedicated_gpu_bytes.reset();
+        // GpuCollector has already checked each PID against adapter usage.
+        // A SUM across processes is not a unique physical VRAM allocation;
+        // shared allocations can be counted by more than one process.
+        // Never discard verified member values based on the group sum.
         grouped_spikes_.update(grouped_processes_,snapshot_->total_ram_capacity,
             snapshot_->total_gpu_memory_capacity);
         if(statistics_) statistics_->on_snapshot(snapshot_->timestamp_ms,grouped_processes_,options_.interval_ms,*snapshot_);

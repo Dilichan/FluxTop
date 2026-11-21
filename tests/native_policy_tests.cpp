@@ -231,6 +231,14 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         need(header,{"uptime_from{},uptime_to{}","HWND table_window_","HWND tooltip_"});
         need(reader,{"history_limit,false,true,stop);","live_limit,false,true,stop);",
             "out.uptime=top_apps(connection.db,uptime_from_ms,uptime_to_ms,"});
+    } else if(policy=="gpu_group_memory_policy") {
+        const auto collector=read(root/"src/gpu_collector.cpp");
+        const auto model=read(root/"src/model.cpp");
+        const auto history=read(root/"src/history.cpp");
+        need(collector,{"if (row.dedicated_gpu_bytes && !gpu_process_memory_consistent("});
+        need(model,{"add_bytes(combined.dedicated_gpu_bytes,part.dedicated_gpu_bytes);"});
+        absent(overlay,{"gpu_process_memory_consistent("});
+        absent(history,{"gpu_process_memory_consistent("});
     } else if(policy=="overlay_animation_policy") {
         need(overlay,{"bool animation_enabled_ = true;","read(L\"overlay_animation\", 1)",
             "save(L\"overlay_animation\", animation_enabled_ ? 1 : 0)",
