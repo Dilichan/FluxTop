@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <initializer_list>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -42,6 +43,33 @@ inline bool disk_io_publishable_bytes(std::uint64_t matched,std::uint64_t total,
     bool lost_events) noexcept {
     return !lost_events && matched>0 && matched<=total;
 }
+// Per-sampling-interval accounting for positively attributed physical bytes.
+// Each matched byte must be published or assigned exactly one drop reason.
+// This is diagnostic only: it never changes process measurements or ETW attribution.
+struct DiskDeliveryAccounting {
+    std::uint64_t matched{},queued{},in_snapshot{},published{};
+    std::uint64_t no_pid{},no_baseline{},pid_reused{};
+    std::uint64_t no_session{},lost_events{},startup{},short_interval{};
+    std::uint64_t invalid_coverage{},unpublishable{};
+    void add(const DiskDeliveryAccounting& other) noexcept {
+        matched+=other.matched;queued+=other.queued;in_snapshot+=other.in_snapshot;
+        published+=other.published;no_pid+=other.no_pid;
+        no_baseline+=other.no_baseline;pid_reused+=other.pid_reused;
+        no_session+=other.no_session;lost_events+=other.lost_events;
+        startup+=other.startup;short_interval+=other.short_interval;
+        invalid_coverage+=other.invalid_coverage;unpublishable+=other.unpublishable;
+    }
+    bool reconciled() const noexcept {
+        if(matched!=queued || in_snapshot>queued)return false;
+        std::uint64_t remaining=matched;
+        for(const auto value:{published,no_pid,no_baseline,pid_reused,no_session,
+            lost_events,startup,short_interval,invalid_coverage,unpublishable}) {
+            if(value>remaining)return false;
+            remaining-=value;
+        }
+        return remaining==0;
+    }
+};
 // Bounded ETW thread-lifetime table. DCStart identifies pre-existing threads,
 // Start updates reused TIDs, End removes them. A mapping is usable only for
 // events at or after that lifetime observation; missing state never guesses PID.

@@ -53,6 +53,28 @@ int main() {
         expect(!owners.observe(0,400,300),"invalid tid rejected");
         expect(!owners.observe(1,0,300),"invalid pid rejected");
         expect(!owners.observe(1,400,0),"missing timestamp rejected");
+        DiskDeliveryAccounting delivered;
+        delivered.matched=8192;delivered.queued=8192;
+        delivered.in_snapshot=4096;delivered.published=4096;
+        delivered.no_pid=4096;
+        expect(delivered.reconciled(),"published and disappeared PIDs conserve matched physical bytes");
+        delivered.no_pid=0;delivered.in_snapshot=8192;delivered.pid_reused=4096;
+        expect(delivered.reconciled(),"reused PID is excluded without losing audit accounting");
+        delivered.pid_reused=0;delivered.no_baseline=4096;
+        expect(delivered.reconciled(),"missing CPU baseline cannot publish stale PID bytes");
+        delivered.queued=4096;
+        expect(!delivered.reconciled(),"ETW callback and PID queue mismatch detected");
+        delivered.queued=8192;
+        delivered.no_baseline=0;delivered.published=8192;delivered.pid_reused=4096;
+        expect(!delivered.reconciled(),"double-credit detected");
+        DiskDeliveryAccounting cumulative;
+        DiskDeliveryAccounting sample;
+        sample.matched=4096;sample.queued=4096;sample.published=4096;sample.in_snapshot=4096;
+        cumulative.add(sample);
+        sample.published=0;sample.no_pid=4096;sample.in_snapshot=0;
+        cumulative.add(sample);
+        expect(cumulative.reconciled() && cumulative.matched==8192,
+            "two samples reconcile across one diagnostics window");
         const auto p=disk_io_pressure(70.0,200,1000);
         expect(p && std::abs(*p-14.0)<1e-9,"per-app pressure is physical-byte share times busy percent");
         expect(!disk_io_pressure(std::nullopt,200,1000),"unknown activity is not zero");

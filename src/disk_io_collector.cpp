@@ -119,6 +119,7 @@ struct DiskIoCollector::Impl {
     std::array<std::uint64_t,26> volume_total{};
     std::vector<PhysicalVolumeExtent> extents;
     std::uint64_t physical_total{},matched_total{};
+    DiskDeliveryAccounting delivery{}; // Sampling-side accounting, reset every 15s.
     // Cumulative ETW diagnostics reset only every 15 seconds, not each sample.
     // Diagnostics report coverage without capturing paths, names or raw events.
     struct Telemetry {
@@ -432,6 +433,35 @@ void DiskIoCollector::collect(Snapshot& snapshot) {
             else ++it;
         }
     }
+    DiskDeliveryAccounting delivered{};
+    delivered.matched=matched;
+    for(const auto& [pid,data]:counts) {
+        (void)pid;
+        delivered.queued+=data.read+data.write;
+    }
+    // This accounting is sampling-side only. ETW callback counters are captured
+    // under the mutex in the same sample, so 15s windows can be reconciled.
+    const auto flush_delivery=[&] {
+        self.delivery.add(delivered);
+        if(!report)return;
+        const auto d=self.delivery;
+        self.delivery={};
+        diagnostics::write(diagnostics::Level::info,"disk_io.delivery",
+            "matched_bytes="+std::to_string(d.matched)+
+            " queued_bytes="+std::to_string(d.queued)+
+            " snapshot_bytes="+std::to_string(d.in_snapshot)+
+            " published_bytes="+std::to_string(d.published)+
+            " missing_pid_bytes="+std::to_string(d.no_pid)+
+            " no_baseline_bytes="+std::to_string(d.no_baseline)+
+            " pid_reused_bytes="+std::to_string(d.pid_reused)+
+            " unavailable_session_bytes="+std::to_string(d.no_session)+
+            " lost_event_bytes="+std::to_string(d.lost_events)+
+            " startup_bytes="+std::to_string(d.startup)+
+            " short_interval_bytes="+std::to_string(d.short_interval)+
+            " invalid_coverage_bytes="+std::to_string(d.invalid_coverage)+
+            " unpublishable_bytes="+std::to_string(d.unpublishable)+
+            " reconciled="+(d.reconciled()?"true":"false"));
+    };
     snapshot.disk_io_status=lost?"incomplete":self.status;
     if(report) {
         const auto& d=report_stats;
@@ -478,10 +508,18 @@ void DiskIoCollector::collect(Snapshot& snapshot) {
             " session="+self.status);
     }
     if(self.status!="ready" || lost || !self.baseline || seconds<0.1) {
-        self.baseline=true;return;
+        // Preserve the original priority of rejection causes.
+        if(self.status!="ready")delivered.no_session=matched;
+        else if(lost)delivered.lost_events=matched;
+        else if(!self.baseline)delivered.startup=matched;
+        else delivered.short_interval=matched;
+        self.baseline=true;
+        flush_delivery();return;
     }
     if(total>0 && matched>total) {
-        snapshot.disk_io_status="incomplete";return;
+        delivered.invalid_coverage=matched;
+        snapshot.disk_io_status="incomplete";
+        flush_delivery();return;
     }
     // FileIO and DiskIO do not correspond one-to-one because of caching and
     // kernel activity. Low global coverage is not evidence against a single
@@ -490,7 +528,10 @@ void DiskIoCollector::collect(Snapshot& snapshot) {
         snapshot.disk_io_status="partial-attribution";
     // Zero observed DiskIo events do not prove an idle physical device:
     // providers, drivers and delivery latency vary. Never infer zero from PDH.
-    if(!disk_io_publishable_bytes(matched,total,false))return;
+    if(!disk_io_publishable_bytes(matched,total,false)) {
+        delivered.unpublishable=matched;
+        flush_delivery();return;
+    }
     const bool complete=disk_io_fully_attributed(matched,total,false);
     std::array<std::uint64_t,26> verified_by_volume{};
     for(const auto& [pid,data]:counts) {
@@ -499,10 +540,19 @@ void DiskIoCollector::collect(Snapshot& snapshot) {
             verified_by_volume[i]+=data.volumes[i];
     }
     for(auto& row:snapshot.processes) {
-        if(!row.has_baseline || !row.creation_time)continue;
         const auto found=counts.find(row.pid);
+        const std::uint64_t pid_bytes=found==counts.end()?0ULL:
+            found->second.read+found->second.write;
+        delivered.in_snapshot+=pid_bytes;
+        if(!row.has_baseline || !row.creation_time) {
+            delivered.no_baseline+=pid_bytes;
+            continue;
+        }
         if(found!=counts.end() && found->second.first_event &&
-            found->second.first_event<*row.creation_time)continue; // PID reuse.
+            found->second.first_event<*row.creation_time) {
+            delivered.pid_reused+=pid_bytes; // PID reuse.
+            continue;
+        }
         const Impl::Bytes* bytes=found==counts.end()?nullptr:&found->second;
         // A missing match in a partially observed system is UNKNOWN, not 0 B/s.
         if(!bytes && !complete)continue;
@@ -510,6 +560,7 @@ void DiskIoCollector::collect(Snapshot& snapshot) {
         const auto write=bytes?bytes->write:0ULL;
         row.disk_read_bytes_per_second=static_cast<double>(read)/seconds;
         row.disk_write_bytes_per_second=static_cast<double>(write)/seconds;
+        delivered.published+=pid_bytes;
         double peak=0.0;
         bool has_pressure=false;
         for(const auto& drive:snapshot.disks) {
@@ -530,5 +581,8 @@ void DiskIoCollector::collect(Snapshot& snapshot) {
         }
         if(has_pressure)row.disk_pressure_percent=peak;
     }
+    delivered.no_pid=delivered.queued>=delivered.in_snapshot ?
+        delivered.queued-delivered.in_snapshot:0ULL;
+    flush_delivery();
 }
 } // namespace fluxtop

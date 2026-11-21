@@ -34,6 +34,11 @@ struct Process : RawProcess {
     std::optional<double> gpu_percent;
     std::optional<double> presented_fps; // Optional per-PID frame presentation rate; not a resource sum.
     std::optional<std::uint64_t> dedicated_gpu_bytes;
+    // Confirmed subset of grouped readings for display only. Exact group
+    // metrics above remain unknown when any member lacks a reading.
+    // GPU usage is a maximum across measured processes, NOT a sum of engines.
+    std::optional<double> confirmed_gpu_percent;
+    std::optional<std::uint64_t> confirmed_dedicated_gpu_bytes;
     bool has_baseline{};
     double spike_score{};
     std::array<double,7> auto_scores{}; // CPU, RAM, GPU, VRAM, Rx, Tx, confirmed physical disk pressure.

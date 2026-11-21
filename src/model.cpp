@@ -328,6 +328,11 @@ std::vector<Process> aggregate_application_processes(const std::vector<Process>&
     for (std::size_t i=0;i<result.size();++i) {
         auto& group=result[i];
         const auto& known=completeness[i];
+        // Preserve verified sub-process readings for the application's UI even
+        // when an exact group-wide reading is unavailable. AutoScore/history
+        // continue to use exact group fields, which are nulled below.
+        group.confirmed_gpu_percent=group.gpu_percent;
+        group.confirmed_dedicated_gpu_bytes=group.dedicated_gpu_bytes;
         if(!known.cpu)group.cpu_percent.reset();
         if(!known.ram)group.working_set.reset();
         if(!known.private_memory)group.private_bytes.reset();
@@ -354,8 +359,11 @@ bool process_before(const Process& a,const Process& b,Sort sort,unsigned visible
         switch (sort) {
         case Sort::cpu: return row.cpu_percent;
         case Sort::ram: return row.working_set ? std::optional<double>(static_cast<double>(*row.working_set)) : std::nullopt;
-        case Sort::gpu: return row.gpu_percent;
-        case Sort::vram: return row.dedicated_gpu_bytes ? std::optional<double>(static_cast<double>(*row.dedicated_gpu_bytes)) : std::nullopt;
+        case Sort::gpu: return row.gpu_percent ? row.gpu_percent : row.confirmed_gpu_percent;
+        case Sort::vram: {
+            const auto bytes=row.dedicated_gpu_bytes ? row.dedicated_gpu_bytes : row.confirmed_dedicated_gpu_bytes;
+            return bytes ? std::optional<double>(static_cast<double>(*bytes)) : std::nullopt;
+        }
         case Sort::automatic: return auto_rank(row, visible_metrics).score;
         case Sort::rx: return row.rx_bytes_per_second;
         case Sort::tx: return row.tx_bytes_per_second;

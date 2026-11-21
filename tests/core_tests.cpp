@@ -363,6 +363,19 @@ void unknown_group_metric_tests() {
     check(group.cpu_percent && *group.cpu_percent==15.0
         && group.tx_bytes_per_second && *group.tx_bytes_per_second==260.0,
         "available CPU and Tx remain visible when other metrics are unknown");
+    check(group.confirmed_gpu_percent && *group.confirmed_gpu_percent==21.0
+        && group.confirmed_dedicated_gpu_bytes && *group.confirmed_dedicated_gpu_bytes==60U,
+        "partial GPU uses highest confirmed PID load and GPU RAM sums confirmed bytes");
+    auto partial_sorted=partial;
+    fluxtop::Process lower;
+    lower.pid=9600;lower.gpu_percent=3.0;lower.dedicated_gpu_bytes=5;
+    partial_sorted.push_back(lower);
+    fluxtop::sort_processes(partial_sorted,fluxtop::Sort::gpu);
+    check(partial_sorted.front().pid==group.pid,
+        "partial GPU measurement remains visible in GPU sort");
+    fluxtop::sort_processes(partial_sorted,fluxtop::Sort::vram);
+    check(partial_sorted.front().pid==group.pid,
+        "confirmed GPU RAM sum remains visible in VRAM sort");
     fluxtop::SpikeTracker tracker;
     auto scores=partial;
     tracker.update(scores,std::uint64_t{8192},std::uint64_t{8192});
@@ -377,6 +390,16 @@ void unknown_group_metric_tests() {
         && zero[0].dedicated_gpu_bytes && *zero[0].dedicated_gpu_bytes==60U
         && zero[0].rx_bytes_per_second && *zero[0].rx_bytes_per_second==140.0,
         "measured zero is valid and is not confused with unknown");
+    check(zero.size()==1U && zero[0].confirmed_gpu_percent
+        && *zero[0].confirmed_gpu_percent==21.0
+        && zero[0].confirmed_dedicated_gpu_bytes && *zero[0].confirmed_dedicated_gpu_bytes==60U,
+        "complete groups retain exact readings as confirmed values");
+    a.gpu_percent.reset(); a.dedicated_gpu_bytes.reset();
+    b.gpu_percent.reset(); b.dedicated_gpu_bytes.reset();
+    const auto entirely_unknown=fluxtop::aggregate_application_processes({a,b});
+    check(entirely_unknown.size()==1U && !entirely_unknown[0].confirmed_gpu_percent
+        && !entirely_unknown[0].confirmed_dedicated_gpu_bytes,
+        "no measured GPU or VRAM remains unknown, not fabricated zero");
 }
 void gpu_process_memory_tests() {
     using fluxtop::gpu_process_memory_consistent;

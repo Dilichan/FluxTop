@@ -209,6 +209,7 @@ private:
     int x_ = CW_USEDEFAULT, y_ = CW_USEDEFAULT;
     std::wstring settings_;
     std::size_t scroll_{};
+    std::uint64_t disk_delivery_ui_samples_{}; // Diagnostics, not rendering state.
     int exit_code_{};
     struct Child { HWND window; RECT bounds; };
     std::vector<Child> controls_;
@@ -740,16 +741,55 @@ void Overlay::receive() {
             " history_error="+snapshot_->history_error);
         // Keep process-level history untouched. Aggregate only the displayed family rows.
         grouped_processes_=aggregate_application_processes(snapshot_->processes);
-        for(auto& group:grouped_processes_)
-            if(group.dedicated_gpu_bytes && !gpu_process_memory_consistent(
-                *group.dedicated_gpu_bytes,snapshot_->total_gpu_memory,
-                snapshot_->total_gpu_memory_capacity))
+        for(auto& group:grouped_processes_) {
+            // Apply the same adapter sanity check to the confirmed subset.
+            // Never display an impossible partial VRAM sum.
+            if(group.confirmed_dedicated_gpu_bytes && !gpu_process_memory_consistent(
+                *group.confirmed_dedicated_gpu_bytes,snapshot_->total_gpu_memory,
+                snapshot_->total_gpu_memory_capacity)) {
                 group.dedicated_gpu_bytes.reset();
+                group.confirmed_dedicated_gpu_bytes.reset();
+            }
+        }
         grouped_spikes_.update(grouped_processes_,snapshot_->total_ram_capacity,
             snapshot_->total_gpu_memory_capacity);
         if(statistics_) statistics_->on_snapshot(snapshot_->timestamp_ms,grouped_processes_,options_.interval_ms,*snapshot_);
     }
     update_view(); client_stats();
+    if(received_snapshot && snapshot_) {
+        // Audit ETW -> per-PID snapshot -> grouped app -> selected top rows.
+        // These are rates from one snapshot, not additional disk measurements.
+        double raw_bps=0.0,grouped_bps=0.0,top_bps=0.0;
+        std::size_t raw_rows=0,grouped_rows=0,top_rows=0;
+        const auto record=[](std::optional<double> read,std::optional<double> write,
+            double& sum,std::size_t& positive_rows) {
+            if(!read || !write || !std::isfinite(*read) || !std::isfinite(*write))return;
+            const double rate=*read+*write;
+            if(rate>0.0 && std::isfinite(rate)) {sum+=rate;++positive_rows;}
+        };
+        for(const auto& process:snapshot_->processes)
+            record(process.disk_read_bytes_per_second,process.disk_write_bytes_per_second,
+                raw_bps,raw_rows);
+        for(const auto& process:grouped_processes_)
+            record(process.disk_read_bytes_per_second,process.disk_write_bytes_per_second,
+                grouped_bps,grouped_rows);
+        for(const auto& row:rows_)
+            record(row.disk_read,row.disk_write,top_bps,top_rows);
+        ++disk_delivery_ui_samples_;
+        if(raw_bps>0.0 || disk_delivery_ui_samples_%15==0) {
+            diagnostics::write(diagnostics::Level::info,"ui.disk_delivery",
+                "raw_bps="+std::to_string(raw_bps)+
+                " grouped_bps="+std::to_string(grouped_bps)+
+                " top_bps="+std::to_string(top_bps)+
+                " raw_rows="+std::to_string(raw_rows)+
+                " grouped_rows="+std::to_string(grouped_rows)+
+                " top_rows="+std::to_string(top_rows)+
+                " top_limit="+std::to_string(options_.top)+
+                " total_column="+(disk_total_enabled_?"true":"false")+
+                " volume_columns="+std::to_string(enabled_disk_letters().size())+
+                " disk_status="+snapshot_->disk_io_status);
+        }
+    }
     if (visible_) InvalidateRect(hwnd_, nullptr, FALSE);
     if (finished) {
         if (visible_) {
@@ -793,8 +833,13 @@ void Overlay::update_view() {
                 s.total_ram_capacity,s.total_gpu_memory_capacity);
         // No blink/flash effects in the overlay. AutoScore still uses burst data for ranking.
         std::array<bool,6> bursts{};
+        // Display only confirmed GPU readings. Partial groups show the known
+        // numeric result (no ">=" prefix); a group with no sample shows "-".
+        // Exact group fields stay unknown for AutoScore and history.
+        const auto display_gpu=p.gpu_percent ? p.gpu_percent : p.confirmed_gpu_percent;
+        const auto display_vram=p.dedicated_gpu_bytes ? p.dedicated_gpu_bytes : p.confirmed_dedicated_gpu_bytes;
         next.push_back({p.pid,p.creation_time,std::move(name),percent(p.cpu_percent),
-            memory(p.working_set),percent(p.gpu_percent),memory(p.dedicated_gpu_bytes),
+            memory(p.working_set),percent(display_gpu),memory(display_vram),
             network_rate(p.rx_bytes_per_second,p.tx_bytes_per_second),
             p.disk_read_bytes_per_second,p.disk_write_bytes_per_second,
             p.disk_volume_bytes_per_second,loads,bursts});
