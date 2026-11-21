@@ -265,6 +265,14 @@ std::vector<Process> aggregate_application_processes(const std::vector<Process>&
     lineage_groups.reserve(rows.size());
     std::vector<Process> result;
     result.reserve(rows.size());
+    // Exact grouped values require every constituent process to have a valid
+    // reading. An absent sample is not 0; unknown must propagate per metric.
+    struct GroupCompleteness {
+        bool cpu=true, ram=true, private_memory=true, gpu=true, vram=true;
+        bool rx=true, tx=true, generic_io=true;
+    };
+    std::vector<GroupCompleteness> completeness;
+    completeness.reserve(rows.size());
     for (std::size_t i=0;i<rows.size();++i) {
         const Process& root=rows[roots[i]];
         const auto& image=rows[i].exe_path ? rows[i].exe_path : root.exe_path;
@@ -288,9 +296,19 @@ std::vector<Process> aggregate_application_processes(const std::vector<Process>&
             combined.spike_score=0; combined.auto_scores.fill(0); combined.burst_scores.fill(0);
             combined.member_pids.clear();
             result.push_back(std::move(combined));
+            completeness.emplace_back();
         }
         auto& combined=result[group_index];
         const auto& part=rows[i];
+        auto& known=completeness[group_index];
+        known.cpu = known.cpu && part.cpu_percent && std::isfinite(*part.cpu_percent) && *part.cpu_percent >= 0.0;
+        known.ram = known.ram && part.working_set.has_value();
+        known.private_memory = known.private_memory && part.private_bytes.has_value();
+        known.gpu = known.gpu && part.gpu_percent && std::isfinite(*part.gpu_percent) && *part.gpu_percent >= 0.0;
+        known.vram = known.vram && part.dedicated_gpu_bytes.has_value();
+        known.rx = known.rx && part.rx_bytes_per_second && std::isfinite(*part.rx_bytes_per_second) && *part.rx_bytes_per_second >= 0.0;
+        known.tx = known.tx && part.tx_bytes_per_second && std::isfinite(*part.tx_bytes_per_second) && *part.tx_bytes_per_second >= 0.0;
+        known.generic_io = known.generic_io && part.io_bytes_per_second && std::isfinite(*part.io_bytes_per_second) && *part.io_bytes_per_second >= 0.0;
         combined.member_pids.push_back(part.pid);
         add_positive(combined.cpu_percent,part.cpu_percent);
         add_bytes(combined.working_set,part.working_set);
@@ -307,7 +325,20 @@ std::vector<Process> aggregate_application_processes(const std::vector<Process>&
             add_positive(combined.disk_volume_pressure_percent[v],part.disk_volume_pressure_percent[v]);
         }
     }
-    for (auto& group : result) {
+    for (std::size_t i=0;i<result.size();++i) {
+        auto& group=result[i];
+        const auto& known=completeness[i];
+        if(!known.cpu)group.cpu_percent.reset();
+        if(!known.ram)group.working_set.reset();
+        if(!known.private_memory)group.private_bytes.reset();
+        if(!known.gpu)group.gpu_percent.reset();
+        if(!known.vram)group.dedicated_gpu_bytes.reset();
+        if(!known.rx)group.rx_bytes_per_second.reset();
+        if(!known.tx)group.tx_bytes_per_second.reset();
+        if(!known.generic_io)group.io_bytes_per_second.reset();
+        // Physical ETW disk values are a verified LOWER BOUND, explicitly
+        // marked by the overlay as >= when global attribution is partial.
+        // Do not suppress positive verified disk transfers from other members.
         if (group.cpu_percent) group.cpu_percent=std::clamp(*group.cpu_percent,0.0,100.0);
         for(const auto& pressure:group.disk_volume_pressure_percent)
             if(pressure)group.disk_pressure_percent=std::max(

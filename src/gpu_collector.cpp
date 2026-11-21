@@ -1,6 +1,7 @@
 #include "fluxtop/gpu_collector.hpp"
 #include "fluxtop/windows.hpp"
 #include "fluxtop/gpu_process_memory.hpp"
+#include "fluxtop/diagnostics.hpp"
 #include <winternl.h>
 #include <d3dkmthk.h>
 #include <pdhmsg.h>
@@ -23,7 +24,15 @@ struct Adapters {
         }
     }
 };
-bool collect_memory(Snapshot& snapshot) {
+// Aggregated counts only; no PIDs or executable names are logged.
+struct GpuAccessProbe {
+    std::uint32_t attempted{}, opened_full{}, open_denied{}, open_other{};
+    std::uint32_t identity_failed{}, query_full_ok{}, query_full_failed{};
+    std::uint32_t returned{};
+    LONG first_d3dkmt_failure{};
+    bool has_d3dkmt_failure{};
+};
+bool collect_memory(Snapshot& snapshot, GpuAccessProbe& probe) {
     Adapters adapters;
     if (D3DKMTEnumAdapters(&adapters.data) < 0) { adapters.data.NumAdapters = 0; return false; }
     if (!adapters.data.NumAdapters) return false;
@@ -69,28 +78,58 @@ bool collect_memory(Snapshot& snapshot) {
     bool available = false;
     for (auto& row : snapshot.processes) {
         if (!row.has_baseline || !row.creation_time) continue;
-        Handle process(OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, row.pid));
-        if (!process.valid()) continue;
-        FILETIME created{}, exited{}, kernel{}, user{};
-        if (!GetProcessTimes(process.get(), &created, &exited, &kernel, &user)
-            || filetime_ticks(created) != *row.creation_time) continue;
-        std::uint64_t total = 0;
-        bool valid = true;
-        for (ULONG i = 0; i < adapters.data.NumAdapters && valid; ++i) {
-            for (UINT node = 0; node < physical_counts[i]; ++node) {
-                D3DKMT_QUERYVIDEOMEMORYINFO info{};
-                info.hProcess = process.get();
-                info.hAdapter = adapters.data.Adapters[i].hAdapter;
-                info.MemorySegmentGroup = D3DKMT_MEMORY_SEGMENT_GROUP_LOCAL;
-                info.PhysicalAdapterIndex = node;
-                if (D3DKMTQueryVideoMemoryInfo(&info) < 0
-                    || info.CurrentUsage > std::numeric_limits<std::uint64_t>::max() - total) {
-                    valid = false; break;
-                }
-                total += info.CurrentUsage;
-            }
+        ++probe.attempted;
+        // The observed WDDM D3DKMT path rejects limited-information handles
+        // with STATUS_ACCESS_DENIED. Request the necessary right directly;
+        // it does not, by itself, require an elevated process.
+        Handle process(OpenProcess(PROCESS_QUERY_INFORMATION,FALSE,row.pid));
+        if (!process.valid()) {
+            if (GetLastError()==ERROR_ACCESS_DENIED) ++probe.open_denied;
+            else ++probe.open_other;
+            continue;
         }
-        if (valid) { row.dedicated_gpu_bytes = total; available = true; }
+        ++probe.opened_full;
+        FILETIME created{}, exited{}, kernel{}, user{};
+        if (!GetProcessTimes(process.get(),&created,&exited,&kernel,&user) ||
+            filetime_ticks(created)!=*row.creation_time) {
+            ++probe.identity_failed;
+            continue;
+        }
+        // Query every physical adapter with the same verified process handle.
+        // If even one query fails, a partial per-PID sum is UNKNOWN, not zero.
+        const auto query_usage = [&](HANDLE handle)->std::optional<std::uint64_t> {
+            std::uint64_t total = 0;
+            for (ULONG i=0; i<adapters.data.NumAdapters; ++i) {
+                for (UINT node=0; node<physical_counts[i]; ++node) {
+                    D3DKMT_QUERYVIDEOMEMORYINFO info{};
+                    info.hProcess = handle;
+                    info.hAdapter = adapters.data.Adapters[i].hAdapter;
+                    info.MemorySegmentGroup = D3DKMT_MEMORY_SEGMENT_GROUP_LOCAL;
+                    info.PhysicalAdapterIndex = node;
+                    const NTSTATUS status=D3DKMTQueryVideoMemoryInfo(&info);
+                    if(status < 0) {
+                        if(!probe.has_d3dkmt_failure) {
+                            probe.first_d3dkmt_failure=status;
+                            probe.has_d3dkmt_failure=true;
+                        }
+                        return std::nullopt;
+                    }
+                    if(info.CurrentUsage > std::numeric_limits<std::uint64_t>::max()-total)
+                        return std::nullopt;
+                    total += info.CurrentUsage;
+                }
+            }
+            return total;
+        };
+        const auto usage = query_usage(process.get());
+        if (usage) {
+            ++probe.query_full_ok;
+            row.dedicated_gpu_bytes=*usage;
+            ++probe.returned;
+            available=true;
+        } else {
+            ++probe.query_full_failed;
+        }
     }
     return available;
 }
@@ -105,9 +144,7 @@ GpuCollector::GpuCollector(bool enabled) : enabled_(enabled) {
     if (engine_status != ERROR_SUCCESS) engine_ = nullptr;
     if (PdhAddEnglishCounterW(query_, L"\\GPU Adapter Memory(*)\\Dedicated Usage", 0, &adapter_memory_) != ERROR_SUCCESS)
         adapter_memory_ = nullptr;
-    // Same vendor-neutral PDH provider as GPU Engine; fallback for inaccessible D3DKMT process handles.
-    if (PdhAddEnglishCounterW(query_, L"\\GPU Process Memory(*)\\Dedicated Usage", 0, &process_memory_) != ERROR_SUCCESS)
-        process_memory_ = nullptr;
+
     if (!engine_) {
         std::cerr << "GPU: PDH engine counter unavailable (status=" << engine_status
                   << "); missing metrics stay unknown.\n";
@@ -161,35 +198,7 @@ bool GpuCollector::read(PDH_HCOUNTER counter,
     return false;
 }
 
-// Read validated per-process dedicated GPU memory from all LUID/physical adapters.
-// Does not synthesize total adapter usage or replace unknown memory with zero.
-bool GpuCollector::read_process_memory(std::unordered_map<std::uint32_t,std::uint64_t>& values) {
-    if (!process_memory_) return false;
-    constexpr DWORD max_bytes = 16 * 1024 * 1024;
-    for (int attempt=0; attempt<3; ++attempt) {
-        DWORD bytes = static_cast<DWORD>(buffer_.size() * sizeof(std::max_align_t));
-        DWORD count = 0;
-        auto* items = buffer_.empty() ? nullptr : reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer_.data());
-        const auto status = PdhGetFormattedCounterArrayW(process_memory_,
-            PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, &bytes, &count, items);
-        if (status == PDH_MORE_DATA) {
-            if (!bytes || bytes > max_bytes) return false;
-            buffer_.resize((bytes + sizeof(std::max_align_t)-1)/sizeof(std::max_align_t));
-            continue;
-        }
-        if (status != ERROR_SUCCESS) return false;
-        GpuMemoryCounterAccumulator accumulator;
-        for (DWORD i=0; i<count; ++i) {
-            const auto& item = items[i];
-            if (!item.szName || (item.FmtValue.CStatus != PDH_CSTATUS_VALID_DATA
-                && item.FmtValue.CStatus != PDH_CSTATUS_NEW_DATA)) continue;
-            accumulator.add(item.szName,item.FmtValue.doubleValue);
-        }
-        values = std::move(accumulator).take();
-        return !values.empty();
-    }
-    return false;
-}
+
 
 void GpuCollector::collect(Snapshot& snapshot) {
     snapshot.gpu_status = enabled_ ? "unavailable" : "disabled";
@@ -201,28 +210,45 @@ void GpuCollector::collect(Snapshot& snapshot) {
     if (collected && read(adapter_memory_, engine, memory_total, true) && memory_total
         && *memory_total < static_cast<double>(std::numeric_limits<std::uint64_t>::max()))
         snapshot.total_gpu_memory = static_cast<std::uint64_t>(*memory_total);
-    std::unordered_map<std::uint32_t,std::uint64_t> pdh_memory;
-    const bool pdh_memory_ok = collected && read_process_memory(pdh_memory);
-    const bool memory_ok = collect_memory(snapshot);
+    GpuAccessProbe probe{};
+    const bool memory_ok = collect_memory(snapshot,probe);
+    // Diagnostic aggregation is deliberately bounded; no per-process log entries.
+    if (probe.attempted>0 && (++gpu_access_samples_==1 || gpu_access_samples_%15==0)) {
+        diagnostics::write(diagnostics::Level::info,"gpu.memory.access",
+            "attempted="+std::to_string(probe.attempted)+
+            " full_open="+std::to_string(probe.opened_full)+
+            " open_denied="+std::to_string(probe.open_denied)+
+            " open_other="+std::to_string(probe.open_other)+
+            " identity_failed="+std::to_string(probe.identity_failed)+
+            " full_query_ok="+std::to_string(probe.query_full_ok)+
+            " full_query_failed="+std::to_string(probe.query_full_failed)+
+            " valid_processes="+std::to_string(probe.returned)+
+            " first_d3dkmt_ntstatus="+(probe.has_d3dkmt_failure?
+                std::to_string(probe.first_d3dkmt_failure):"none"));
+    }
     snapshot.gpu_status = engine_ok && memory_ok ? "ready"
-        : engine_ok || memory_ok || pdh_memory_ok ? "partial" : "unavailable";
+        : engine_ok || memory_ok ? "partial" : "unavailable";
+    bool inconsistent_usage = false;
     for (auto& row : snapshot.processes) {
-        // PDH has PID-only identity. Avoid joining a new or reused process on its first sample.
+        // D3DKMT reports allocated local memory. If it exceeds a known global
+        // adapter usage or physical capacity, do not mislabel it as resident VRAM.
+        // Never cap or synthesize bytes; unknown is preferable to false precision.
+        if (row.dedicated_gpu_bytes && !gpu_process_memory_consistent(
+                *row.dedicated_gpu_bytes, snapshot.total_gpu_memory,
+                snapshot.total_gpu_memory_capacity)) {
+            row.dedicated_gpu_bytes.reset();
+            inconsistent_usage = true;
+        }
         if (!row.has_baseline) continue;
-        if (const auto found = engine.find(row.pid); found != engine.end()) row.gpu_percent = found->second;
-        // A zero from a non-working driver query is ambiguous. Use positive PDH
-        // values only when the primary D3DKMT value is absent or zero.
-        if ((!row.dedicated_gpu_bytes || *row.dedicated_gpu_bytes == 0) && row.creation_time) {
-            const auto found = pdh_memory.find(row.pid);
-            if (found != pdh_memory.end() && found->second > 0) {
-                // PDH identifies processes by PID only. Verify the instance is still
-                // the same process before joining a counter to a snapshot row.
-                Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,row.pid));
-                FILETIME created{}, exited{}, kernel{}, user{};
-                if (process.valid() && GetProcessTimes(process.get(),&created,&exited,&kernel,&user)
-                    && filetime_ticks(created) == *row.creation_time)
-                    row.dedicated_gpu_bytes = found->second;
-            }
+        if (const auto found = engine.find(row.pid); found != engine.end())
+            row.gpu_percent = found->second;
+    }
+    if (inconsistent_usage) {
+        snapshot.gpu_status = "partial";
+        if (!inconsistency_reported_) {
+            diagnostics::write(diagnostics::Level::warning,"gpu.memory.consistency",
+                "D3DKMT process usage exceeds adapter-wide usage or capacity; unknown published");
+            inconsistency_reported_ = true;
         }
     }
 }

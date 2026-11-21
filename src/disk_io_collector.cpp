@@ -343,6 +343,8 @@ struct DiskIoCollector::Impl {
         const ULONG rc=StartTraceW(&session,properties.name,&p);
         if(rc!=ERROR_SUCCESS) {
             session=0;status=rc==ERROR_ACCESS_DENIED?"administrator-required":"unavailable";
+            diagnostics::write(diagnostics::Level::warning,"disk_io.session",
+                "StartTrace failed win32="+std::to_string(rc)+" status="+status);
             return;
         }
         EVENT_TRACE_LOGFILEW trace{};
@@ -350,15 +352,25 @@ struct DiskIoCollector::Impl {
         trace.ProcessTraceMode=PROCESS_TRACE_MODE_REAL_TIME|PROCESS_TRACE_MODE_EVENT_RECORD;
         trace.EventRecordCallback=event;trace.BufferCallback=buffer;trace.Context=this;
         consumer=OpenTraceW(&trace);
-        if(consumer==INVALID_PROCESSTRACE_HANDLE){stop();return;}
+        if(consumer==INVALID_PROCESSTRACE_HANDLE) {
+            const DWORD code=GetLastError();
+            status=code==ERROR_ACCESS_DENIED?"administrator-required":"unavailable";
+            diagnostics::write(diagnostics::Level::warning,"disk_io.session",
+                "OpenTrace failed win32="+std::to_string(code)+" status="+status);
+            stop();return;
+        }
         try {
             thread=std::thread([this]{
                 const ULONG result=ProcessTrace(&consumer,1,nullptr,nullptr);
                 if(result!=ERROR_SUCCESS && result!=ERROR_CANCELLED) {
-                    std::lock_guard lock(mutex);failed=true;
+                    {std::lock_guard lock(mutex);failed=true;}
+                    diagnostics::write(diagnostics::Level::warning,"disk_io.session",
+                        "ProcessTrace failed win32="+std::to_string(result));
                 }
             });
             status="ready";
+            diagnostics::write(diagnostics::Level::info,"disk_io.session",
+                "ETW system trace started");
         }catch(...) {stop();throw;}
     }
     void stop() noexcept {
@@ -461,8 +473,9 @@ void DiskIoCollector::collect(Snapshot& snapshot) {
             " thread_retired="+std::to_string(d.thread_retired)+
             " thread_untracked="+std::to_string(d.thread_untracked)+
             " tracked_threads="+std::to_string(tracked_threads)+
-            " quality="+(d.physical_bytes==0?"unobserved":
-                d.matched_bytes==d.physical_bytes?"complete":"partial"));
+            " quality="+(self.status!="ready"?"unavailable":d.physical_bytes==0?"unobserved":
+                d.matched_bytes==d.physical_bytes?"complete":"partial")+
+            " session="+self.status);
     }
     if(self.status!="ready" || lost || !self.baseline || seconds<0.1) {
         self.baseline=true;return;

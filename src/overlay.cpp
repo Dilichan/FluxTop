@@ -1,6 +1,7 @@
 #include "fluxtop/overlay.hpp"
 #include "fluxtop/diagnostics.hpp"
 #include "fluxtop/overlay_layout.hpp"
+#include "fluxtop/gpu_process_memory.hpp"
 #include "fluxtop/statistics_page.hpp"
 #include "fluxtop/app_icons.hpp"
 #include "fluxtop/autostart.hpp"
@@ -684,6 +685,8 @@ void Overlay::client_stats() {
             + L"   ·   GPU: " + wide(s.gpu_status) + L"   ·   Время сбора: " + decimal(s.collection_ms) + L" мс";
         info += L"\r\nИконок в памяти: " + std::to_wstring(icons_ ? icons_->stats().entries : 0) + L" / " + std::to_wstring(icons_ ? icons_->stats().capacity : std::clamp<std::size_t>(static_cast<std::size_t>(options_.top)+16,32,128));
         info += L"   ·   Сеть: " + wide(s.network_status);
+        info += L"   ·   Disks: " + (s.disk_io_status=="administrator-required" ?
+            std::wstring(L"нужен администратор") : wide(s.disk_io_status));
         info += L"\r\nЗаписано агрегатов за сеанс: " + (s.history_records ? std::to_wstring(*s.history_records) : L"—");
         if (!s.history_error.empty()) info += L"\r\nОшибка записи истории: " + wide(s.history_error);
     } else info = L"Ожидание первого снимка…";
@@ -737,6 +740,11 @@ void Overlay::receive() {
             " history_error="+snapshot_->history_error);
         // Keep process-level history untouched. Aggregate only the displayed family rows.
         grouped_processes_=aggregate_application_processes(snapshot_->processes);
+        for(auto& group:grouped_processes_)
+            if(group.dedicated_gpu_bytes && !gpu_process_memory_consistent(
+                *group.dedicated_gpu_bytes,snapshot_->total_gpu_memory,
+                snapshot_->total_gpu_memory_capacity))
+                group.dedicated_gpu_bytes.reset();
         grouped_spikes_.update(grouped_processes_,snapshot_->total_ram_capacity,
             snapshot_->total_gpu_memory_capacity);
         if(statistics_) statistics_->on_snapshot(snapshot_->timestamp_ms,grouped_processes_,options_.interval_ms,*snapshot_);

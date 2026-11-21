@@ -1,4 +1,5 @@
 #include "fluxtop/history.hpp"
+#include "fluxtop/gpu_process_memory.hpp"
 #include "fluxtop/diagnostics.hpp"
 #include "fluxtop/history_math.hpp"
 #include <winsqlite/winsqlite3.h>
@@ -370,6 +371,11 @@ struct HistoryWriter::Impl {
         // Same AutoScore code as the existing overlay/history. No CPU/RAM/GPU
         // collection code or raw measurements are altered.
         auto groups=aggregate_application_processes(snapshot.processes);
+        for(auto& group:groups)
+            if(group.dedicated_gpu_bytes && !gpu_process_memory_consistent(
+                *group.dedicated_gpu_bytes,snapshot.total_gpu_memory,
+                snapshot.total_gpu_memory_capacity))
+                group.dedicated_gpu_bytes.reset();
         scores.update(groups,snapshot.total_ram_capacity,snapshot.total_gpu_memory_capacity);
         std::vector<Observation> observations;observations.reserve(groups.size());
         for(const auto& group:groups){

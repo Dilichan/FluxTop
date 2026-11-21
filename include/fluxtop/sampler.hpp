@@ -36,6 +36,7 @@ private:
     HistoryWriter history_{history_path()};
     std::chrono::steady_clock::time_point origin_;
     std::chrono::steady_clock::time_point previous_;
+    std::uint64_t coverage_samples_{}; // Throttle metric availability diagnostics.
 };
 
 class SamplingWorker {

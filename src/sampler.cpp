@@ -4,6 +4,8 @@
 #include "fluxtop/temperatures.hpp"
 #include <psapi.h>
 #include <iostream>
+#include <array>
+#include <cmath>
 
 namespace fluxtop {
 Sampler::Sampler(bool gpu, bool network, bool foreground_fps) : privileges_(initialize_privileges()), gpu_(gpu), network_(network), fps_enabled_(foreground_fps), origin_(std::chrono::steady_clock::now()) {
@@ -31,6 +33,31 @@ Snapshot Sampler::collect() {
     network_.collect(snapshot);
     disks_.collect(snapshot);
     disk_io_.collect(snapshot); // Physical ETW attribution; never generic process I/O.
+    // Observability only: count valid samples; never change or impute measurements.
+    // A collector may be operational while many protected PIDs remain unknown.
+    if (++coverage_samples_==1 || coverage_samples_%15==0) {
+        std::array<std::size_t,8> known{}; // CPU, RAM, GPU, VRAM, Rx, Tx, disk read, disk write.
+        for(const auto& row:snapshot.processes) {
+            if(row.cpu_percent && std::isfinite(*row.cpu_percent) && *row.cpu_percent>=0.0)++known[0];
+            if(row.working_set)++known[1];
+            if(row.gpu_percent && std::isfinite(*row.gpu_percent) && *row.gpu_percent>=0.0)++known[2];
+            if(row.dedicated_gpu_bytes)++known[3];
+            if(row.rx_bytes_per_second && std::isfinite(*row.rx_bytes_per_second) && *row.rx_bytes_per_second>=0.0)++known[4];
+            if(row.tx_bytes_per_second && std::isfinite(*row.tx_bytes_per_second) && *row.tx_bytes_per_second>=0.0)++known[5];
+            if(row.disk_read_bytes_per_second)++known[6];
+            if(row.disk_write_bytes_per_second)++known[7];
+        }
+        diagnostics::write(diagnostics::Level::info,"metrics.coverage",
+            "processes="+std::to_string(snapshot.processes.size())+
+            " elevated="+(privileges_.elevated.value_or(false)?"true":"false")+
+            " cpu="+std::to_string(known[0])+" ram="+std::to_string(known[1])+
+            " gpu="+std::to_string(known[2])+" vram="+std::to_string(known[3])+
+            " rx="+std::to_string(known[4])+" tx="+std::to_string(known[5])+
+            " disk_read="+std::to_string(known[6])+" disk_write="+std::to_string(known[7])+
+            " gpu_status="+snapshot.gpu_status+
+            " network_status="+snapshot.network_status+
+            " disk_status="+snapshot.disk_io_status);
+    }
     spikes_.update(snapshot.processes, snapshot.total_ram_capacity, snapshot.total_gpu_memory_capacity);
     PROCESS_MEMORY_COUNTERS_EX memory{};
     memory.cb = sizeof(memory);

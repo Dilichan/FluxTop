@@ -323,28 +323,76 @@ void per_metric_colors_and_bursts_tests() {
     check(!fluxtop::auto_metric_has_burst(p,fluxtop::AutoMetric::gpu),
         "nonfinite burst cannot trigger coloring");
 }
+// Gets synthetic same-EXE processes and verifies unknown data is not
+// converted to a known total. Returns failures through the shared check().
+void unknown_group_metric_tests() {
+    using fluxtop::Process;
+    Process a, b;
+    a.pid=9501; a.name="test.exe"; a.exe_path="c:/flux-availability/test.exe";
+    a.creation_time=100; a.cpu_percent=12.0; a.working_set=120;
+    a.private_bytes=80; a.gpu_percent=21.0; a.dedicated_gpu_bytes=60;
+    a.rx_bytes_per_second=140.0; a.tx_bytes_per_second=240.0;
+    a.io_bytes_per_second=340.0;
+    b=a; b.pid=9502; b.creation_time=101;
+    b.cpu_percent=3.0; b.working_set=30; b.private_bytes=20;
+    b.gpu_percent=11.0; b.dedicated_gpu_bytes=10;
+    b.rx_bytes_per_second=10.0; b.tx_bytes_per_second=20.0;
+    b.io_bytes_per_second=30.0;
+    const auto complete=fluxtop::aggregate_application_processes({a,b});
+    check(complete.size()==1U, "same EXE instances aggregate");
+    if(complete.size()!=1U)return;
+    check(complete[0].cpu_percent && *complete[0].cpu_percent==15.0
+        && complete[0].working_set && *complete[0].working_set==150U
+        && complete[0].dedicated_gpu_bytes && *complete[0].dedicated_gpu_bytes==70U,
+        "available CPU/RAM/GPU RAM are aggregated correctly");
+    check(complete[0].gpu_percent && *complete[0].gpu_percent==21.0
+        && complete[0].rx_bytes_per_second && *complete[0].rx_bytes_per_second==150.0
+        && complete[0].tx_bytes_per_second && *complete[0].tx_bytes_per_second==260.0,
+        "available GPU engine and traffic are aggregated correctly");
+    b.working_set.reset(); b.private_bytes.reset();
+    b.gpu_percent.reset(); b.dedicated_gpu_bytes.reset();
+    b.rx_bytes_per_second.reset(); b.io_bytes_per_second.reset();
+    const auto partial=fluxtop::aggregate_application_processes({a,b});
+    check(partial.size()==1U, "partial metrics keep their application group");
+    if(partial.size()!=1U)return;
+    const auto& group=partial[0];
+    check(!group.working_set && !group.private_bytes && !group.gpu_percent
+        && !group.dedicated_gpu_bytes && !group.rx_bytes_per_second
+        && !group.io_bytes_per_second,
+        "unknown member makes only its exact aggregate metrics unknown");
+    check(group.cpu_percent && *group.cpu_percent==15.0
+        && group.tx_bytes_per_second && *group.tx_bytes_per_second==260.0,
+        "available CPU and Tx remain visible when other metrics are unknown");
+    fluxtop::SpikeTracker tracker;
+    auto scores=partial;
+    tracker.update(scores,std::uint64_t{8192},std::uint64_t{8192});
+    check(scores[0].auto_scores[1]==0.0 && scores[0].auto_scores[3]==0.0
+        && scores[0].auto_scores[4]==0.0,
+        "unknown aggregate metrics do not enter AutoScore");
+    b.working_set=0; b.private_bytes=0; b.gpu_percent=0.0;
+    b.dedicated_gpu_bytes=0; b.rx_bytes_per_second=0.0;
+    b.io_bytes_per_second=0.0;
+    const auto zero=fluxtop::aggregate_application_processes({a,b});
+    check(zero.size()==1U && zero[0].working_set && *zero[0].working_set==120U
+        && zero[0].dedicated_gpu_bytes && *zero[0].dedicated_gpu_bytes==60U
+        && zero[0].rx_bytes_per_second && *zero[0].rx_bytes_per_second==140.0,
+        "measured zero is valid and is not confused with unknown");
+}
 void gpu_process_memory_tests() {
-    constexpr double gib=1073741824.0;
-    fluxtop::GpuMemoryCounterAccumulator accumulator;
-    const auto first=L"pid_50836_luid_0x00000000_0x0000f7a1_phys_0";
-    const auto second=L"pid_50836_luid_0x00000000_0x00012755_phys_0";
-    check(accumulator.add(first,2.447*gib),"first GPU adapter PDH instance is valid");
-    check(accumulator.add(second,0.0),"different GPU adapter with zero usage is valid");
-    check(!accumulator.add(first,2.447*gib),"same GPU adapter must not double count");
-    check(accumulator.add(L"pid_999_luid_0x00000000_0x0000f7a1_phys_0",0.5*gib),
-        "another process memory is accounted independently");
-    check(!accumulator.add(L"pid_invalid_luid_0x00000000_phys_0",42.0),
-        "invalid PID is not attributed");
-    check(!accumulator.add(L"pid_50836_luid_invalid_phys_0",std::numeric_limits<double>::quiet_NaN()),
-        "NaN must not corrupt memory totals");
-    check(!accumulator.add(L"pid_50836_luid_invalid_phys_0",std::ldexp(1.0,64)),
-        "overlarge bytes must not overflow uint64");
-    const auto results=std::move(accumulator).take();
-    check(results.size()==2 && results.contains(50836U) && results.contains(999U),
-        "PDH LUID totals are grouped by PID only after validating instances");
-    if (const auto found=results.find(50836U); found!=results.end())
-        check(std::abs(static_cast<double>(found->second)/gib-2.447)<0.00001,
-            "GPU memory across two LUIDs should be 2.447 GiB, not zero or duplicated");
+    using fluxtop::gpu_process_memory_consistent;
+    constexpr std::uint64_t gib=1073741824ULL;
+    check(gpu_process_memory_consistent(1*gib,2*gib,8*gib),
+        "valid D3DKMT process usage is kept");
+    check(!gpu_process_memory_consistent(8*gib,2*gib,16*gib),
+        "process usage greater than observed adapter usage is unknown");
+    check(!gpu_process_memory_consistent(9*gib,std::nullopt,8*gib),
+        "process usage greater than physical capacity is unknown");
+    check(gpu_process_memory_consistent(1*gib,std::nullopt,std::nullopt),
+        "missing adapter totals do not invent a restriction");
+    check(gpu_process_memory_consistent(0,0,8*gib),
+        "verified zero remains a valid observation");
+    check(gpu_process_memory_consistent(1*gib,std::nullopt,0),
+        "zero capacity on UMA is unknown, not a hard limit");
 }
 void focused_process_tests() {
     fluxtop::Process a,b,c;
@@ -570,6 +618,7 @@ int main() {
     orange_burst_visibility_tests();
     per_metric_colors_and_bursts_tests();
     color_load_tests();
+    unknown_group_metric_tests();
     gpu_process_memory_tests();
     output_tests();
     check(fluxtop::gpu_instance_pid(L"pid_123_luid_0x000_0_phys_0_eng_1") == 123U, "parse GPU PID");
