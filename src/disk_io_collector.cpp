@@ -24,6 +24,7 @@ namespace fluxtop {
 namespace {
 constexpr GUID disk_guid{0x3d6fa8d4,0xfe05,0x11d0,{0x9d,0xda,0x00,0xc0,0x4f,0xd7,0xba,0x7c}};
 constexpr GUID file_guid{0x90cbdc39,0x4a3e,0x11d1,{0x84,0xf4,0x00,0x00,0xf8,0x04,0x64,0xe3}};
+constexpr GUID thread_guid{0x3d6fa8d1,0xfe05,0x11d0,{0x9d,0xda,0x00,0xc0,0x4f,0xd7,0xba,0x7c}};
 constexpr std::size_t max_irps=65536;
 constexpr std::uint64_t filetime_second=10000000ULL;
 // TDH handles MOF versions and 32/64-bit ETW pointer widths.
@@ -111,7 +112,9 @@ struct DiskIoCollector::Impl {
     TRACEHANDLE session{},consumer=INVALID_PROCESSTRACE_HANDLE;
     std::thread thread;
     std::mutex mutex;
-    std::unordered_map<std::uint64_t,Inflight> irps;
+    std::unordered_map<std::uint64_t,Inflight> irps; // FileIo, optional correlation.
+    std::unordered_map<std::uint64_t,Inflight> disk_inits; // DiskIo Init; same layer as completion.
+    DiskThreadOwners thread_owners; // ETW Start/DCStart/End, bounded by thread lifetime.
     std::unordered_map<DWORD,Bytes> per_pid;
     std::array<std::uint64_t,26> volume_total{};
     std::vector<PhysicalVolumeExtent> extents;
@@ -123,6 +126,12 @@ struct DiskIoCollector::Impl {
         std::uint64_t no_disk_irp{},unmatched_irp{},mismatch_file{},
             mismatch_direction{},mismatch_time{},matched_events{},unmapped_volume{};
         std::uint64_t physical_bytes{},matched_bytes{};
+        std::uint64_t disk_init_events{},disk_init_usable{},disk_init_matches{},
+            disk_init_unknown_owner{},disk_init_missing_irp{},disk_completion_no_fileobj{};
+        std::uint64_t thread_events{},thread_cached{},thread_retired{},thread_untracked{};
+        std::uint64_t init_pid_header{},init_pid_open_thread{},init_pid_etw{};
+        std::uint64_t init_missing_tid{},init_system_thread{},init_no_thread_owner{};
+        std::uint64_t init_open_denied{},init_open_gone{},init_open_other{};
     } telemetry{};
     std::chrono::steady_clock::time_point last_diagnostics=std::chrono::steady_clock::now();
     std::atomic<bool> failed{false};
@@ -131,24 +140,115 @@ struct DiskIoCollector::Impl {
     DWORD drive_mask{};
     std::chrono::steady_clock::time_point previous=std::chrono::steady_clock::now();
 
+    // Do not infer the application from a System-context disk completion.
+    // Resolve its initiating thread by a live handle first; when that thread
+    // has already exited, use a time-bounded ETW lifetime observation.
+    enum class OwnerSource { unknown, header, open_thread, etw_thread, missing_tid, system_thread };
+    struct OwnerResolution {
+        DWORD pid{};
+        OwnerSource source{OwnerSource::unknown};
+        DWORD open_error{};
+    };
+    static OwnerResolution initiating_pid(Impl& self,EVENT_RECORD* record,
+        const wchar_t* thread_property,std::uint64_t at) {
+        const DWORD header_pid=record->EventHeader.ProcessId;
+        if(header_pid>4)return {header_pid,OwnerSource::header,0};
+        const auto value=property(record,thread_property);
+        if(!value || !*value || *value>UINT32_MAX)
+            return {0,OwnerSource::missing_tid,0};
+        const DWORD tid=static_cast<DWORD>(*value);
+        Handle thread(OpenThread(THREAD_QUERY_LIMITED_INFORMATION,FALSE,tid));
+        DWORD error{};
+        if(thread.valid()) {
+            const DWORD owner=GetProcessIdOfThread(thread.get());
+            if(owner>4)return {owner,OwnerSource::open_thread,0};
+            if(owner!=0)return {0,OwnerSource::system_thread,0};
+            error=GetLastError();
+        } else error=GetLastError();
+        // The ETW callback can run after a short-lived thread has exited.
+        // Lookup is guarded by the same mutex as lifecycle event updates.
+        std::lock_guard lock(self.mutex);
+        const auto recorded=self.thread_owners.find(tid,at);
+        if(recorded) {
+            if(*recorded>4)return {*recorded,OwnerSource::etw_thread,error};
+            return {0,OwnerSource::system_thread,error};
+        }
+        return {0,OwnerSource::unknown,error};
+    }
+
     static void WINAPI event(EVENT_RECORD* record) noexcept {
         auto& self=*static_cast<Impl*>(record->UserContext);
         const auto opcode=record->EventHeader.EventDescriptor.Opcode;
         const bool file=IsEqualGUID(record->EventHeader.ProviderId,file_guid);
         const bool disk=IsEqualGUID(record->EventHeader.ProviderId,disk_guid);
-        if((file && opcode!=67 && opcode!=68) || (disk && opcode!=10 && opcode!=11) || (!file && !disk))return;
+        const bool disk_init=disk && (opcode==12 || opcode==13);
+        const bool disk_end=disk && (opcode==10 || opcode==11);
+        const bool thread_event=IsEqualGUID(record->EventHeader.ProviderId,thread_guid) &&
+            (opcode==1 || opcode==2 || opcode==3 || opcode==4);
+        if((!file || (opcode!=67 && opcode!=68)) && !disk_init && !disk_end && !thread_event)return;
         try {
+            if(thread_event) {
+                const auto tid=property(record,L"TThreadId");
+                const auto pid=property(record,L"ProcessId");
+                const auto at=static_cast<std::uint64_t>(record->EventHeader.TimeStamp.QuadPart);
+                std::lock_guard lock(self.mutex);
+                ++self.telemetry.thread_events;
+                if(!tid || !*tid || *tid>UINT32_MAX || !at) {
+                    ++self.telemetry.thread_untracked;return;
+                }
+                if(opcode==2 || opcode==4) {
+                    self.thread_owners.finish(static_cast<DWORD>(*tid),at);
+                    ++self.telemetry.thread_retired;
+                }else if(pid && *pid>0 && *pid<=UINT32_MAX &&
+                    self.thread_owners.observe(static_cast<DWORD>(*tid),
+                        static_cast<DWORD>(*pid),at)) {
+                    ++self.telemetry.thread_cached;
+                }else ++self.telemetry.thread_untracked;
+                return;
+            }
             const auto irp=property(record,file?L"IrpPtr":L"Irp");
-            const auto fileobj=property(record,L"FileObject");
+            const auto fileobj=disk_init?std::optional<std::uint64_t>{}:
+                property(record,L"FileObject");
             const auto when=static_cast<std::uint64_t>(record->EventHeader.TimeStamp.QuadPart);
+            // ReadInit/WriteInit records carry IssuingThreadId and the physical
+            // IRP. Their initiating PID is a stronger correlation than FileIo
+            // requests which can split into different IRPs below the filesystem.
+            const auto ownership=(disk_init || file)?initiating_pid(self,record,
+                disk_init?L"IssuingThreadId":L"TTID",when):OwnerResolution{};
+            const DWORD owner=ownership.pid;
             std::lock_guard lock(self.mutex);
+            if(disk_init) {
+                ++self.telemetry.disk_init_events;
+                switch(ownership.source) {
+                case OwnerSource::header: ++self.telemetry.init_pid_header;break;
+                case OwnerSource::open_thread: ++self.telemetry.init_pid_open_thread;break;
+                case OwnerSource::etw_thread: ++self.telemetry.init_pid_etw;break;
+                case OwnerSource::missing_tid: ++self.telemetry.init_missing_tid;break;
+                case OwnerSource::system_thread: ++self.telemetry.init_system_thread;break;
+                default: ++self.telemetry.init_no_thread_owner;break;
+                }
+                if(ownership.open_error==ERROR_ACCESS_DENIED)
+                    ++self.telemetry.init_open_denied;
+                else if(ownership.open_error==ERROR_INVALID_PARAMETER)
+                    ++self.telemetry.init_open_gone;
+                else if(ownership.open_error)
+                    ++self.telemetry.init_open_other;
+                if(!irp || !*irp){++self.telemetry.disk_init_missing_irp;return;}
+                if(owner<=4){++self.telemetry.disk_init_unknown_owner;return;}
+                if(self.disk_inits.size()>=max_irps && !self.disk_inits.contains(*irp)){
+                    self.failed=true;return;
+                }
+                self.disk_inits[*irp]={owner,0,when,opcode==13};
+                ++self.telemetry.disk_init_usable;
+                return;
+            }
             if(file) {
                 ++self.telemetry.file_events;
                 if(!irp || !*irp || !fileobj || !*fileobj) {
                     ++self.telemetry.file_missing;return;
                 }
-                const DWORD pid=record->EventHeader.ProcessId;
-                if(pid<=4)return; // Cache manager / System writes cannot be assigned to a user application.
+                const DWORD pid=owner;
+                if(pid<=4)return; // Cache manager / System writes remain unattributed.
                 if(self.irps.size()>=max_irps && !self.irps.contains(*irp)) {
                     self.failed=true;return;
                 }
@@ -168,23 +268,48 @@ struct DiskIoCollector::Impl {
             self.telemetry.physical_bytes+=*size;
             if(volume)self.volume_total[static_cast<unsigned>(*volume-L'A')]+=*size;
             else ++self.telemetry.unmapped_volume;
-            if(!irp || !*irp || !fileobj || !*fileobj) {
-                ++self.telemetry.no_disk_irp;return; // Unattributed physical work.
+            if(!irp || !*irp) {
+                ++self.telemetry.no_disk_irp;return; // Cannot correlate physical work.
             }
-            const auto match=self.irps.find(*irp);
-            if(match==self.irps.end()) {
-                ++self.telemetry.unmatched_irp;return;
+            DWORD attributed_pid{};
+            std::uint64_t request_at{};
+            bool matched_init=false;
+            const auto init=self.disk_inits.find(*irp);
+            if(init!=self.disk_inits.end()) {
+                const auto request=init->second;
+                self.disk_inits.erase(init); // Prevent IRP reuse/duplicate credits.
+                if(disk_io_valid_completion(request.at,when,request.write,opcode==11)) {
+                    attributed_pid=request.pid;
+                    request_at=request.at;
+                    matched_init=true;
+                } else ++self.telemetry.mismatch_time;
             }
-            const auto request=match->second;
-            self.irps.erase(match); // An IRP completion is consumed once.
-            // Different IRPs, reused pointers or mismatched operation types cannot grant attribution.
-            if(request.file!=*fileobj) {++self.telemetry.mismatch_file;return;}
-            if(request.write!=(opcode==11)) {++self.telemetry.mismatch_direction;return;}
-            if(when<request.at || when-request.at>10ULL*filetime_second) {
-                ++self.telemetry.mismatch_time;return;
+            // For drivers without DiskIo Init, preserve the stricter FileIo
+            // correlation only when FileObject and operation direction agree.
+            if(!matched_init) {
+                if(!fileobj || !*fileobj) {
+                    ++self.telemetry.disk_completion_no_fileobj;return;
+                }
+                const auto match=self.irps.find(*irp);
+                if(match==self.irps.end()) {
+                    ++self.telemetry.unmatched_irp;return;
+                }
+                const auto request=match->second;
+                self.irps.erase(match);
+                if(request.file!=*fileobj) {++self.telemetry.mismatch_file;return;}
+                if(request.write!=(opcode==11)) {++self.telemetry.mismatch_direction;return;}
+                if(!disk_io_valid_completion(request.at,when,request.write,opcode==11)) {
+                    ++self.telemetry.mismatch_time;return;
+                }
+                attributed_pid=request.pid;
+                request_at=request.at;
+            } else {
+                self.irps.erase(*irp); // Same physical IRP must be credited once.
+                ++self.telemetry.disk_init_matches;
             }
-            auto& bytes=self.per_pid[request.pid];
-            if(bytes.first_event==0 || request.at<bytes.first_event)bytes.first_event=request.at;
+            if(attributed_pid<=4)return;
+            auto& bytes=self.per_pid[attributed_pid];
+            if(bytes.first_event==0 || request_at<bytes.first_event)bytes.first_event=request_at;
             if(opcode==11)bytes.write+=*size;else bytes.read+=*size;
             if(volume)bytes.volumes[static_cast<unsigned>(*volume-L'A')]+=*size;
             self.matched_total+=*size;
@@ -211,8 +336,9 @@ struct DiskIoCollector::Impl {
         p.BufferSize=64;p.MinimumBuffers=2;p.MaximumBuffers=8;p.FlushTimer=1;
         p.LogFileMode=EVENT_TRACE_REAL_TIME_MODE|EVENT_TRACE_SYSTEM_LOGGER_MODE|
             EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING;
-        p.EnableFlags=EVENT_TRACE_FLAG_DISK_IO|EVENT_TRACE_FLAG_DISK_FILE_IO|
-            EVENT_TRACE_FLAG_FILE_IO|EVENT_TRACE_FLAG_FILE_IO_INIT;
+        p.EnableFlags=EVENT_TRACE_FLAG_DISK_IO|EVENT_TRACE_FLAG_DISK_IO_INIT|
+            EVENT_TRACE_FLAG_DISK_FILE_IO|EVENT_TRACE_FLAG_FILE_IO|EVENT_TRACE_FLAG_FILE_IO_INIT|
+            EVENT_TRACE_FLAG_THREAD;
         p.LoggerNameOffset=offsetof(Properties,name);
         const ULONG rc=StartTraceW(&session,properties.name,&p);
         if(rc!=ERROR_SUCCESS) {
@@ -264,6 +390,7 @@ void DiskIoCollector::collect(Snapshot& snapshot) {
     std::array<std::uint64_t,26> physical_by_volume{};
     std::uint64_t total{},matched{};
     Impl::Telemetry report_stats{};
+    std::size_t tracked_threads{};
     bool report=false;
     bool lost{};
     {
@@ -275,6 +402,7 @@ void DiskIoCollector::collect(Snapshot& snapshot) {
         lost=self.failed.load();
         if(now-self.last_diagnostics>=std::chrono::seconds(15)) {
             report_stats=self.telemetry;
+            tracked_threads=self.thread_owners.size();
             self.telemetry={};
             self.last_diagnostics=now;
             report=true;
@@ -285,6 +413,10 @@ void DiskIoCollector::collect(Snapshot& snapshot) {
             std::chrono::system_clock::now().time_since_epoch()).count()/100)+116444736000000000ULL;
         for(auto it=self.irps.begin();it!=self.irps.end();) {
             if(latest>it->second.at && latest-it->second.at>retention)it=self.irps.erase(it);
+            else ++it;
+        }
+        for(auto it=self.disk_inits.begin();it!=self.disk_inits.end();) {
+            if(latest>it->second.at && latest-it->second.at>retention)it=self.disk_inits.erase(it);
             else ++it;
         }
     }
@@ -309,6 +441,26 @@ void DiskIoCollector::collect(Snapshot& snapshot) {
             " wrong_direction="+std::to_string(d.mismatch_direction)+
             " wrong_time="+std::to_string(d.mismatch_time)+
             " unmapped_volume="+std::to_string(d.unmapped_volume)+
+            " init_events="+std::to_string(d.disk_init_events)+
+            " init_usable="+std::to_string(d.disk_init_usable)+
+            " init_matches="+std::to_string(d.disk_init_matches)+
+            " init_unknown_owner="+std::to_string(d.disk_init_unknown_owner)+
+            " init_missing_irp="+std::to_string(d.disk_init_missing_irp)+
+            " disk_no_fileobj="+std::to_string(d.disk_completion_no_fileobj)+
+            " owner_header="+std::to_string(d.init_pid_header)+
+            " owner_open_thread="+std::to_string(d.init_pid_open_thread)+
+            " owner_etw="+std::to_string(d.init_pid_etw)+
+            " owner_missing_tid="+std::to_string(d.init_missing_tid)+
+            " owner_system="+std::to_string(d.init_system_thread)+
+            " owner_unknown_tid="+std::to_string(d.init_no_thread_owner)+
+            " owner_open_denied="+std::to_string(d.init_open_denied)+
+            " owner_open_gone="+std::to_string(d.init_open_gone)+
+            " owner_open_other="+std::to_string(d.init_open_other)+
+            " thread_events="+std::to_string(d.thread_events)+
+            " thread_cached="+std::to_string(d.thread_cached)+
+            " thread_retired="+std::to_string(d.thread_retired)+
+            " thread_untracked="+std::to_string(d.thread_untracked)+
+            " tracked_threads="+std::to_string(tracked_threads)+
             " quality="+(d.physical_bytes==0?"unobserved":
                 d.matched_bytes==d.physical_bytes?"complete":"partial"));
     }

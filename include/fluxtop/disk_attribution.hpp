@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 namespace fluxtop {
@@ -40,6 +41,43 @@ inline bool disk_io_fully_attributed(std::uint64_t matched,std::uint64_t total,
 inline bool disk_io_publishable_bytes(std::uint64_t matched,std::uint64_t total,
     bool lost_events) noexcept {
     return !lost_events && matched>0 && matched<=total;
+}
+// Bounded ETW thread-lifetime table. DCStart identifies pre-existing threads,
+// Start updates reused TIDs, End removes them. A mapping is usable only for
+// events at or after that lifetime observation; missing state never guesses PID.
+class DiskThreadOwners {
+public:
+    bool observe(std::uint32_t tid,std::uint32_t pid,std::uint64_t at) {
+        if(!tid || !pid || !at)return false;
+        const auto found=owners_.find(tid);
+        if(found!=owners_.end() && at<found->second.at)return false;
+        if(found==owners_.end() && owners_.size()>=capacity)return false;
+        owners_[tid]={pid,at};
+        return true;
+    }
+    void finish(std::uint32_t tid,std::uint64_t at) {
+        const auto found=owners_.find(tid);
+        if(found!=owners_.end() && at>=found->second.at)owners_.erase(found);
+    }
+    std::optional<std::uint32_t> find(std::uint32_t tid,std::uint64_t at) const {
+        const auto found=owners_.find(tid);
+        if(found==owners_.end() || at<found->second.at)return std::nullopt;
+        return found->second.pid;
+    }
+    std::size_t size() const noexcept {return owners_.size();}
+private:
+    struct Entry {std::uint32_t pid{};std::uint64_t at{};};
+    static constexpr std::size_t capacity=65536;
+    std::unordered_map<std::uint32_t,Entry> owners_;
+};
+// DiskIo ReadInit/WriteInit and completion must refer to the same IRP,
+// operation direction and a bounded, monotonic FILETIME interval.
+// A cached FileIo operation is not proof that any physical I/O occurred.
+inline bool disk_io_valid_completion(std::uint64_t started,std::uint64_t finished,
+    bool started_write,bool finished_write) noexcept {
+    constexpr std::uint64_t max_request_age=100000000ULL; // 10 seconds, FILETIME ticks
+    return started!=0 && finished>=started && finished-started<=max_request_age &&
+        started_write==finished_write;
 }
 // Heuristic: apportion measured volume active time by its fraction of *physical* bytes.
 // Not a promise of the process's precise service time or a benchmark of the device.
