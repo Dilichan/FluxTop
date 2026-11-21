@@ -35,7 +35,7 @@ constexpr UINT foreground_update_message = WM_APP + 13;
 constexpr int toggle_hotkey = 1, client_hotkey = 2;
 enum Control : UINT { open_client = 100, toggle_table, quit_app, top_label, top_control, sort_control, font_control,
     alpha_control, visible_control, move_control, icons_control, stats_control, startup_control,
-    alpha_label, interval_control, summary_control, header_colors_control, row_colors_control, animation_control, metric_control = 200, disk_checkbox_control = 300, tab_control = 450, font_label = 500, interval_label = 501 };
+    alpha_label, interval_control, summary_control, header_colors_control, row_colors_control, animation_control, metric_control = 200, disk_checkbox_control = 300, disk_total_checkbox_control = 326, tab_control = 450, font_label = 500, interval_label = 501 };
 constexpr unsigned all_metrics = 31; // Five resource columns; FPS is in the application heading.
 constexpr unsigned default_metrics = 31;
 constexpr std::array<Sort, 8> sort_ui_values{Sort::automatic, Sort::cpu, Sort::ram, Sort::gpu,
@@ -102,6 +102,8 @@ struct Row {
     std::uint32_t pid{};
     std::optional<std::uint64_t> created;
     std::wstring name, cpu, ram, gpu, vram, network;
+    std::optional<double> disk_read,disk_write;
+    std::array<std::optional<double>,26> disk_volumes{};
     // Each visible numeric cell has its own utilization and burst color.
     std::array<std::optional<double>,4> loads{}; // CPU / RAM / GPU / GPU RAM
     std::array<bool,6> bursts{};                 // CPU / RAM / GPU / GPU RAM / Rx / Tx
@@ -161,12 +163,14 @@ private:
     float text_size() const { return static_cast<float>(options_.font_size); }
     float row_height() const { return text_size() * 1.6f; }
     bool has_enabled_disks() const { return !enabled_disk_letters().empty(); }
-    bool summary_only() const { return summary_ || (!metrics_ && !has_enabled_disks()); }
-    unsigned active_metrics() const { return metrics_ ? metrics_ : (has_enabled_disks()?0U:all_metrics); }
-    unsigned ranking_metrics() const { return active_metrics(); } // Disk columns are system-wide, not per-process AutoScore inputs.
+    bool summary_only() const { return summary_ || (!metrics_ && !has_enabled_disks() && !disk_total_enabled_); }
+    unsigned active_metrics() const { return metrics_ ? metrics_ : ((has_enabled_disks() || disk_total_enabled_)?0U:all_metrics); }
+    unsigned ranking_metrics() const {
+        return active_metrics() | ((disk_total_enabled_ || has_enabled_disks())?32U:0U);
+    } // ETW-confirmed disk pressure only; unknown data never contributes.
     float table_width() const {
         const auto base=calculate_overlay_columns(text_size(),active_metrics(),summary_only(),show_icons_).total_width;
-        const auto n=enabled_disk_letters().size();
+        const auto n=enabled_disk_letters().size()+(disk_total_enabled_?1U:0U);
         return base + (n ? text_size()*(overlay_layout.column_gap+
             static_cast<float>(n)*overlay_layout.disk_width+
             static_cast<float>(n-1)*overlay_layout.column_gap) : 0.0f);
@@ -193,6 +197,8 @@ private:
     unsigned opacity_ = 100;
     unsigned metrics_ = default_metrics;
     unsigned selected_disks_mask_{}; // 26 letters, persisted even when a drive disappears.
+    bool disk_total_enabled_{true};
+    HWND disk_total_check_{};
     std::vector<wchar_t> available_disk_letters_;
     std::array<HWND,26> disk_checks_{};
     HWND shortcuts_label_{};
@@ -284,6 +290,7 @@ void Overlay::load_settings() {
     if (read(L"layout_version", 0) >= 2) opacity_ = static_cast<unsigned>(std::clamp(read(L"opacity", 100), 1, 100));
     const auto saved_metrics = static_cast<unsigned>(read(L"metrics", default_metrics));
     selected_disks_mask_ = static_cast<unsigned>(read(L"disk_columns",0)) & ((1U<<26)-1U);
+    disk_total_enabled_=read(L"disk_total_column",1)!=0;
     metrics_ = read(L"layout_version", 0) >= 3 ? saved_metrics & all_metrics
         : (saved_metrics & 15U) | ((saved_metrics & 48U) ? 16U : 0U);
     // If the user previously enabled only the removed FPS checkbox, restore the standard metric set.
@@ -315,6 +322,7 @@ void Overlay::save_settings() noexcept {
         save(L"header_colors", header_colors_ ? 1 : 0); save(L"row_colors", row_colors_ ? 1 : 0);
         save(L"overlay_animation", animation_enabled_ ? 1 : 0);
         save(L"disk_columns",static_cast<int>(selected_disks_mask_));
+        save(L"disk_total_column",disk_total_enabled_?1:0);
         save(L"interval_ms", static_cast<int>(options_.interval_ms));
     } catch (...) {}
 }
@@ -353,6 +361,12 @@ float Overlay::disk_left(std::size_t ordinal) const {
 void Overlay::refresh_disk_controls() {
     if(!client_ || !IsWindow(client_))return;
     // Disk topology changes are infrequent; keep no permanently hidden listbox.
+    if(disk_total_check_) {
+        const HWND old=disk_total_check_;
+        controls_.erase(std::remove_if(controls_.begin(),controls_.end(),
+            [old](const Child& entry){return entry.window==old;}),controls_.end());
+        DestroyWindow(old);disk_total_check_=nullptr;
+    }
     for(auto& check:disk_checks_) {
         if(!check)continue;
         const HWND old=check;
@@ -361,21 +375,26 @@ void Overlay::refresh_disk_controls() {
         DestroyWindow(old);
         check=nullptr;
     }
+    disk_total_check_=control(L"BUTTON",L"Диски",BS_AUTOCHECKBOX|WS_TABSTOP,
+        disk_total_checkbox_control,22,483,98,26);
+    SendMessageW(disk_total_check_,BM_SETCHECK,disk_total_enabled_?BST_CHECKED:BST_UNCHECKED,0);
+    if(client_page_!=0)ShowWindow(disk_total_check_,SW_HIDE);
     for(std::size_t i=0;i<available_disk_letters_.size();++i) {
         const wchar_t letter=available_disk_letters_[i];
         if(letter<L'A' || letter>L'Z')continue;
         const unsigned ordinal=static_cast<unsigned>(letter-L'A');
-        const auto name=L"Диск "+std::wstring(1,letter)+L":";
+        const auto name=L"Disk "+std::wstring(1,letter);
+        const auto slot=i+1U;
         const HWND box=control(L"BUTTON",name.c_str(),BS_AUTOCHECKBOX | WS_TABSTOP,
-            disk_checkbox_control+ordinal,22+static_cast<int>(i%5U)*104,
-            483+static_cast<int>(i/5U)*32,98,26);
+            disk_checkbox_control+ordinal,22+static_cast<int>(slot%5U)*104,
+            483+static_cast<int>(slot/5U)*32,98,26);
         disk_checks_[ordinal]=box;
         SendMessageW(box,BM_SETCHECK,(selected_disks_mask_ & (1U<<ordinal))?
             BST_CHECKED:BST_UNCHECKED,0);
         if(client_page_!=0)ShowWindow(box,SW_HIDE);
     }
     // The same responsive checkbox grid also determines the settings height.
-    const int rows=static_cast<int>((available_disk_letters_.size()+4U)/5U);
+    const int rows=static_cast<int>((available_disk_letters_.size()+1U+4U)/5U);
     const int summary_y=486+rows*32;
     const int header_y=summary_y+33;
     const int animation_y=header_y+36;
@@ -627,6 +646,8 @@ void Overlay::apply_client() {
         if (SendDlgItemMessageW(client_,metric_control+i,BM_GETCHECK,0,0)==BST_CHECKED)
             metrics_ |= 1U<<i;
     }
+    if(disk_total_check_)
+        disk_total_enabled_=SendMessageW(disk_total_check_,BM_GETCHECK,0,0)==BST_CHECKED;
     for(std::size_t i=0;i<disk_checks_.size();++i)if(disk_checks_[i]) {
         const unsigned bit=1U<<static_cast<unsigned>(i);
         if(SendMessageW(disk_checks_[i],BM_GETCHECK,0,0)==BST_CHECKED)
@@ -766,7 +787,9 @@ void Overlay::update_view() {
         std::array<bool,6> bursts{};
         next.push_back({p.pid,p.creation_time,std::move(name),percent(p.cpu_percent),
             memory(p.working_set),percent(p.gpu_percent),memory(p.dedicated_gpu_bytes),
-            network_rate(p.rx_bytes_per_second,p.tx_bytes_per_second),loads,bursts});
+            network_rate(p.rx_bytes_per_second,p.tx_bytes_per_second),
+            p.disk_read_bytes_per_second,p.disk_write_bytes_per_second,
+            p.disk_volume_bytes_per_second,loads,bursts});
     }
     // A single PresentMon target: the actual foreground window, regardless of table sorting.
     std::vector<std::uint32_t> fps_targets;
@@ -1168,6 +1191,7 @@ void Overlay::paint(bool animation_only) {
     // Column positions are immutable within one frame; don't recompute per row.
     const auto geometry=calculate_overlay_columns(text_size(),active_metrics(),summary_only(),show_icons_);
     const float height=row_height();
+    const auto selected_disk_letters=enabled_disk_letters();
     const auto row_cells=[&](float y) {
         std::array<D2D1_RECT_F,6> cells{}; // Application + five resource metrics.
         for(std::size_t column=0;column<cells.size();++column)
@@ -1215,15 +1239,20 @@ void Overlay::paint(bool animation_only) {
             metric==0U ? cpu_temperature : metric==2U ? gpu_temperature : std::optional<double>{},header[i],
             metric==0U && snapshot_ && snapshot_->cpu_temperature_board);
     }
+    if(disk_total_enabled_) {
+        const float x=disk_left(0);
+        const auto rect=D2D1::RectF(x,1,x+overlay_layout.disk_width*text_size(),1+height);
+        draw_text(L"Диски",rect,number_font_.Get());
+    }
     if(snapshot_) {
         const auto letters=enabled_disk_letters();
         for(std::size_t i=0;i<letters.size();++i) {
             const auto found=std::find_if(snapshot_->disks.begin(),snapshot_->disks.end(),
                 [&](const DiskActivity& d){return d.letter==letters[i];});
             const auto reading=found==snapshot_->disks.end()?std::optional<double>{}:found->active_percent;
-            const auto x=disk_left(i);
+            const auto x=disk_left(i+(disk_total_enabled_?1U:0U));
             const auto area=D2D1::RectF(x,1,x+overlay_layout.disk_width*text_size(),1+height);
-            const std::wstring title=L"Диск "+std::wstring(1,letters[i])+L": "+percent(reading);
+            const std::wstring title=L"Disk "+std::wstring(1,letters[i])+L" "+percent(reading);
             draw_text(title,area,number_font_.Get(),header_colors_,false,reading);
         }
     }
@@ -1298,6 +1327,26 @@ void Overlay::paint(bool animation_only) {
                 }
             };
             paint_values(row);
+        }
+        // Disk columns are read/write throughput attributed to this application,
+        // unlike the system-wide PDH percentages shown in the header.
+        const auto disk_text=[&](std::optional<double> rate) {
+            if(!rate || !std::isfinite(*rate))return std::wstring(L"—");
+            const double mib=*rate/1048576.0;
+            return mib>=0.10?decimal(mib)+L" MiB/s":decimal(*rate/1024.0)+L" KiB/s";
+        };
+        if(disk_total_enabled_) {
+            std::optional<double> total;
+            if(row.disk_read && row.disk_write)total=*row.disk_read+*row.disk_write;
+            const float x=disk_left(0);
+            draw_text(disk_text(total),D2D1::RectF(x,y,
+                x+overlay_layout.disk_width*text_size(),y+height),number_font_.Get());
+        }
+        for(std::size_t d=0;d<selected_disk_letters.size();++d) {
+            const float x=disk_left(d+(disk_total_enabled_?1U:0U));
+            const auto index=static_cast<unsigned>(selected_disk_letters[d]-L'A');
+            draw_text(disk_text(row.disk_volumes[index]),D2D1::RectF(x,y,
+                x+overlay_layout.disk_width*text_size(),y+height),number_font_.Get());
         }
     }
     if(partial_body)target_->PopAxisAlignedClip();
@@ -1437,6 +1486,9 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         if (LOWORD(wp)==sort_control && HIWORD(wp)==CBN_SELCHANGE) {
             apply_client(); return 0;
         }
+        if(LOWORD(wp)==disk_total_checkbox_control && HIWORD(wp)==BN_CLICKED) {
+            apply_client();return 0;
+        }
         if(LOWORD(wp)>=disk_checkbox_control && LOWORD(wp)<disk_checkbox_control+26U
             && HIWORD(wp)==BN_CLICKED) {
             apply_client();return 0;
@@ -1470,7 +1522,7 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         KillTimer(window,settings_timer); apply_client(); DestroyWindow(window); return 0;
     case WM_DESTROY:
         statistics_.reset(); tabs_=nullptr; client_=nullptr; controls_.clear();
-        disk_checks_.fill(nullptr);shortcuts_label_=nullptr;
+        disk_checks_.fill(nullptr);disk_total_check_=nullptr;shortcuts_label_=nullptr;
         if (client_font_) { DeleteObject(client_font_); client_font_=nullptr; } activity(); return 0;
     }
     return DefWindowProcW(window,msg,wp,lp);

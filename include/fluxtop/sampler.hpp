@@ -6,6 +6,7 @@
 #include "fluxtop/process_collector.hpp"
 #include "fluxtop/network_collector.hpp"
 #include "fluxtop/disk_collector.hpp"
+#include "fluxtop/disk_io_collector.hpp"
 #include "fluxtop/history.hpp"
 #include "fluxtop/fps_collector.hpp"
 #include <atomic>
@@ -28,6 +29,7 @@ private:
     SpikeTracker spikes_;
     NetworkCollector network_;
     DiskCollector disks_;
+    DiskIoCollector disk_io_;
     FpsCollector fps_;
     bool fps_enabled_{};
     std::vector<std::uint32_t> fps_targets_;

@@ -36,9 +36,13 @@ struct Process : RawProcess {
     std::optional<std::uint64_t> dedicated_gpu_bytes;
     bool has_baseline{};
     double spike_score{};
-    std::array<double,7> auto_scores{}; // First six: CPU, RAM, GPU, VRAM, Rx, Tx; last slot reserved, not scored.
-    std::array<double,7> burst_scores{}; // First six: attributable resource bursts; last slot reserved.
-    std::optional<double> io_bytes_per_second; // Total process I/O (disk/device/network); never assigned to a drive.
+    std::array<double,7> auto_scores{}; // CPU, RAM, GPU, VRAM, Rx, Tx, confirmed physical disk pressure.
+    std::array<double,7> burst_scores{}; // The seventh score is only measured physical disk I/O.
+    std::optional<double> io_bytes_per_second; // Generic GetProcessIoCounters I/O; never used for disk scoring.
+    // Confirmed physical ETW transfers (not cache-level FileIo bytes).
+    std::optional<double> disk_read_bytes_per_second,disk_write_bytes_per_second,disk_pressure_percent;
+    std::array<std::optional<double>,26> disk_volume_bytes_per_second{};
+    std::array<std::optional<double>,26> disk_volume_pressure_percent{};
     std::optional<double> rx_bytes_per_second, tx_bytes_per_second;
     std::vector<std::uint32_t> member_pids; // Only populated in UI-level aggregate, never raw history.
 };
@@ -115,7 +119,8 @@ struct Snapshot {
     bool cpu_temperature_board{}; // True if CPU value is an explicit motherboard/ACPI CPU zone.
     std::optional<double> total_rx_bytes_per_second, total_tx_bytes_per_second;
     std::string network_status;
-    std::vector<DiskActivity> disks; // Enumerated on sampler thread, sorted by letter.
+    std::vector<DiskActivity> disks; // System-wide logical-volume PDH activity, not a process percentage.
+    std::string disk_io_status; // ready / partial-attribution / incomplete / administrator-required / unavailable.
     double interval_ms{};
     std::optional<std::uint64_t> history_records;
     std::string history_error;

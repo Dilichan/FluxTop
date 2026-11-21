@@ -125,7 +125,7 @@ struct Observation {
 };
 std::array<std::optional<double>,history_metric_count> metrics_of(const Process& group){
     std::array<std::optional<double>,history_metric_count> v{};
-    v[0]=auto_rank(group,31U).score;
+    v[0]=auto_rank(group,63U).score; // Physical-disk score appears only with trustworthy ETW data.
     v[1]=group.cpu_percent;
     if(group.working_set) v[2]=static_cast<double>(*group.working_set);
     v[3]=group.gpu_percent;

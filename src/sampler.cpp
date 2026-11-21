@@ -30,6 +30,7 @@ Snapshot Sampler::collect() {
     if (!snapshot.gpu_temperature_c) snapshot.gpu_temperature_c = hwtemps.gpu_c;
     network_.collect(snapshot);
     disks_.collect(snapshot);
+    disk_io_.collect(snapshot); // Physical ETW attribution; never generic process I/O.
     spikes_.update(snapshot.processes, snapshot.total_ram_capacity, snapshot.total_gpu_memory_capacity);
     PROCESS_MEMORY_COUNTERS_EX memory{};
     memory.cb = sizeof(memory);
@@ -51,7 +52,7 @@ Snapshot Sampler::collect() {
         "sampler.snapshot","processes="+std::to_string(snapshot.processes.size())+
         " collection_ms="+std::to_string(snapshot.collection_ms)+
         " history_ms="+std::to_string(snapshot.history_write_ms)+
-        " history_error="+snapshot.history_error);
+        " history_error="+snapshot.history_error+" disk_io="+snapshot.disk_io_status);
     return snapshot;
 }
 

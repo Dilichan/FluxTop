@@ -45,7 +45,7 @@ void StatisticsPage::open_popup(unsigned kind) {
         L"FluxTop — история (AutoScore)",L"FluxTop — ЦП",L"FluxTop — память",
         L"FluxTop — сеть",L"FluxTop — GPU"}};
     const auto disk_title=kind>=6
-        ?L"FluxTop — Диск "+std::wstring(1,static_cast<wchar_t>(L'A'+kind-6))+L":"
+        ?L"FluxTop — Disk "+std::wstring(1,static_cast<wchar_t>(L'A'+kind-6))
         :std::wstring{};
     const wchar_t* title=kind<titles.size()?titles[kind]:disk_title.c_str();
     popup.window=CreateWindowExW(0,window_class,title,
@@ -68,7 +68,7 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
     const std::array<const wchar_t*,6> names{{L"AutoScore · последняя минута",L"AutoScore · история",
         L"ЦП",L"Память",L"Сеть",L"GPU"}};
     const auto disk_name=popup.kind>=6
-        ?L"Диск "+std::wstring(1,static_cast<wchar_t>(L'A'+popup.kind-6))+L":"
+        ?L"Disk "+std::wstring(1,static_cast<wchar_t>(L'A'+popup.kind-6))
         :std::wstring{};
     label(dc,popup.kind<names.size()?names[popup.kind]:disk_name.c_str(),22,55);
     // Controls are native Win32; navigation instructions are intentionally absent.

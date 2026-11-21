@@ -1315,7 +1315,7 @@ void StatisticsPage::draw_sidebar(HDC dc) {
         FillRect(dc,&item,face);DeleteObject(face);
         HBRUSH border=CreateSolidBrush(chosen?RGB(52,115,156):RGB(206,211,214));
         FrameRect(dc,&item,border);DeleteObject(border);
-        const std::wstring name=L"Диск "+std::wstring(1,letter);
+        const std::wstring name=L"Disk "+std::wstring(1,letter);
         label(dc,name.c_str(),26,y+9,RGB(32,44,52));
         const auto latest_value=system_points_.empty()?std::optional<double>{}:system_points_.back().disks[index];
         const auto reading=stat_percent(latest_value);
@@ -1527,7 +1527,7 @@ void StatisticsPage::draw(HDC dc) {
     const std::array<const wchar_t*,7> titles{{L"ЦП",L"ПАМЯТЬ",L"СЕТЬ",L"ГРАФИЧЕСКИЙ ПРОЦЕССОР",
         L"ПОСЛЕДНЯЯ МИНУТА · AutoScore",L"ИСТОРИЯ · AutoScore",L"НАБЛЮДАЕМЫЙ АПТАЙМ"}};
     if(selected_disk_letter_) {
-        const auto label_text=L"ДИСК "+std::wstring(1,selected_disk_letter_)+L": · АКТИВНОСТЬ";
+        const auto label_text=L"DISK "+std::wstring(1,selected_disk_letter_)+L" · АКТИВНОСТЬ";
         label(dc,label_text.c_str(),292,18,RGB(40,47,55));
     } else label(dc,titles[selected_section_],292,18,RGB(40,47,55));
     // Only one graph is visible; the original range, auto-scale and popout controls
@@ -1796,7 +1796,7 @@ void StatisticsPage::draw_system_hover(HDC dc,const RECT& bounds){
     SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(53,49,43));
     RECT header{bounds.left+18,bounds.top+9,bounds.right-16,bounds.top+39};
     const auto title=system_tip_metric_>=5?
-        L"Диск "+std::wstring(1,static_cast<wchar_t>(L'A'+system_tip_metric_-5)):
+        L"Disk "+std::wstring(1,static_cast<wchar_t>(L'A'+system_tip_metric_-5)):
         std::wstring(names[system_tip_metric_]);
     DrawTextW(dc,title.c_str(),-1,&header,DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
     const auto value=[&](unsigned index,const wchar_t* unit)->std::wstring {

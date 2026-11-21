@@ -113,12 +113,17 @@ void disk_io_tests() {
         "an arbitrary I/O spike cannot create false disk alerts or dominate CPU");
     check(!fluxtop::auto_metric_has_burst(rows[0],fluxtop::AutoMetric::io),
         "generic process I/O never creates a disk burst indicator");
-    rows[0].auto_scores[6]=100.0;
-    rows[0].burst_scores[6]=100.0;
-    const auto invalid_seventh=fluxtop::auto_rank(rows[0],63U);
-    check(std::abs(invalid_seventh.score-cpu_reference.score)<1e-9 &&
-        !invalid_seventh.burst && invalid_seventh.metric==cpu_reference.metric,
-        "reserved seventh score slot cannot leak into AutoScore via legacy mask 63");
+    // A synthetic confirmed physical-disk pressure must be included by 63U,
+    // but stay excluded by 31U. It must not originate from generic process I/O.
+    rows[0].disk_pressure_percent=45.0;
+    tracker.update(rows);
+    const auto with_physical=fluxtop::auto_rank(rows[0],63U);
+    const auto without_physical=fluxtop::auto_rank(rows[0],31U);
+    check(with_physical.score>without_physical.score &&
+        with_physical.metric==fluxtop::AutoMetric::io,
+        "confirmed ETW physical disk pressure participates in AutoScore");
+    rows[0].disk_pressure_percent.reset();
+    tracker.update(rows);
     raw.creation_time=124;raw.sampled_ns=3000000000;
     rows=counter.update({raw},4);
     check(!rows[0].io_bytes_per_second,"PID reuse resets process I/O baseline");

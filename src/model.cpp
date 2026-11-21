@@ -45,20 +45,18 @@ std::vector<Process> CpuTracker::update(std::vector<RawProcess> raw, unsigned pr
 namespace {
 // FluxTop AutoScore: capacity normalization, dominant load, bounded secondary
 // demand, EWMA and a separate rising-edge detector. Coefficients are empirical.
-// Score only attributable CPU/RAM/GPU/VRAM/network. GetProcessIoCounters()
-// reports generic process I/O (devices/network included), not physical disk
-// activity. Keep its raw rate for diagnostics, but NEVER score it as disk I/O.
+// Disk input is confirmed ETW physical I/O pressure, NEVER GetProcessIoCounters().
 constexpr double mib = 1048576.0;
 constexpr double gib = 1073741824.0;
 // Visual alert threshold; distinct from the large ranking-bonus threshold (20).
 constexpr double orange_burst_threshold = 5.0;
-constexpr std::array<unsigned,6> visible_bits{1U,2U,4U,8U,16U,16U};
+constexpr std::array<unsigned,7> visible_bits{1U,2U,4U,8U,16U,16U,32U};
 std::array<std::optional<double>,7> metric_values(const Process& row) {
     return {row.cpu_percent,
         row.working_set ? std::optional<double>(static_cast<double>(*row.working_set)) : std::nullopt,
         row.gpu_percent,
         row.dedicated_gpu_bytes ? std::optional<double>(static_cast<double>(*row.dedicated_gpu_bytes)) : std::nullopt,
-        row.rx_bytes_per_second, row.tx_bytes_per_second, row.io_bytes_per_second};
+        row.rx_bytes_per_second, row.tx_bytes_per_second, row.disk_pressure_percent};
 }
 double positive(std::optional<double> value) {
     return value && std::isfinite(*value) && *value > 0.0 ? *value : 0.0;
@@ -74,7 +72,7 @@ double activity_score(std::size_t metric, double value,
     case 1: return fraction_score(value,ram_capacity,0.70);
     case 2: return std::clamp(value,0.0,100.0);       // GPU engine utilization
     case 3: return fraction_score(value,gpu_capacity,0.65);
-    // Generic process I/O is deliberately excluded from disk scoring.
+    case 6: return std::clamp(value,0.0,100.0); // ETW-confirmed disk pressure, capacity neutral.
     default: return std::clamp(90.0 * (1.0 - std::exp(-value / (2.0*mib))),0.0,90.0);
     }
 }
@@ -88,7 +86,7 @@ double change_score(std::size_t metric, double increase,
     case 2: return std::min(100.0,increase * 2.0);
     case 3: return std::min(100.0,30.0*increase /
         std::max(256.0*mib,gpu_capacity ? static_cast<double>(*gpu_capacity)*.08 : gib));
-    // No I/O rising-edge bonus without attributable disk I/O.
+    case 6: return std::min(100.0,increase*2.0); // Disk busy-share change; no raw MiB/s multiplier.
     default: return std::min(100.0,100.0*(1.0-std::exp(-increase/(2.0*mib))));
     }
 }
@@ -284,6 +282,9 @@ std::vector<Process> aggregate_application_processes(const std::vector<Process>&
             combined.presented_fps.reset();
             combined.rx_bytes_per_second.reset(); combined.tx_bytes_per_second.reset();
             combined.io_bytes_per_second.reset();
+            combined.disk_read_bytes_per_second.reset();combined.disk_write_bytes_per_second.reset();
+            combined.disk_pressure_percent.reset();combined.disk_volume_bytes_per_second.fill(std::nullopt);
+            combined.disk_volume_pressure_percent.fill(std::nullopt);
             combined.spike_score=0; combined.auto_scores.fill(0); combined.burst_scores.fill(0);
             combined.member_pids.clear();
             result.push_back(std::move(combined));
@@ -299,9 +300,19 @@ std::vector<Process> aggregate_application_processes(const std::vector<Process>&
         add_positive(combined.rx_bytes_per_second,part.rx_bytes_per_second);
         add_positive(combined.tx_bytes_per_second,part.tx_bytes_per_second);
         add_positive(combined.io_bytes_per_second,part.io_bytes_per_second);
+        add_positive(combined.disk_read_bytes_per_second,part.disk_read_bytes_per_second);
+        add_positive(combined.disk_write_bytes_per_second,part.disk_write_bytes_per_second);
+        for(std::size_t v=0;v<combined.disk_volume_bytes_per_second.size();++v) {
+            add_positive(combined.disk_volume_bytes_per_second[v],part.disk_volume_bytes_per_second[v]);
+            add_positive(combined.disk_volume_pressure_percent[v],part.disk_volume_pressure_percent[v]);
+        }
     }
-    for (auto& group : result)
+    for (auto& group : result) {
         if (group.cpu_percent) group.cpu_percent=std::clamp(*group.cpu_percent,0.0,100.0);
+        for(const auto& pressure:group.disk_volume_pressure_percent)
+            if(pressure)group.disk_pressure_percent=std::max(
+                group.disk_pressure_percent.value_or(0.0),std::clamp(*pressure,0.0,100.0));
+    }
     return result;
 }
 
