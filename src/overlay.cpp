@@ -588,7 +588,7 @@ void Overlay::layout_client() {
         SendMessageW(child.window, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         MoveWindow(child.window, px(child.bounds.left), px(child.bounds.top+40), px(child.bounds.right-child.bounds.left), px(child.bounds.bottom-child.bounds.top), TRUE);
     }
-    const int page_width=client_page_==1?1180:680;
+    const int page_width=client_page_==1?1420:680;
     int settings_height=840;
     for(const auto& child:controls_)if(GetDlgCtrlID(child.window)==static_cast<int>(quit_app))
         settings_height=std::max(settings_height,static_cast<int>(child.bounds.bottom)+68);

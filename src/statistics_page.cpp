@@ -1,6 +1,7 @@
 #include "fluxtop/diagnostics.hpp"
 #include "fluxtop/statistics_page.hpp"
 #include "fluxtop/statistics_axis.hpp"
+#include "fluxtop/statistics_sidebar_order.hpp"
 #include "fluxtop/windows.hpp"
 #include "fluxtop/metric_text.hpp"
 #include "fluxtop/overlay_ini.hpp"
@@ -30,13 +31,13 @@ constexpr UINT ready_message=WM_APP+201;
 constexpr UINT_PTR animate_message=2201;
 enum : int { period_id=1001,from_id,to_id,system_id,table_id,stats_limit_id,popout_live_id,popout_history_id,popout_table_id,history_limit_id,uptime_limit_id,uptime_period_id,uptime_from_id,uptime_to_id };
 // Logical page dimensions; chart labels and Win32 controls share the same grid.
-constexpr int page_width=1160, page_height=860;
+constexpr int page_width=1400, page_height=860;
 // One shared right-edge guard for live charts; historical charts remain unchanged.
 constexpr int live_tail_guard_px=18;
 constexpr int spark_tail_guard_px=8;
 constexpr int auto_live_id=1201, auto_history_id=1202, popup_auto_id=1203, system_period_id=1210, system_auto_id=1211, system_popout_id=1212;
-constexpr RECT one_minute{310,171,1124,665};
-constexpr RECT history_chart{310,171,1124,665};
+constexpr RECT one_minute{310,171,1364,665};
+constexpr RECT history_chart{310,171,1364,665};
 constexpr std::array<const wchar_t*,6> popup_auto_scale_keys{{
     L"stats_popup_auto_live",L"stats_popup_auto_history",L"stats_popup_auto_cpu",
     L"stats_popup_auto_ram",L"stats_popup_auto_network",L"stats_popup_auto_gpu"}};
@@ -363,11 +364,11 @@ void StatisticsPage::layout() {
     put(limit_label_,292,66,260,28);
     put(limit_slider_,546,63,225,33);
     put(auto_live_,792,65,130,28);
-    put(popout_live_,952,64,172,30);
+    put(popout_live_,1190,64,172,30);
     put(history_limit_label_,292,65,230,28);
     put(history_limit_slider_,500,63,225,33);
     put(auto_history_,792,65,130,28);
-    put(popout_history_,952,64,172,30);
+    put(popout_history_,1190,64,172,30);
     put(period_,292,111,158,200);
     put(from_,474,112,150,27);
     put(to_,642,112,150,27);
@@ -375,16 +376,16 @@ void StatisticsPage::layout() {
     put(uptime_limit_label_,292,66,205,28);
     put(uptime_limit_slider_,490,63,210,33);
     put(show_system_,722,64,229,31);
-    put(popout_table_,952,64,172,30);
+    put(popout_table_,1190,64,172,30);
     put(uptime_period_,292,111,158,190);
     put(uptime_from_,474,112,150,27);
     put(uptime_to_,642,112,150,27);
-    put(table_,292,171,838,620);
+    put(table_,292,171,1078,620);
     put(system_period_,292,65,170,200);
     put(system_auto_,540,65,180,30);
-    put(system_popout_,952,64,172,30);
-    put(fill_toggle_,925,114,200,29);
-    put(pause_toggle_,725,114,180,29);
+    put(system_popout_,1190,64,172,30);
+    put(fill_toggle_,1055,114,205,29);
+    put(pause_toggle_,855,114,175,29);
     for(HWND control:{limit_label_,limit_slider_,auto_live_,popout_live_})
         ShowWindow(control,live?SW_SHOW:SW_HIDE);
     for(HWND control:{history_limit_label_,history_limit_slider_,auto_history_,popout_history_,period_})
@@ -1105,14 +1106,14 @@ std::int64_t StatisticsPage::live_view_end() const {
 bool StatisticsPage::advance_time_view(double elapsed_ms) {
     // Do not stop the viewport when it catches up with the latest collected sample:
     // time must keep passing between samples, independent of the polling interval.
-    const bool live_page=active_ && (selected_disk_letter_
-        ?!frozen_views_[6U+static_cast<unsigned>(selected_disk_letter_-L'A')].paused
-        :(selected_section_<5 && !frozen_views_[selected_section_].paused));
+    // Sidebar sparklines remain live even on History, Uptime and paused details.
+    // The selected detail chart retains its independent pause and time range.
+    const bool sidebar_live=active_;
     bool live_popup=false;
     for(const auto& popup:popups_)if(popup.window && !popup.paused && popup.kind!=1) {
         live_popup=true;break;
     }
-    if(!live_page && !live_popup)return false;
+    if(!sidebar_live && !live_popup)return false;
     const double current_wall_time=static_cast<double>(now_ms());
     const double frame=std::clamp(elapsed_ms,1.0,100.0);
     const auto advance=[&](double& cursor,double latest_sample) {
@@ -1187,7 +1188,8 @@ void StatisticsPage::draw_sidebar(HDC dc) {
         RGB(131,54,156),RGB(34,133,123),RGB(85,112,142),RGB(99,123,96)}};
     const std::int64_t latest=system_view_end();
     for(unsigned section=0;section<names.size();++section) {
-        const int y=18+(static_cast<int>(section)-static_cast<int>(sidebar_scroll_))*114;
+        const int y=18+(static_cast<int>(statistics_sidebar_section_row(
+            section,static_cast<unsigned>(disk_letters_.size())))-static_cast<int>(sidebar_scroll_))*114;
         if(y>=830 || y+105<=18)continue;
         const RECT item{14,y,266,y+105};
         HBRUSH face=CreateSolidBrush(!selected_disk_letter_ && section==selected_section_?RGB(225,233,241):RGB(245,246,247));
@@ -1288,7 +1290,8 @@ void StatisticsPage::draw_sidebar(HDC dc) {
     for(std::size_t i=0;i<disk_letters_.size();++i) {
         const wchar_t letter=disk_letters_[i];
         const unsigned index=static_cast<unsigned>(letter-L'A');
-        const int y=18+(7+static_cast<int>(i)-static_cast<int>(sidebar_scroll_))*114;
+        const int y=18+(static_cast<int>(statistics_sidebar_disk_row(static_cast<unsigned>(i)))
+            -static_cast<int>(sidebar_scroll_))*114;
         if(y>=830 || y+105<=18)continue;
         const RECT item{14,y,266,y+105};
         const bool chosen=selected_disk_letter_==letter;
@@ -1536,8 +1539,8 @@ void StatisticsPage::draw(HDC dc) {
         const auto begin=held.paused?held.from:right-range;
         const auto* samples=held.paused?&held.samples:nullptr;
         if(selected_section_==3) {
-            const RECT gpu{310,190,1124,372};
-            const RECT vram{310,458,1124,640};
+            const RECT gpu{310,190,1364,372};
+            const RECT vram{310,458,1364,640};
             label(dc,L"Загрузка GPU",438,162,RGB(131,54,156));
             label(dc,L"Использование VRAM",438,430,RGB(194,89,178));
             draw_system_graph(dc,gpu,3,begin,right,system_autoscale_,1.0,system_hover_,samples);
@@ -1583,8 +1586,8 @@ void StatisticsPage::mouse(int x,int y) {
         const auto begin=held.paused?held.from:right-range;
         const auto* samples=held.paused?&held.samples:nullptr;
         if(selected_section_==3) {
-            const RECT gpu{310,190,1124,372};
-            const RECT vram{310,458,1124,640};
+            const RECT gpu{310,190,1364,372};
+            const RECT vram{310,458,1364,640};
             if(y>=vram.top && y<=vram.bottom)
                 show_system_hover(4,system_hover_,vram,begin,right,samples);
             else show_system_hover(3,system_hover_,gpu,begin,right,samples);
@@ -1875,7 +1878,25 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
         RECT r{};GetClientRect(hwnd_,&r);
         if(r.right>0 && r.bottom>0) {
             if(const HDC buffer=page_buffer_.prepare(dc,r.right,r.bottom)) {
-                draw(buffer);BitBlt(dc,0,0,r.right,r.bottom,buffer,0,0,SRCCOPY);
+                const int sidebar_width=MulDiv(280,r.right,page_width);
+                const bool sidebar_only=paint_font_ && ps.rcPaint.left>=0 &&
+                    ps.rcPaint.right<=sidebar_width;
+                if(sidebar_only) {
+                    const int state=SaveDC(buffer);
+                    SetMapMode(buffer,MM_ANISOTROPIC);
+                    SetWindowExtEx(buffer,page_width,page_height,nullptr);
+                    SetViewportExtEx(buffer,r.right,r.bottom,nullptr);
+                    const RECT paper{0,0,280,page_height};
+                    FillRect(buffer,&paper,GetSysColorBrush(COLOR_BTNFACE));
+                    const auto old=SelectObject(buffer,paint_font_);
+                    draw_sidebar(buffer);
+                    SelectObject(buffer,old);
+                    if(state)RestoreDC(buffer,state);
+                    BitBlt(dc,0,0,sidebar_width,r.bottom,buffer,0,0,SRCCOPY);
+                } else {
+                    draw(buffer);
+                    BitBlt(dc,0,0,r.right,r.bottom,buffer,0,0,SRCCOPY);
+                }
             } else draw(dc); // No invisible page if a GDI allocation fails.
         }
         EndPaint(hwnd_,&ps);return 0;
@@ -1889,8 +1910,12 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
                 const auto row=static_cast<unsigned>((y-18)/114)+sidebar_scroll_;
                 const auto top=18+static_cast<int>(row-sidebar_scroll_)*114;
                 if(y<top+105) {
-                    if(row<7)select_section(row);
-                    else if(row-7<disk_letters_.size())select_disk(disk_letters_[row-7]);
+                    if(const auto item=statistics_sidebar_item_at(
+                        row,static_cast<unsigned>(disk_letters_.size()))) {
+                        if(item->kind==StatisticsSidebarKind::section)
+                            select_section(item->index);
+                        else select_disk(disk_letters_[item->index]);
+                    }
                 }
             }
         }
@@ -1929,8 +1954,13 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
                 ?!frozen_views_[6U+static_cast<unsigned>(selected_disk_letter_-L'A')].paused
                 :(selected_section_<5 && !frozen_views_[selected_section_].paused);
             if(active_ && (axis_animating ||
-                (live_page && (animating || viewport_animating))))
+                (live_page && (animating || viewport_animating)))) {
                 InvalidateRect(hwnd_,nullptr,FALSE);
+            } else if(active_ && viewport_animating) {
+                RECT bounds{};GetClientRect(hwnd_,&bounds);
+                const RECT sidebar{0,0,MulDiv(280,bounds.right,page_width),bounds.bottom};
+                InvalidateRect(hwnd_,&sidebar,FALSE);
+            }
             for(auto& popup:popups_)if(popup.window && (axis_animating ||
                 (!popup.paused && popup.kind!=1 && (animating || viewport_animating))))
                 InvalidateRect(popup.window,nullptr,FALSE);

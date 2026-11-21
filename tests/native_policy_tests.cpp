@@ -133,9 +133,13 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "void StatisticsPage::draw_chart_core(",
             "draw_time_grid(dc,grid_area,style.from,style.to,style.time_divisions);",
             "style.time_divisions=8;", "style.time_divisions=10;",
-            "const bool live_page=active_ && selected_section_<5",
+            "const bool sidebar_live=active_;",
             "const double current_wall_time=static_cast<double>(now_ms());",
-            "const bool viewport_animating=advance_time_view(elapsed);"});
+            "const bool viewport_animating=advance_time_view(elapsed);",
+            "else if(active_ && viewport_animating) {",
+            "const bool sidebar_only=paint_font_ && ps.rcPaint.left>=0 &&",
+            "draw_sidebar(buffer);"});
+        absent(page,{"if(!live_page && !live_popup)return false;"});
         need(header,{"std::array<std::array<double,31>,2> smooth_system_axis_max_",
             "const std::deque<SystemPoint>* frozen=nullptr,bool detached=false"});
         // AutoScore, system graphs and sidebar mini-charts must share the same
@@ -146,7 +150,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             ++shared_calls;
         if(shared_calls!=4U)
             throw std::runtime_error("Expected exactly four shared chart renderer call sites");
-        need(popup,{"popup->fill_toggle", "popup_auto_id+1", "show_system_hover(popup->kind-2",
+        need(popup,{"popup->fill_toggle", "popup_auto_id+1", "page->show_system_hover(popup->kind>=6?popup->kind-1:popup->kind-2",
             "frozen_system,true", "WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN",
             "if(popup->kind<2 || popup->dragging)InvalidateRect(window,nullptr,FALSE);"});
         need(header,{"PaintBuffer tooltip_buffer_;", "bool position_tooltip(POINT screen,int offset_x,int offset_y);"});
@@ -163,7 +167,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN"});
         need(page,{"FluxTop.SystemDashboard.Stage1","system_points_.push_back(point)",
             "stats_selected_section","case WM_LBUTTONUP:","system_popout_id"});
-        need(popup,{"popup.kind>=2","draw_system_graph(dc,graph,popup.kind-2",
+        need(popup,{"popup.kind>=2","draw_system_graph(dc,graph,popup.kind>=6?popup.kind-1:popup.kind-2",
             "popup_auto_scale_keys"});
         need(page,{"popup_auto_scale_keys","stats_popup_auto_cpu"});
         need(page,{"popout_live_id","popout_history_id","rebuild_live_series()",

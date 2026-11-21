@@ -1,6 +1,7 @@
 #include "fluxtop/model.hpp"
 #include "fluxtop/metric_text.hpp"
 #include "fluxtop/overlay_layout.hpp"
+#include "fluxtop/statistics_sidebar_order.hpp"
 #include "fluxtop/gpu_process_memory.hpp"
 #include "fluxtop/options.hpp"
 #include "fluxtop/output.hpp"
@@ -491,9 +492,41 @@ void overlay_geometry_tests() {
     check(std::abs(summary.total_width - summary.right[5] - config.right_padding) < .001f,
         "summary-only width is produced by the same layout calculation");
 }
+void statistics_sidebar_order_tests() {
+    using namespace fluxtop;
+    for(unsigned drives : {0U,1U,4U,26U}) {
+        const auto assert_item=[&](unsigned row,StatisticsSidebarKind kind,unsigned index) {
+            const auto item=statistics_sidebar_item_at(row,drives);
+            check(item && item->kind==kind && item->index==index,
+                "sidebar click resolves the correct graph with dynamic disks");
+        };
+        assert_item(0U,StatisticsSidebarKind::section,4U); // Auto first.
+        for(unsigned section=0U;section<4U;++section) {
+            const auto row=statistics_sidebar_section_row(section,drives);
+            check(row==section+1U,"CPU/RAM/network/GPU follow Auto");
+            assert_item(row,StatisticsSidebarKind::section,section);
+        }
+        for(unsigned i=0;i<drives;++i) {
+            const auto row=statistics_sidebar_disk_row(i);
+            check(row==5U+i,"disks appear immediately after GPU");
+            assert_item(row,StatisticsSidebarKind::disk,i);
+        }
+        check(statistics_sidebar_section_row(4U,drives)==0U,
+            "Auto is visually first for every disk count");
+        check(statistics_sidebar_section_row(5U,drives)==5U+drives,
+            "History is always penultimate");
+        check(statistics_sidebar_section_row(6U,drives)==6U+drives,
+            "Uptime is always last");
+        assert_item(5U+drives,StatisticsSidebarKind::section,5U);
+        assert_item(6U+drives,StatisticsSidebarKind::section,6U);
+        check(!statistics_sidebar_item_at(7U+drives,drives),
+            "sidebar rejects out-of-range click");
+    }
+}
 int main() {
     metric_format_tests();
     overlay_geometry_tests();
+    statistics_sidebar_order_tests();
     cpu_tests();
     disk_io_tests();
     sort_tests();
