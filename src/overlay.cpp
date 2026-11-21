@@ -375,7 +375,7 @@ void Overlay::refresh_disk_controls() {
         DestroyWindow(old);
         check=nullptr;
     }
-    disk_total_check_=control(L"BUTTON",L"Диски",BS_AUTOCHECKBOX|WS_TABSTOP,
+    disk_total_check_=control(L"BUTTON",L"Disks",BS_AUTOCHECKBOX|WS_TABSTOP,
         disk_total_checkbox_control,22,483,98,26);
     SendMessageW(disk_total_check_,BM_SETCHECK,disk_total_enabled_?BST_CHECKED:BST_UNCHECKED,0);
     if(client_page_!=0)ShowWindow(disk_total_check_,SW_HIDE);
@@ -1242,7 +1242,7 @@ void Overlay::paint(bool animation_only) {
     if(disk_total_enabled_) {
         const float x=disk_left(0);
         const auto rect=D2D1::RectF(x,1,x+overlay_layout.disk_width*text_size(),1+height);
-        draw_text(L"Диски",rect,number_font_.Get());
+        draw_text(L"Disks",rect,number_font_.Get());
     }
     if(snapshot_) {
         const auto letters=enabled_disk_letters();
@@ -1330,10 +1330,14 @@ void Overlay::paint(bool animation_only) {
         }
         // Disk columns are read/write throughput attributed to this application,
         // unlike the system-wide PDH percentages shown in the header.
+        const bool disk_partial=snapshot_ && snapshot_->disk_io_status=="partial-attribution";
         const auto disk_text=[&](std::optional<double> rate) {
             if(!rate || !std::isfinite(*rate))return std::wstring(L"—");
             const double mib=*rate/1048576.0;
-            return mib>=0.10?decimal(mib)+L" MiB/s":decimal(*rate/1024.0)+L" KiB/s";
+            std::wstring result=mib>=0.10?decimal(mib)+L" MiB/s":
+                decimal(*rate/1024.0)+L" KiB/s";
+            if(disk_partial && *rate>0.0)result.insert(0,L"≥");
+            return result;
         };
         if(disk_total_enabled_) {
             std::optional<double> total;

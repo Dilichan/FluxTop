@@ -17,7 +17,7 @@ struct OverlayLayoutConfig {
     float right_padding = 2.0f;
     // CPU, RAM, GPU, GPU RAM, Rx/Tx, in font-size units.
     std::array<float, 5> metric_widths{8.0f, 5.8f, 8.0f, 9.0f, 12.0f};
-    float disk_width = 8.0f; // Read/write throughput columns, one font unit narrower.
+    float disk_width = 7.0f; // Read/write throughput columns, one font unit narrower.
 };
 
 // THE SINGLE PLACE TO CHANGE OVERLAY WIDTHS AND GAPS.

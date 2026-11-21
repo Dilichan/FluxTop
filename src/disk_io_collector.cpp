@@ -1,5 +1,6 @@
 #include "fluxtop/disk_io_collector.hpp"
 #include "fluxtop/disk_attribution.hpp"
+#include "fluxtop/diagnostics.hpp"
 #include "fluxtop/windows.hpp"
 #include <windows.h>
 #include <winioctl.h>
@@ -14,6 +15,7 @@
 #include <cstring>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -114,6 +116,15 @@ struct DiskIoCollector::Impl {
     std::array<std::uint64_t,26> volume_total{};
     std::vector<PhysicalVolumeExtent> extents;
     std::uint64_t physical_total{},matched_total{};
+    // Cumulative ETW diagnostics reset only every 15 seconds, not each sample.
+    // Diagnostics report coverage without capturing paths, names or raw events.
+    struct Telemetry {
+        std::uint64_t file_events{},disk_events{},file_missing{},disk_invalid{};
+        std::uint64_t no_disk_irp{},unmatched_irp{},mismatch_file{},
+            mismatch_direction{},mismatch_time{},matched_events{},unmapped_volume{};
+        std::uint64_t physical_bytes{},matched_bytes{};
+    } telemetry{};
+    std::chrono::steady_clock::time_point last_diagnostics=std::chrono::steady_clock::now();
     std::atomic<bool> failed{false};
     bool baseline{};
     std::string status{"unavailable"};
@@ -132,7 +143,10 @@ struct DiskIoCollector::Impl {
             const auto when=static_cast<std::uint64_t>(record->EventHeader.TimeStamp.QuadPart);
             std::lock_guard lock(self.mutex);
             if(file) {
-                if(!irp || !*irp || !fileobj || !*fileobj)return;
+                ++self.telemetry.file_events;
+                if(!irp || !*irp || !fileobj || !*fileobj) {
+                    ++self.telemetry.file_missing;return;
+                }
                 const DWORD pid=record->EventHeader.ProcessId;
                 if(pid<=4)return; // Cache manager / System writes cannot be assigned to a user application.
                 if(self.irps.size()>=max_irps && !self.irps.contains(*irp)) {
@@ -141,27 +155,41 @@ struct DiskIoCollector::Impl {
                 self.irps[*irp]={pid,*fileobj,when,opcode==68};
                 return;
             }
+            ++self.telemetry.disk_events;
             const auto number=property(record,L"DiskNumber");
             const auto offset=property(record,L"ByteOffset");
             const auto size=property(record,L"TransferSize");
             if(!number || !offset || !size || !*size || *size>64ULL*1024*1024 ||
-                *number>UINT32_MAX) {self.failed=true;return;}
+                *number>UINT32_MAX) {
+                ++self.telemetry.disk_invalid;self.failed=true;return;
+            }
             const auto volume=disk_io_volume_for(self.extents,static_cast<std::uint32_t>(*number),*offset,*size);
             self.physical_total+=*size;
+            self.telemetry.physical_bytes+=*size;
             if(volume)self.volume_total[static_cast<unsigned>(*volume-L'A')]+=*size;
-            if(!irp || !*irp || !fileobj || !*fileobj)return; // Count unattributed physical work.
+            else ++self.telemetry.unmapped_volume;
+            if(!irp || !*irp || !fileobj || !*fileobj) {
+                ++self.telemetry.no_disk_irp;return; // Unattributed physical work.
+            }
             const auto match=self.irps.find(*irp);
-            if(match==self.irps.end())return;
+            if(match==self.irps.end()) {
+                ++self.telemetry.unmatched_irp;return;
+            }
             const auto request=match->second;
             self.irps.erase(match); // An IRP completion is consumed once.
             // Different IRPs, reused pointers or mismatched operation types cannot grant attribution.
-            if(request.file!=*fileobj || request.write!=(opcode==11) ||
-                when<request.at || when-request.at>10ULL*filetime_second)return;
+            if(request.file!=*fileobj) {++self.telemetry.mismatch_file;return;}
+            if(request.write!=(opcode==11)) {++self.telemetry.mismatch_direction;return;}
+            if(when<request.at || when-request.at>10ULL*filetime_second) {
+                ++self.telemetry.mismatch_time;return;
+            }
             auto& bytes=self.per_pid[request.pid];
             if(bytes.first_event==0 || request.at<bytes.first_event)bytes.first_event=request.at;
             if(opcode==11)bytes.write+=*size;else bytes.read+=*size;
             if(volume)bytes.volumes[static_cast<unsigned>(*volume-L'A')]+=*size;
             self.matched_total+=*size;
+            self.telemetry.matched_bytes+=*size;
+            ++self.telemetry.matched_events;
         } catch (...) { self.failed=true; }
     }
     static ULONG WINAPI buffer(EVENT_TRACE_LOGFILEW* log) noexcept {
@@ -235,6 +263,8 @@ void DiskIoCollector::collect(Snapshot& snapshot) {
     std::unordered_map<DWORD,Impl::Bytes> counts;
     std::array<std::uint64_t,26> physical_by_volume{};
     std::uint64_t total{},matched{};
+    Impl::Telemetry report_stats{};
+    bool report=false;
     bool lost{};
     {
         std::lock_guard lock(self.mutex);
@@ -243,6 +273,12 @@ void DiskIoCollector::collect(Snapshot& snapshot) {
         total=self.physical_total;matched=self.matched_total;
         self.physical_total=0;self.matched_total=0;
         lost=self.failed.load();
+        if(now-self.last_diagnostics>=std::chrono::seconds(15)) {
+            report_stats=self.telemetry;
+            self.telemetry={};
+            self.last_diagnostics=now;
+            report=true;
+        }
         // IRPs survive sampling boundaries; old ones are evicted to limit reuse.
         constexpr std::uint64_t retention=10ULL*filetime_second;
         const auto latest=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -253,14 +289,49 @@ void DiskIoCollector::collect(Snapshot& snapshot) {
         }
     }
     snapshot.disk_io_status=lost?"incomplete":self.status;
+    if(report) {
+        const auto& d=report_stats;
+        const auto percentage=d.physical_bytes ?
+            std::to_string(100.0*static_cast<double>(d.matched_bytes)/
+                static_cast<double>(d.physical_bytes)) : "n/a";
+        diagnostics::write(diagnostics::Level::info,"disk_io.coverage",
+            "physical_bytes="+std::to_string(d.physical_bytes)+
+            " matched_bytes="+std::to_string(d.matched_bytes)+
+            " coverage_percent="+percentage+
+            " file_events="+std::to_string(d.file_events)+
+            " disk_events="+std::to_string(d.disk_events)+
+            " matches="+std::to_string(d.matched_events)+
+            " file_missing="+std::to_string(d.file_missing)+
+            " disk_invalid="+std::to_string(d.disk_invalid)+
+            " no_disk_irp="+std::to_string(d.no_disk_irp)+
+            " unmatched_irp="+std::to_string(d.unmatched_irp)+
+            " wrong_file="+std::to_string(d.mismatch_file)+
+            " wrong_direction="+std::to_string(d.mismatch_direction)+
+            " wrong_time="+std::to_string(d.mismatch_time)+
+            " unmapped_volume="+std::to_string(d.unmapped_volume)+
+            " quality="+(d.physical_bytes==0?"unobserved":
+                d.matched_bytes==d.physical_bytes?"complete":"partial"));
+    }
     if(self.status!="ready" || lost || !self.baseline || seconds<0.1) {
         self.baseline=true;return;
     }
-    if(total==0) {
-        // An idle interval is valid only when all available PDH volumes are idle.
-        for(const auto& drive:snapshot.disks)if(drive.active_percent && *drive.active_percent>1.0)return;
-    }else if(!disk_io_trustworthy(matched,total,false)) {
-        snapshot.disk_io_status="partial-attribution";return;
+    if(total>0 && matched>total) {
+        snapshot.disk_io_status="incomplete";return;
+    }
+    // FileIO and DiskIO do not correspond one-to-one because of caching and
+    // kernel activity. Low global coverage is not evidence against a single
+    // positively correlated read/write: publish only that verified lower bound.
+    if(total>0 && !disk_io_fully_attributed(matched,total,false))
+        snapshot.disk_io_status="partial-attribution";
+    // Zero observed DiskIo events do not prove an idle physical device:
+    // providers, drivers and delivery latency vary. Never infer zero from PDH.
+    if(!disk_io_publishable_bytes(matched,total,false))return;
+    const bool complete=disk_io_fully_attributed(matched,total,false);
+    std::array<std::uint64_t,26> verified_by_volume{};
+    for(const auto& [pid,data]:counts) {
+        (void)pid;
+        for(std::size_t i=0;i<verified_by_volume.size();++i)
+            verified_by_volume[i]+=data.volumes[i];
     }
     for(auto& row:snapshot.processes) {
         if(!row.has_baseline || !row.creation_time)continue;
@@ -268,6 +339,8 @@ void DiskIoCollector::collect(Snapshot& snapshot) {
         if(found!=counts.end() && found->second.first_event &&
             found->second.first_event<*row.creation_time)continue; // PID reuse.
         const Impl::Bytes* bytes=found==counts.end()?nullptr:&found->second;
+        // A missing match in a partially observed system is UNKNOWN, not 0 B/s.
+        if(!bytes && !complete)continue;
         const auto read=bytes?bytes->read:0ULL;
         const auto write=bytes?bytes->write:0ULL;
         row.disk_read_bytes_per_second=static_cast<double>(read)/seconds;
@@ -279,16 +352,15 @@ void DiskIoCollector::collect(Snapshot& snapshot) {
             const auto i=static_cast<unsigned>(drive.letter-L'A');
             const auto amount=bytes?bytes->volumes[i]:0ULL;
             if(physical_by_volume[i]) {
+                // No confirmed bytes for a volume means unknown unless its
+                // physical interval was fully attributable to known processes.
+                if(!amount && verified_by_volume[i]!=physical_by_volume[i])continue;
                 row.disk_volume_bytes_per_second[i]=static_cast<double>(amount)/seconds;
                 const auto pressure=disk_io_pressure(drive.active_percent,amount,physical_by_volume[i]);
                 if(pressure){
                     row.disk_volume_pressure_percent[i]=*pressure;
                     peak=std::max(peak,*pressure);has_pressure=true;
                 }
-            } else if(drive.active_percent && *drive.active_percent<=1.0 && total==0) {
-                row.disk_volume_bytes_per_second[i]=0.0;
-                row.disk_volume_pressure_percent[i]=0.0;
-                has_pressure=true;
             }
         }
         if(has_pressure)row.disk_pressure_percent=peak;

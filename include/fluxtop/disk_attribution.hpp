@@ -28,10 +28,18 @@ inline std::optional<wchar_t> disk_io_volume_for(const std::vector<PhysicalVolum
     }
     return found;
 }
-// Require substantial attribution coverage before publishing a rate or an AutoScore.
-inline bool disk_io_trustworthy(std::uint64_t matched,std::uint64_t total,bool lost_events) noexcept {
-    return !lost_events && total>0 && matched<=total &&
-        static_cast<double>(matched)/static_cast<double>(total)>=0.80;
+// Full coverage certifies zeros for an observed interval. Any fewer matched
+// bytes is partial coverage, regardless of the storage technology.
+inline bool disk_io_fully_attributed(std::uint64_t matched,std::uint64_t total,
+    bool lost_events) noexcept {
+    return !lost_events && total>0 && matched==total;
+}
+// A positively matched subset can be shown as a lower bound even when
+// not all observed physical operations can be attributed. Missing matches
+// must never be presented as zero, and lost events invalidate the interval.
+inline bool disk_io_publishable_bytes(std::uint64_t matched,std::uint64_t total,
+    bool lost_events) noexcept {
+    return !lost_events && matched>0 && matched<=total;
 }
 // Heuristic: apportion measured volume active time by its fraction of *physical* bytes.
 // Not a promise of the process's precise service time or a benchmark of the device.
