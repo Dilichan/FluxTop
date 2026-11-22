@@ -104,6 +104,11 @@ int wmain(int argc,wchar_t** argv) {
         require(SetEnvironmentVariableW(L"FLUXTOP_DATA_DB",db.c_str())!=0,"Cannot set DB path");
         require(SetEnvironmentVariableW(L"FLUXTOP_LOG_PATH",log.c_str())!=0,"Cannot set log path");
         const std::string result=capture(program,build);
+        const std::string restarted=capture(program,build);
+        require(restarted.find("\"schema_version\":1")!=std::string::npos,
+            "JSONL schema changed after collector restart");
+        require(restarted.find("\"disk_measurement_quality\":")!=std::string::npos,
+            "Extended disk diagnostics missing after restart");
         std::istringstream stream(result);
         std::string line;unsigned lines=0;
         while(std::getline(stream,line)) {

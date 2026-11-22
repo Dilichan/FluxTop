@@ -121,6 +121,7 @@ struct Snapshot {
     std::optional<std::uint64_t> total_ram_used, total_ram_capacity, total_gpu_memory, total_gpu_memory_capacity;
     std::optional<double> cpu_temperature_c, gpu_temperature_c;
     bool cpu_temperature_board{}; // True if CPU value is an explicit motherboard/ACPI CPU zone.
+    std::string cpu_temperature_source{"unavailable"}; // Provenance, never inferred from a numeric value.
     std::optional<double> total_rx_bytes_per_second, total_tx_bytes_per_second;
     std::string network_status;
     std::vector<DiskActivity> disks; // System-wide logical-volume PDH activity, not a process percentage.
