@@ -775,6 +775,7 @@ void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Pro
     system_info_.cpu_temp=system.cpu_temperature_c;
     system_info_.gpu_temp=system.gpu_temperature_c;
     system_info_.cpu_board=system.cpu_temperature_board;
+    system_info_.cpu_source=system.cpu_temperature_source;
     system_info_.logical_processors=system.logical_processors;
     system_info_.collection_ms=system.collection_ms;
     system_points_.push_back(point);
@@ -1345,10 +1346,10 @@ void StatisticsPage::draw_sidebar(HDC dc) {
         FillRect(dc,&item,face);DeleteObject(face);
         HBRUSH border=CreateSolidBrush(chosen?RGB(52,115,156):RGB(206,211,214));
         FrameRect(dc,&item,border);DeleteObject(border);
-        const std::wstring name=L"Disk "+std::wstring(1,letter);
+        const std::wstring name=metric_text::disk_name(letter);
         label(dc,name.c_str(),26,y+9,RGB(32,44,52));
         const auto latest_value=system_points_.empty()?std::optional<double>{}:system_points_.back().disks[index];
-        const auto reading=stat_percent(latest_value);
+        const auto reading=metric_text::disk_activity(latest_value);
         RECT box{92,y+7,250,y+30};
         SetTextColor(dc,RGB(42,132,108));SetBkMode(dc,TRANSPARENT);
         DrawTextW(dc,reading.c_str(),-1,&box,DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
@@ -1483,7 +1484,7 @@ void StatisticsPage::draw_system_details(HDC dc,unsigned metric) {
     if(metric==0){
         one=L"Загрузка ЦП: "+percent(0)+L"   Логических процессоров: "+std::to_wstring(info.logical_processors);
         two=L"Длительность опроса: "+stat_decimal(info.collection_ms)+L" мс";
-        three=L"Температура ЦП: "+(info.cpu_temp?stat_decimal(*info.cpu_temp)+L" °C"+(info.cpu_board?L" (датчик платы)":L""):L"—");
+        three=L"Температура ЦП: "+metric_text::temperature(info.cpu_temp)+(info.cpu_temp?L" ("+metric_text::cpu_sensor_name(info.cpu_source,info.cpu_board)+L")":L"");
     } else if(metric==1) {
         one=L"Используется RAM: "+stat_memory(info.ram_used)+L" / "+stat_memory(info.ram_capacity)+L"   "+percent(1);
         const std::optional<std::uint64_t> free_mem=info.ram_capacity && info.ram_used &&
@@ -1497,7 +1498,7 @@ void StatisticsPage::draw_system_details(HDC dc,unsigned metric) {
     } else {
         one=L"GPU: "+percent(3)+L"   Использование VRAM: "+percent(4);
         two=L"Видеопамять: "+stat_memory(info.gpu_memory)+L" / "+stat_memory(info.gpu_capacity);
-        three=L"Температура GPU: "+(info.gpu_temp?stat_decimal(*info.gpu_temp)+L" °C":L"—");
+        three=L"Температура GPU: "+metric_text::temperature(info.gpu_temp);
     }
     label(dc,one.c_str(),310,top,RGB(45,52,60));
     label(dc,two.c_str(),310,top+29,RGB(65,72,80));
@@ -1557,7 +1558,7 @@ void StatisticsPage::draw(HDC dc) {
     const std::array<const wchar_t*,7> titles{{L"ЦП",L"ПАМЯТЬ",L"СЕТЬ",L"ГРАФИЧЕСКИЙ ПРОЦЕССОР",
         L"ПОСЛЕДНЯЯ МИНУТА · AutoScore",L"ИСТОРИЯ · AutoScore",L"НАБЛЮДАЕМЫЙ АПТАЙМ"}};
     if(selected_disk_letter_) {
-        const auto label_text=L"DISK "+std::wstring(1,selected_disk_letter_)+L" · АКТИВНОСТЬ";
+        const auto label_text=metric_text::disk_name(selected_disk_letter_)+L" · АКТИВНОСТЬ, %";
         label(dc,label_text.c_str(),292,18,RGB(40,47,55));
     } else label(dc,titles[selected_section_],292,18,RGB(40,47,55));
     // Only one graph is visible; the original range, auto-scale and popout controls
@@ -1575,8 +1576,8 @@ void StatisticsPage::draw(HDC dc) {
         const auto& series=held.paused?held.samples:system_points_;
         const auto reading=series.empty()?std::optional<double>{}:
             series.back().disks[disk_index];
-        const auto detail=L"Активность логического диска "+std::wstring(1,selected_disk_letter_)+
-            L": "+stat_percent(reading);
+        const auto detail=L"Активность логического диска "+metric_text::disk_name(selected_disk_letter_)+
+            L": "+metric_text::disk_activity(reading);
         label(dc,detail.c_str(),310,731,RGB(45,52,60));
     } else if(selected_section_<4) {
         const auto range=chart_system_duration(system_range_);
@@ -1826,7 +1827,7 @@ void StatisticsPage::draw_system_hover(HDC dc,const RECT& bounds){
     SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(53,49,43));
     RECT header{bounds.left+18,bounds.top+9,bounds.right-16,bounds.top+39};
     const auto title=system_tip_metric_>=5?
-        L"Disk "+std::wstring(1,static_cast<wchar_t>(L'A'+system_tip_metric_-5)):
+        metric_text::disk_name(static_cast<wchar_t>(L'A'+system_tip_metric_-5)):
         std::wstring(names[system_tip_metric_]);
     DrawTextW(dc,title.c_str(),-1,&header,DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
     const auto value=[&](unsigned index,const wchar_t* unit)->std::wstring {
@@ -1848,7 +1849,7 @@ void StatisticsPage::draw_system_hover(HDC dc,const RECT& bounds){
     };
     write(L"Замер: "+local_sample_label(system_tip_sample_.time),75);
     if(system_tip_metric_>=5) {
-        write(L"Активность логического диска: "+value(system_tip_metric_,L"%"),108);
+        write(L"Активность логического диска, %: "+metric_text::disk_activity(system_tip_sample_.disks[system_tip_metric_-5]),108);
         // Disk utilization already appears above; no redundant PID disclaimer.
     } else if(system_tip_metric_==0) {
         write(L"ЦП: "+value(0,L"%")+L" · Потоков: "+std::to_wstring(system_info_.logical_processors),108);

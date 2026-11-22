@@ -174,6 +174,7 @@ private:
         unsigned logical_processors{};
         double collection_ms{};
         bool cpu_board{};
+        std::string cpu_source{"unavailable"};
     } system_info_;
     struct FrozenView {
         bool paused{};

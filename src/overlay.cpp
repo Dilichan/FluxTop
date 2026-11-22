@@ -1132,9 +1132,14 @@ void Overlay::draw_header_metric(unsigned column, const std::wstring& reading, s
     if (column == 0 || column == 2) {
         line += L" ";
         temp_from = line.size();
-        line += (temperature ? decimal(*temperature,0) + L"°C" : L"—°C");
-        if (temperature) temp_length = line.size() - temp_from;
-        if (temperature && cpu_board && column==0) line += L" MB";
+        line += temperature && std::isfinite(*temperature) ? decimal(*temperature,0) + L"°C" : L"—";
+        if (temperature && std::isfinite(*temperature)) temp_length = line.size() - temp_from;
+        if (temperature && std::isfinite(*temperature) && column==0) {
+            const auto source=snapshot_?snapshot_->cpu_temperature_source:std::string{};
+            if (source.find("acpi")!=std::string::npos) line += L" ACPI";
+            else if (cpu_board) line += L" MB";
+            else if (!source.empty() && source!="unavailable") line += L" DIE";
+        }
     }
     draw_text(line,rect,number_font_.Get());
     if (!header_colors_) return;
@@ -1297,7 +1302,7 @@ void Overlay::paint(bool animation_only) {
             const auto reading=found==snapshot_->disks.end()?std::optional<double>{}:found->active_percent;
             const auto x=disk_left(i+(disk_total_enabled_?1U:0U));
             const auto area=D2D1::RectF(x,1,x+overlay_layout.disk_width*text_size(),1+height);
-            const std::wstring title=L"Disk "+std::wstring(1,letters[i])+L" "+percent(reading);
+            const std::wstring title=metric_text::disk_name(letters[i])+L" "+metric_text::disk_activity(reading);
             draw_text(title,area,number_font_.Get(),header_colors_,false,reading);
         }
     }
@@ -1377,12 +1382,7 @@ void Overlay::paint(bool animation_only) {
         // unlike the system-wide PDH percentages shown in the header.
         const bool disk_partial=snapshot_ && snapshot_->disk_io_status=="partial-attribution";
         const auto disk_text=[&](std::optional<double> rate) {
-            if(!rate || !std::isfinite(*rate))return std::wstring(L"—");
-            const double mib=*rate/1048576.0;
-            std::wstring result=mib>=0.10?decimal(mib)+L" MiB/s":
-                decimal(*rate/1024.0)+L" KiB/s";
-            if(disk_partial && *rate>0.0)result.insert(0,L"≥");
-            return result;
+            return metric_text::disk_rate(rate,disk_partial);
         };
         if(disk_total_enabled_) {
             std::optional<double> total;
