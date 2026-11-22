@@ -995,6 +995,9 @@ void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<Statis
     // AutoScore only maps time/value samples to pixels; all painting uses the core.
     std::vector<ChartStroke> plots;
     plots.reserve(apps.size());
+    // Exceedances are visual markers only; line values and hover data stay raw.
+    std::vector<LONG> clipped_peak_x;
+    const double axis_ceiling=vertical_zoom>0.0?100.0/vertical_zoom:100.0;
     for(std::size_t i=0;i<apps.size();++i) {
         const auto& points=apps[i].points;
         if(points.empty())continue;
@@ -1011,6 +1014,13 @@ void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<Statis
             const auto fraction=static_cast<double>(at-from)/static_cast<double>(to-from);
             const auto jitter=.9*std::sin(static_cast<double>(at%5003)*.019+i*2.3);
             const auto xx=static_cast<double>(area.left)+fraction*(area.right-area.left);
+            if(std::isfinite(score) && score>axis_ceiling+0.001 && at>=from && at<=to &&
+                xx>=area.left && xx<=area.right) {
+                const LONG position=static_cast<LONG>(std::lround(xx));
+                if(std::none_of(clipped_peak_x.begin(),clipped_peak_x.end(),
+                    [position](LONG other){return std::abs(other-position)<7;}))
+                    clipped_peak_x.push_back(position);
+            }
             const auto yy=static_cast<double>(area.bottom)-
                 std::clamp(score*vertical_zoom,0.0,100.0)/100.0*(area.bottom-area.top);
             line.push_back(POINT{static_cast<LONG>(std::lround(std::clamp(xx,-1000000.0,1000000.0))),
@@ -1039,6 +1049,20 @@ void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<Statis
     style.adaptive_fill=true;style.ink_detail=true;
     style.right_edge_overscan=is_live && to>=live_view_end()-1000?live_tail_guard_px:0;
     draw_chart_core(dc,style,plots);
+    // Small downward chevrons identify original readings clipped by robust
+    // auto-zoom. Reuse the normal chart geometry and preserve GDI object state.
+    if(!clipped_peak_x.empty()) {
+        const HPEN marker=CreatePen(PS_SOLID,2,RGB(165,70,37));
+        if(marker) {
+            const HGDIOBJ previous=SelectObject(dc,marker);
+            for(const LONG x:clipped_peak_x) {
+                MoveToEx(dc,x-3,area.top+3,nullptr);LineTo(dc,x,area.top+7);
+                LineTo(dc,x+3,area.top+3);
+            }
+            SelectObject(dc,previous);
+            DeleteObject(marker);
+        }
+    }
     label(dc,caption,area.left,area.top-28,RGB(64,63,61));
     const auto top_value=std::to_wstring(static_cast<int>(std::lround(100.0/vertical_zoom)));
     label(dc,top_value.c_str(),area.left-33,area.top-3);

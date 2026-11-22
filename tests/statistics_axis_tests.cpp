@@ -50,6 +50,42 @@ int main(){
             "Chart hover must invert the right-edge projection");
         check(fluxtop::statistics_chart_project_x(400.0,left,right,0.0)==400.0,
             "Historical chart geometry must remain unchanged");
+        // v41: distribution, not the single tallest point, determines Y scale.
+        series[0].points.clear();
+        for(std::int64_t t=0;t<=100000;t+=1000)
+            series[0].points.push_back({t,t==50000?95.0:3.0});
+        const auto spike_zoom=fluxtop::statistics_auto_vertical_zoom(series,0,100000);
+        check(spike_zoom>5.0,
+            "An isolated short peak must not compress a long low-load history");
+        check(series[0].points[50].second==95.0,
+            "Autoscaling cannot mutate or delete the true outlier");
+        for(auto& point:series[0].points)point.second=85.0;
+        check(fluxtop::statistics_auto_vertical_zoom(series,0,100000)==1.0,
+            "Sustained high load must retain a sufficiently tall axis");
+        series[0].points.clear();
+        check(fluxtop::statistics_auto_vertical_zoom(series,0,100000)==1.0,
+            "Empty series must retain the safe default axis");
+        series[0].points={{50000,0.5}};
+        check(fluxtop::statistics_auto_vertical_zoom(series,0,100000)==50.0,
+            "Single low sample must remain visible");
+        series[0].points.clear();
+        for(std::int64_t t=0;t<=100000;t+=1000)
+            series[0].points.push_back({t,(t>=40000 && t<=60000)?80.0:3.0});
+        check(fluxtop::statistics_auto_vertical_zoom(series,0,100000)==1.0,
+            "A sustained twenty-percent peak interval must not be hidden");
+        check(fluxtop::statistics_auto_vertical_zoom(series,0,30000)>5.0,
+            "Panning to a quiet interval must recalculate the Y scale");
+        check(fluxtop::statistics_auto_vertical_zoom(series,40000,60000)==1.0,
+            "Panning to a sustained busy interval must recalculate the Y scale");
+        // Time windows analogous to 24h, 7 days and a custom interval.
+        series[0].points={{0,2.0},{86400000,2.0},{2*86400000,90.0},
+            {3*86400000,2.0},{7*86400000,2.0}};
+        check(fluxtop::statistics_auto_vertical_zoom(series,0,86400000)>1.0,
+            "24-hour viewport must use its own visible data");
+        check(fluxtop::statistics_auto_vertical_zoom(series,0,7*86400000)>=1.0,
+            "7-day viewport must return a finite valid zoom");
+        check(fluxtop::statistics_auto_vertical_zoom(series,86400000,3*86400000)>=1.0,
+            "Custom viewport must return a valid zoom");
         std::cout<<"Clipped historical AutoScore autoscale tests passed\n";
         return 0;
     }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
