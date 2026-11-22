@@ -1,4 +1,5 @@
 #include "fluxtop/temperatures.hpp"
+#include "fluxtop/diagnostics.hpp"
 #include <wbemidl.h>
 #include <wrl/client.h>
 #include <atomic>
@@ -10,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <ctime>
 #include <string>
 #include <string_view>
@@ -37,12 +39,59 @@ bool within(std::size_t offset, std::size_t stride, std::size_t count, std::size
     return offset <= end && stride && count <= (end-offset)/stride;
 }
 } // namespace
+
+bool cpu_temperature_valid(double celsius) noexcept {
+    return std::isfinite(celsius) && celsius>=-10.0 && celsius<=125.0;
+}
+bool cpu_temperature_fresh(std::int64_t polled_at,std::int64_t now,std::int64_t max_age) noexcept {
+    // Reject clock rollbacks/future timestamps and expired readings.
+    return polled_at>0 && max_age>=0 && now>=polled_at && now-polled_at<=max_age;
+}
+namespace {
+bool has(std::string_view text,std::string_view token) noexcept {return text.find(token)!=std::string_view::npos;}
+bool board_group(std::string_view group) noexcept {
+    return has(group,"mainboard") || has(group,"motherboard") || has(group,"super i/o") ||
+        has(group,"superio") || has(group,"nuvoton") || has(group,"ite ") ||
+        has(group,"embedded controller") || has(group,"lpc") || has(group,"ec sensor");
+}
+}
+int hwinfo_cpu_sensor_priority(std::string_view group,std::string_view label) noexcept {
+    if(board_group(group) || has(group,"gpu") || has(group,"graphics") ||
+        (!has(group,"cpu") && !has(group,"processor")))return 0;
+    if(has(label,"tjmax") || has(label,"distance") || has(label,"limit"))return 0;
+    if(has(label,"cpu package") || label=="package")return 5;
+    if(has(label,"tctl/tdie"))return 4;
+    if(has(label,"cpu die") || label=="tdie")return 3;
+    if(has(label,"core average"))return 2;
+    if(has(label,"core #") || has(label,"core "))return 1;
+    return 0;
+}
+int hwinfo_board_sensor_priority(std::string_view group,std::string_view label) noexcept {
+    if(has(group,"gpu") || has(group,"graphics") || !board_group(group))return 0;
+    if(has(label,"vrm") || has(label,"pch") || has(label,"ambient"))return 0;
+    if(has(label,"cpu socket"))return 4;
+    if(has(label,"cpu (peci)"))return 3;
+    return label=="cpu" || label=="cpu temperature" ? 2 : 0;
+}
+bool acpi_cpu_zone_candidate(std::wstring_view identifier) noexcept {
+    std::wstring value(identifier);
+    for(auto& c:value)c=static_cast<wchar_t>(std::towlower(c));
+    if(value.find(L"vrm")!=std::wstring::npos || value.find(L"pch")!=std::wstring::npos ||
+        value.find(L"gpu")!=std::wstring::npos)return false;
+    return value.find(L"cpu")!=std::wstring::npos ||
+        value.find(L"processor")!=std::wstring::npos;
+}
+bool cpu_temperature_should_replace(bool current_known,bool current_board,bool incoming_board) noexcept {
+    return !current_known || (current_board && !incoming_board);
+}
+
 HardwareTemperatures read_hwinfo_temperatures() {
     HardwareTemperatures result;
     HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, L"Global\\HWiNFO_SENS_SM2");
-    if (!mapping) return result;
+    if (!mapping) { result.hwinfo_status="mapping-unavailable"; return result; }
     const auto* data = static_cast<const std::uint8_t*>(MapViewOfFile(mapping,FILE_MAP_READ,0,0,0));
-    if (!data) { CloseHandle(mapping); return result; }
+    if (!data) { CloseHandle(mapping); result.hwinfo_status="mapping-inaccessible"; return result; }
+    result.hwinfo_status="invalid-header-or-layout";
     do {
         MEMORY_BASIC_INFORMATION info{};
         if (!VirtualQuery(data,&info,sizeof(info)) || info.RegionSize < sizeof(Header)) break;
@@ -51,10 +100,13 @@ HardwareTemperatures read_hwinfo_temperatures() {
         std::memcpy(&header,data,sizeof(header));
         if (std::memcmp(header.signature,"HWiS",4) || header.version == 0 || header.version > 2) break;
         const std::time_t now = std::time(nullptr);
-        if (header.poll_time <= 0 || std::abs(static_cast<double>(now) - static_cast<double>(header.poll_time)) > 30) break;
+        if (!cpu_temperature_fresh(header.poll_time,static_cast<std::int64_t>(now),30)) {
+            result.hwinfo_status="stale-or-future-timestamp"; break;
+        }
         if (header.sensor_stride < 264 || header.reading_stride < 292
             || !within(header.sensor_offset,header.sensor_stride,header.sensor_count,total)
             || !within(header.reading_offset,header.reading_stride,header.reading_count,total)) break;
+        result.hwinfo_status="no-supported-cpu-sensor";
         int cpu_priority=0, gpu_priority=0, board_priority=0;
         std::optional<double> board_temp;
         for (std::size_t index=0;index<header.reading_count;++index) {
@@ -67,24 +119,21 @@ HardwareTemperatures read_hwinfo_temperatures() {
             const auto label = ascii_lower(reinterpret_cast<const char*>(read+12),128);
             double temperature=0;
             std::memcpy(&temperature,read+284,sizeof(temperature));
-            if (!std::isfinite(temperature) || temperature < 10 || temperature > 115) continue;
-            const bool cpu = group.find("cpu")!=std::string::npos || group.find("processor")!=std::string::npos;
+            if (!cpu_temperature_valid(temperature)) continue;
             const bool gpu = group.find("gpu")!=std::string::npos;
-            const int cp = label.find("cpu package")!=std::string::npos ? 3
-                : label.find("tctl/tdie")!=std::string::npos ? 3
-                : label.find("cpu die")!=std::string::npos ? 2 : 0;
+            const int cp = hwinfo_cpu_sensor_priority(group,label);
             const int gp = label.find("gpu temperature")!=std::string::npos ? 3
                 : label.find("gpu core")!=std::string::npos && label.find("temperature")!=std::string::npos ? 2 : 0;
-            if (cpu && cp>cpu_priority) { result.cpu_c=temperature; cpu_priority=cp; }
-            // A Super I/O / EC reading explicitly named CPU/CPU Socket is a valid
-            // *board* sensor. Never confuse VRM/PCH/ambient/fan labels with CPU.
-            const int bp = !gpu && !cpu && (label == "cpu" || label == "cpu temperature"
-                || label.find("cpu socket") != std::string::npos
-                || label.find("cpu (peci)") != std::string::npos) ? 2 : 0;
+            if (cp>cpu_priority) { result.cpu_c=temperature; cpu_priority=cp; }
+            const int bp = hwinfo_board_sensor_priority(group,label);
             if (bp > board_priority) { board_priority=bp; board_temp=temperature; }
             if (gpu && gp>gpu_priority) { result.gpu_c=temperature; gpu_priority=gp; }
         }
         if (!result.cpu_c && board_temp) { result.cpu_c=board_temp; result.cpu_from_board=true; }
+        if (result.cpu_c) {
+            result.cpu_source=result.cpu_from_board?"hwinfo-board":"hwinfo-die";
+            result.hwinfo_status="ready";
+        }
     } while(false);
     UnmapViewOfFile(data);
     CloseHandle(mapping);
@@ -166,8 +215,8 @@ std::optional<double> wmi_number(IWbemClassObject* obj, const wchar_t* property)
     VariantClear(&value);
     return result;
 }
-struct CpuReading { double celsius{}; bool board{}; };
-std::optional<CpuReading> read_wmi_cpu_namespace(IWbemLocator* locator, const wchar_t* name) {
+struct CpuReading { double celsius{}; bool board{}; unsigned source{}; };
+std::optional<CpuReading> read_wmi_cpu_namespace(IWbemLocator* locator, const wchar_t* name, unsigned source) {
     ScopedBstr scope(name), language(L"WQL");
     ScopedBstr sql(L"SELECT Name, Identifier, Value FROM Sensor WHERE SensorType='Temperature'");
     if (!scope.value || !language.value || !sql.value) return std::nullopt;
@@ -181,25 +230,26 @@ std::optional<CpuReading> read_wmi_cpu_namespace(IWbemLocator* locator, const wc
         nullptr,&enumerator))) return std::nullopt;
     int best_priority=0, best_board_priority=0;
     std::optional<double> best, best_board;
-    // Hard bounds prevent a broken provider from monopolizing the sampler thread.
-    for (unsigned i=0;i<512;++i) {
+    // Bound the total enumeration time as well as the sample count.
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+    for (unsigned i=0;i<512 && std::chrono::steady_clock::now()<deadline;++i) {
         ComPtr<IWbemClassObject> sensor;
         ULONG count=0;
         IWbemClassObject* raw{};
-        const HRESULT hr=enumerator->Next(350,1,&raw,&count);
+        const HRESULT hr=enumerator->Next(100,1,&raw,&count);
         sensor.Attach(raw);
         if (hr != WBEM_S_NO_ERROR || count != 1 || !sensor) break;
         const auto identifier=wmi_text(sensor.Get(),L"Identifier");
         const auto label=wmi_text(sensor.Get(),L"Name");
         const auto temp=wmi_number(sensor.Get(),L"Value");
-        if (!identifier || !label || !temp || !std::isfinite(*temp) || *temp < -10 || *temp > 125) continue;
+        if (!identifier || !label || !temp || !cpu_temperature_valid(*temp)) continue;
         const int priority=cpu_temperature_sensor_priority(*identifier,*label);
         if (priority>best_priority) { best_priority=priority; best=*temp; }
         const int board_priority=motherboard_cpu_sensor_priority(*identifier,*label);
         if (board_priority>best_board_priority) { best_board_priority=board_priority; best_board=*temp; }
     }
-    if(best) return CpuReading{*best,false};
-    if(best_board) return CpuReading{*best_board,true};
+    if(best) return CpuReading{*best,false,source};
+    if(best_board) return CpuReading{*best_board,true,source};
     return std::nullopt;
 }
 
@@ -227,12 +277,10 @@ std::optional<CpuReading> read_acpi_cpu_zone(IWbemLocator* locator) {
         if(!id || !raw_temp) continue;
         auto label=*id;
         for(auto& c:label) c=static_cast<wchar_t>(std::towlower(c));
-        if(label.find(L"cpu")==std::wstring::npos
-            && label.find(L"processor")==std::wstring::npos
-            && label.find(L"proc")==std::wstring::npos) continue;
+        if(!acpi_cpu_zone_candidate(label))continue;
         const double celsius=*raw_temp/10.0-273.15; // ACPI stores 0.1 kelvin.
-        if(std::isfinite(celsius) && celsius>=-10.0 && celsius<=125.0)
-            return CpuReading{celsius,true};
+        if(cpu_temperature_valid(celsius))
+            return CpuReading{celsius,true,3};
     }
     return std::nullopt;
 }
@@ -244,9 +292,9 @@ std::optional<CpuReading> read_wmi_cpu() {
     if (FAILED(CoCreateInstance(CLSID_WbemLocator,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&locator))))
         return std::nullopt;
     // Prefer CPU die/package regardless of provider. Board CPU zone is fallback.
-    const auto libre=read_wmi_cpu_namespace(locator.Get(),L"ROOT\\LibreHardwareMonitor");
+    const auto libre=read_wmi_cpu_namespace(locator.Get(),L"ROOT\\LibreHardwareMonitor",1);
     if(libre && !libre->board) return libre;
-    const auto open=read_wmi_cpu_namespace(locator.Get(),L"ROOT\\OpenHardwareMonitor");
+    const auto open=read_wmi_cpu_namespace(locator.Get(),L"ROOT\\OpenHardwareMonitor",2);
     if(open && !open->board) return open;
     if(libre) return libre;
     if(open) return open;
@@ -263,7 +311,7 @@ public:
         if (!sample || GetTickCount64()-sample>20000) return std::nullopt;
         const auto value=celsius_.load(std::memory_order_relaxed);
         if (!std::isfinite(value)) return std::nullopt;
-        return CpuReading{value,board_.load(std::memory_order_relaxed)};
+        return CpuReading{value,board_.load(std::memory_order_relaxed),source_.load(std::memory_order_relaxed)};
     }
 private:
     void loop(std::stop_token stop) {
@@ -273,6 +321,7 @@ private:
             if (value) {
                 celsius_.store(value->celsius,std::memory_order_relaxed);
                 board_.store(value->board,std::memory_order_relaxed);
+                source_.store(value->source,std::memory_order_relaxed);
                 last_ms_.store(GetTickCount64(),std::memory_order_release);
             } else last_ms_.store(0,std::memory_order_release);
             const unsigned ticks=value ? 10U : 40U; // 5s when active, 20s probing fallback.
@@ -282,6 +331,7 @@ private:
     }
     std::atomic<double> celsius_{0.0};
     std::atomic<bool> board_{false};
+    std::atomic<unsigned> source_{0};
     std::atomic<ULONGLONG> last_ms_{0};
     std::jthread worker_;
 };
@@ -292,10 +342,29 @@ HardwareTemperatures read_hardware_temperatures() {
     if (!result.cpu_c || result.cpu_from_board) {
         static WmiCpuCache cpu_wmi;
         if(const auto value=cpu_wmi.latest()) {
-            if(!result.cpu_c || (result.cpu_from_board && !value->board)) {
+            if(cpu_temperature_should_replace(result.cpu_c.has_value(),result.cpu_from_board,value->board)) {
                 result.cpu_c=value->celsius;
                 result.cpu_from_board=value->board;
+                const char* provider=value->source==1?"libre-hardware-monitor":
+                    value->source==2?"open-hardware-monitor":
+                    value->source==3?"acpi":"unknown-wmi";
+                result.cpu_source=std::string(provider)+(value->board?"-board":"-die");
             }
+        }
+    }
+    // Emit a transition only, not a log line per sampling interval.
+    static std::mutex status_mutex;
+    static std::string last_source, last_reason;
+    const std::string reason=result.cpu_c?"ready":
+        std::string("no-valid-cpu-temperature; hwinfo=")+result.hwinfo_status+
+        "; wmi-provider-or-sensor-unavailable";
+    {
+        std::lock_guard guard(status_mutex);
+        if(last_source!=result.cpu_source || last_reason!=reason) {
+            last_source=result.cpu_source;
+            last_reason=reason;
+            diagnostics::write(result.cpu_c?diagnostics::Level::info:diagnostics::Level::warning,
+                "temperature.cpu", "source="+result.cpu_source+" status="+reason);
         }
     }
     return result;
