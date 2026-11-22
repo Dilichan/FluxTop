@@ -1,5 +1,6 @@
 #include "fluxtop/disk_collector.hpp"
 #include <windows.h>
+#include "fluxtop/disk_temperature.hpp"
 #include <pdhmsg.h>
 #include <algorithm>
 #include <cmath>
@@ -41,10 +42,12 @@ void DiskCollector::collect(Snapshot& snapshot) {
     if(!initialized_ || mask!=last_mask_) refresh(mask);
     snapshot.disks.clear();
     snapshot.disks.reserve(counters_.size());
+    const auto temperatures=latest_disk_temperatures();
     const bool ready=query_ && PdhCollectQueryData(query_)==ERROR_SUCCESS;
     for(const auto& counter:counters_) {
         DiskActivity sample{};
         sample.letter=counter.letter;
+        sample.temperature_c=temperatures[static_cast<unsigned>(counter.letter-L'A')];
         if(ready && counter.handle) {
             PDH_FMT_COUNTERVALUE value{};
             DWORD type{};

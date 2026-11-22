@@ -100,6 +100,7 @@ std::optional<std::uint32_t> gpu_instance_pid(const std::wstring& instance);
 struct DiskActivity {
     wchar_t letter{}; // Windows logical volume letter (not physical device identity).
     std::optional<double> active_percent; // PDH LogicalDisk % Disk Time, clamped to 0..100.
+    std::optional<double> temperature_c; // Device temperature, not attributable to individual processes.
 };
 
 struct Snapshot {

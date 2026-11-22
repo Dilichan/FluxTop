@@ -84,6 +84,14 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
             label(dc,L"Использование VRAM",170,middle+4,RGB(194,89,178));
             draw_system_graph(dc,gpu,3,from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system,true);
             draw_system_graph(dc,vram,4,from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system,true);
+        } else if(popup.kind==2) {
+            const LONG middle=(graph.top+graph.bottom)/2;
+            const RECT cpu{68,114,client.right-30,middle-23};
+            const RECT temperature{68,middle+26,client.right-30,client.bottom-60};
+            label(dc,L"Загрузка CPU",170,90,RGB(14,132,177));
+            label(dc,L"Температура CPU",170,middle+4,RGB(211,93,59));
+            draw_system_graph(dc,cpu,0,from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system,true);
+            draw_system_graph(dc,temperature,31,from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system,true);
         } else draw_system_graph(dc,graph,popup.kind>=6?popup.kind-1:popup.kind-2,
             from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system,true);
         SelectObject(dc,old_font);

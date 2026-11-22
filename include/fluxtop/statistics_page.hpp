@@ -124,6 +124,8 @@ private:
         std::int64_t time{};
         std::array<std::optional<double>,5> values{}; // CPU%, RAM%, network Mbps, GPU%, VRAM%
         std::array<std::optional<double>,26> disks{}; // Same timeline, per-letter activity percent.
+        std::optional<double> cpu_temperature{}; // Real CPU package/board temperature, Celsius.
+        std::array<std::optional<double>,26> disk_temperatures{}; // Device temperature per mounted drive.
     };
     struct PopupState {
         StatisticsPage* owner{};
@@ -161,8 +163,8 @@ private:
     unsigned system_range_{0}; // 1, 5, 15 minutes
     bool system_autoscale_{true};
     // Independent axis easing for embedded and detached system charts (five metrics).
-    std::array<std::array<double,31>,2> smooth_system_axis_max_{};
-    std::array<std::array<ULONGLONG,31>,2> smooth_system_axis_tick_{};
+    std::array<std::array<double,32>,2> smooth_system_axis_max_{};
+    std::array<std::array<ULONGLONG,32>,2> smooth_system_axis_tick_{};
     HWND system_period_{},system_auto_{},system_popout_{},fill_toggle_{},pause_toggle_{};
     void toggle_section_pause();
     void refresh_pause_control();

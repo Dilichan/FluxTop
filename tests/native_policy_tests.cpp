@@ -140,7 +140,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "const bool sidebar_only=paint_font_ && ps.rcPaint.left>=0 &&",
             "draw_sidebar(buffer);"});
         absent(page,{"if(!live_page && !live_popup)return false;"});
-        need(header,{"std::array<std::array<double,31>,2> smooth_system_axis_max_",
+        need(header,{"std::array<std::array<double,32>,2> smooth_system_axis_max_",
             "const std::deque<SystemPoint>* frozen=nullptr,bool detached=false"});
         // AutoScore, system graphs and sidebar mini-charts must share the same
         // renderer instead of introducing private per-view GDI painting loops.

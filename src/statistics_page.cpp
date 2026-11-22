@@ -757,6 +757,10 @@ void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Pro
     for(const auto& disk:system.disks)
         if(disk.letter>=L'A' && disk.letter<=L'Z')
             point.disks[disk.letter-L'A']=disk.active_percent;
+    point.cpu_temperature=system.cpu_temperature_c;
+    for(const auto& disk:system.disks)
+        if(disk.letter>=L'A' && disk.letter<=L'Z')
+            point.disk_temperatures[disk.letter-L'A']=disk.temperature_c;
     point.values[0]=system.total_cpu_percent;
     if(system.total_ram_used && system.total_ram_capacity && *system.total_ram_capacity)
         point.values[1]=100.0*static_cast<double>(*system.total_ram_used)/static_cast<double>(*system.total_ram_capacity);
@@ -1383,7 +1387,7 @@ void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
     const std::deque<SystemPoint>* frozen,bool detached) {
     const auto& samples=frozen?*frozen:system_points_;
     (void)hover; // The old on-graph readings have moved to the native hover bubble.
-    if(metric>=31)return;
+    if(metric>=32)return;
     constexpr std::array<COLORREF,5> ink{{RGB(14,132,177),RGB(67,105,181),RGB(184,55,114),
         RGB(131,54,156),RGB(194,89,178)}};
     const unsigned count=1U;
@@ -1392,7 +1396,8 @@ void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
         max_y=metric==2?0.1:5.0;
         for(const auto& sample:samples)if(sample.time>=from && sample.time<=to)
             for(unsigned s=0;s<count;++s) {
-                const auto value=metric+s<5?sample.values[metric+s]:sample.disks[metric+s-5];
+                const auto value=metric+s==31?sample.cpu_temperature:
+                    (metric+s<5?sample.values[metric+s]:sample.disks[metric+s-5]);
                 if(value)max_y=std::max(max_y,*value*(metric==2?1.2:1.12));
             }
         if(metric!=2)max_y=std::min(100.0,std::ceil(max_y/5.0)*5.0);
@@ -1431,13 +1436,14 @@ void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
                 if(!samples.empty() && segment_end==samples.back().time)
                     extend_recent_line(line,area.right,segment_end,to,animation_duration_ms_);
             }
-            plots.push_back({std::move(line),index<ink.size()?ink[index]:RGB(42,132,108)});
+            plots.push_back({std::move(line),index==31?RGB(211,93,59):(index<ink.size()?ink[index]:RGB(42,132,108))});
             line.clear();
             previous_measurement.reset();
             segment_end=0;
         };
         for(const auto& sample:samples) {
-            const auto value=index<5?sample.values[index]:sample.disks[index-5];
+            const auto value=index==31?sample.cpu_temperature:
+                (index<5?sample.values[index]:sample.disks[index-5]);
             if(sample.time<from || sample.time>to || !value) {
                 finish_segment();continue;
             }
@@ -1460,7 +1466,7 @@ void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
     style.horizontal_rows=5;style.time_divisions=10;
     style.right_edge_overscan=!frozen && to>=system_view_end()-1000?live_tail_guard_px:0;
     draw_chart_core(dc,style,plots);
-    const auto cap=stat_decimal(max_y)+(metric==2?L" Mbps":L"%");
+    const auto cap=stat_decimal(max_y)+(metric==2?L" Mbps":(metric==31?L" °C":L"%"));
     label(dc,cap.c_str(),area.left,area.top-24,RGB(76,81,84));
     label(dc,L"0",area.left,area.bottom+4,RGB(76,81,84));
     const auto a=local_label(from),b=local_label(to);
@@ -1576,8 +1582,9 @@ void StatisticsPage::draw(HDC dc) {
         const auto& series=held.paused?held.samples:system_points_;
         const auto reading=series.empty()?std::optional<double>{}:
             series.back().disks[disk_index];
+        const auto& disk_temperature=series.empty()?std::optional<double>{}:series.back().disk_temperatures[disk_index];
         const auto detail=L"Активность логического диска "+metric_text::disk_name(selected_disk_letter_)+
-            L": "+metric_text::disk_activity(reading);
+            L": "+metric_text::disk_activity(reading)+L"   Температура: "+metric_text::temperature(disk_temperature);
         label(dc,detail.c_str(),310,731,RGB(45,52,60));
     } else if(selected_section_<4) {
         const auto range=chart_system_duration(system_range_);
@@ -1585,7 +1592,14 @@ void StatisticsPage::draw(HDC dc) {
         const auto right=held.paused?held.to:system_view_end();
         const auto begin=chart_window(held.paused,{held.from,held.to},{right-range,right}).from;
         const auto* samples=held.paused?&held.samples:nullptr;
-        if(selected_section_==3) {
+        if(selected_section_==0) {
+            const RECT cpu{310,190,1364,372};
+            const RECT temperature{310,458,1364,640};
+            label(dc,L"Загрузка CPU",438,162,RGB(14,132,177));
+            label(dc,L"Температура CPU",438,430,RGB(211,93,59));
+            draw_system_graph(dc,cpu,0,begin,right,system_autoscale_,1.0,system_hover_,samples);
+            draw_system_graph(dc,temperature,31,begin,right,system_autoscale_,1.0,system_hover_,samples);
+        } else if(selected_section_==3) {
             const RECT gpu{310,190,1364,372};
             const RECT vram{310,458,1364,640};
             label(dc,L"Загрузка GPU",438,162,RGB(131,54,156));
@@ -1632,7 +1646,13 @@ void StatisticsPage::mouse(int x,int y) {
         const auto right=held.paused?held.to:system_view_end();
         const auto begin=chart_window(held.paused,{held.from,held.to},{right-range,right}).from;
         const auto* samples=held.paused?&held.samples:nullptr;
-        if(selected_section_==3) {
+        if(selected_section_==0) {
+            const RECT cpu{310,190,1364,372};
+            const RECT temperature{310,458,1364,640};
+            if(y>=temperature.top && y<=temperature.bottom)
+                show_system_hover(31,system_hover_,temperature,begin,right,samples);
+            else show_system_hover(0,system_hover_,cpu,begin,right,samples);
+        } else if(selected_section_==3) {
             const RECT gpu{310,190,1364,372};
             const RECT vram{310,458,1364,640};
             if(y>=vram.top && y<=vram.bottom)
@@ -1788,7 +1808,7 @@ bool StatisticsPage::position_tooltip(POINT screen,int offset_x,int offset_y) {
 }
 void StatisticsPage::show_system_hover(unsigned metric,POINT cursor,const RECT& area,
     std::int64_t from,std::int64_t to,const std::deque<SystemPoint>* frozen) {
-    if(metric>=31 || cursor.x<area.left || cursor.x>area.right || cursor.y<area.top ||
+    if(metric>=32 || cursor.x<area.left || cursor.x>area.right || cursor.y<area.top ||
         cursor.y>area.bottom || to<=from || !tooltip_) {
         system_tip_active_=false;
         if(tooltip_ && hover_section_<0)ShowWindow(tooltip_,SW_HIDE);
@@ -1803,13 +1823,14 @@ void StatisticsPage::show_system_hover(unsigned metric,POINT cursor,const RECT& 
     const SystemPoint* closest=nullptr;
     const auto& samples=frozen?*frozen:system_points_;
     for(const auto& sample:samples) {
-        const auto reading=metric<5?sample.values[metric]:sample.disks[metric-5];
+        const auto reading=metric==31?sample.cpu_temperature:
+            (metric<5?sample.values[metric]:sample.disks[metric-5]);
         if(sample.time<from || sample.time>to || !reading)continue;
         if(!closest || std::abs(sample.time-time)<std::abs(closest->time-time))closest=&sample;
     }
     if(!closest){system_tip_active_=false;ShowWindow(tooltip_,SW_HIDE);return;}
     const bool content_changed=!system_tip_active_ || system_tip_metric_!=metric ||
-        system_tip_sample_.time!=closest->time || system_tip_sample_.values!=closest->values || system_tip_sample_.disks!=closest->disks;
+        system_tip_sample_.time!=closest->time || system_tip_sample_.values!=closest->values || system_tip_sample_.disks!=closest->disks || system_tip_sample_.cpu_temperature!=closest->cpu_temperature;
     system_tip_active_=true;system_tip_metric_=metric;system_tip_sample_=*closest;
     POINT screen{};GetCursorPos(&screen);
     const bool newly_shown=position_tooltip(screen,16,18);
@@ -1820,21 +1841,21 @@ void StatisticsPage::draw_system_hover(HDC dc,const RECT& bounds){
     const std::array<const wchar_t*,5> names{{L"ЦП",L"Память",L"Сеть",L"GPU",L"VRAM"}};
     const HBRUSH paper=CreateSolidBrush(RGB(250,248,239));FillRect(dc,&bounds,paper);DeleteObject(paper);
     const HBRUSH edge=CreateSolidBrush(RGB(151,137,112));FrameRect(dc,&bounds,edge);DeleteObject(edge);
-    const COLORREF color=system_tip_metric_>=5?RGB(42,132,108):colors[std::min<unsigned>(4,system_tip_metric_)];
+    const COLORREF color=system_tip_metric_==31?RGB(211,93,59):(system_tip_metric_>=5?RGB(42,132,108):colors[std::min<unsigned>(4,system_tip_metric_)]);
     const HBRUSH accent=CreateSolidBrush(color);
     const RECT bar{bounds.left+2,bounds.bottom-6,bounds.right-2,bounds.bottom-2};
     FillRect(dc,&bar,accent);DeleteObject(accent);
     SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(53,49,43));
     RECT header{bounds.left+18,bounds.top+9,bounds.right-16,bounds.top+39};
-    const auto title=system_tip_metric_>=5?
+    const auto title=system_tip_metric_==31?std::wstring(L"Температура ЦП"):(system_tip_metric_>=5?
         metric_text::disk_name(static_cast<wchar_t>(L'A'+system_tip_metric_-5)):
-        std::wstring(names[system_tip_metric_]);
+        std::wstring(names[system_tip_metric_]));
     DrawTextW(dc,title.c_str(),-1,&header,DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
     const auto value=[&](unsigned index,const wchar_t* unit)->std::wstring {
-        const auto reading=index<5?system_tip_sample_.values[index]:system_tip_sample_.disks[index-5];
+        const auto reading=index==31?system_tip_sample_.cpu_temperature:(index<5?system_tip_sample_.values[index]:system_tip_sample_.disks[index-5]);
         return reading?stat_decimal(*reading)+unit:L"—";
     };
-    std::wstring primary=value(system_tip_metric_,system_tip_metric_==2?L" Mbps":L"%");
+    std::wstring primary=value(system_tip_metric_,system_tip_metric_==2?L" Mbps":(system_tip_metric_==31?L" °C":L"%"));
     if(system_tip_metric_==3)primary+=L"   VRAM: "+value(4,L"%");
     SetTextColor(dc,color);
     RECT main{bounds.left+18,bounds.top+41,bounds.right-12,bounds.top+75};
@@ -1848,7 +1869,9 @@ void StatisticsPage::draw_system_hover(HDC dc,const RECT& bounds){
         DrawTextW(dc,text.c_str(),-1,&cell,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
     };
     write(L"Замер: "+local_sample_label(system_tip_sample_.time),75);
-    if(system_tip_metric_>=5) {
+    if(system_tip_metric_==31) {
+        write(L"CPU Package / резервный датчик платы",108);
+    } else if(system_tip_metric_>=5) {
         write(L"Активность логического диска, %: "+metric_text::disk_activity(system_tip_sample_.disks[system_tip_metric_-5]),108);
         // Disk utilization already appears above; no redundant PID disclaimer.
     } else if(system_tip_metric_==0) {
