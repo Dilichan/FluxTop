@@ -1,4 +1,5 @@
 #include "fluxtop/overlay.hpp"
+#include "fluxtop/application_display_name.hpp"
 #include "fluxtop/diagnostics.hpp"
 #include "fluxtop/overlay_layout.hpp"
 
@@ -821,7 +822,7 @@ void Overlay::update_view() {
     std::vector<Row> next;
     for (std::size_t i = 0; !summary_only() && i < std::min(display.size(), static_cast<std::size_t>(options_.top)); ++i) {
         const auto& p = *display[i];
-        auto name = wide(p.name); if (name.ends_with(L".exe")) name.resize(name.size()-4);
+        auto name = wide(application_display_name(p,grouped_processes_));
         std::array<std::optional<double>,4> loads{};
         for (std::size_t j=0; j<loads.size(); ++j)
             loads[j] = auto_metric_load_percent(p,static_cast<AutoMetric>(j+1),
