@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <unordered_set>
 #include <limits>
 #include <string_view>
 
@@ -28,11 +29,13 @@ struct Adapters {
 struct GpuAccessProbe {
     std::uint32_t attempted{}, opened_full{}, open_denied{}, open_other{};
     std::uint32_t identity_failed{}, query_full_ok{}, query_full_failed{};
-    std::uint32_t returned{};
+    std::uint32_t returned{}, pdh_selected{};
     LONG first_d3dkmt_failure{};
     bool has_d3dkmt_failure{};
 };
-bool collect_memory(Snapshot& snapshot, GpuAccessProbe& probe) {
+bool collect_memory(Snapshot& snapshot, GpuAccessProbe& probe,
+    const std::unordered_map<std::uint32_t,double>& pdh_local,
+    std::unordered_set<std::uint32_t>& pdh_selected) {
     Adapters adapters;
     if (D3DKMTEnumAdapters(&adapters.data) < 0) { adapters.data.NumAdapters = 0; return false; }
     if (!adapters.data.NumAdapters) return false;
@@ -121,6 +124,22 @@ bool collect_memory(Snapshot& snapshot, GpuAccessProbe& probe) {
             }
             return total;
         };
+        // PDH GPU Process Memory exposes per-PID LOCAL allocations directly.
+        // Do not guess PID identity: we have already validated creation FILETIME.
+        // Prefer this Windows counter when available: some WDDM drivers reject
+        // D3DKMTQueryVideoMemoryInfo with STATUS_INVALID_PARAMETER even for games.
+        if (const auto found = pdh_local.find(row.pid); found != pdh_local.end()) {
+            if (const auto bytes = gpu_process_memory_from_pdh(found->second,
+                    snapshot.total_gpu_memory_capacity)) {
+                row.dedicated_gpu_bytes = *bytes;
+                pdh_selected.insert(row.pid);
+                ++probe.pdh_selected;
+                ++probe.returned;
+                available = true;
+                continue;
+            }
+        }
+        // Fallback to D3DKMT only if the per-PID PDH reading is unavailable.
         const auto usage = query_usage(process.get());
         if (usage) {
             ++probe.query_full_ok;
@@ -144,6 +163,9 @@ GpuCollector::GpuCollector(bool enabled) : enabled_(enabled) {
     if (engine_status != ERROR_SUCCESS) engine_ = nullptr;
     if (PdhAddEnglishCounterW(query_, L"\\GPU Adapter Memory(*)\\Dedicated Usage", 0, &adapter_memory_) != ERROR_SUCCESS)
         adapter_memory_ = nullptr;
+    // Available on Windows 10/11 WDDM; no HWiNFO or privileged driver required.
+    if (PdhAddEnglishCounterW(query_, L"\\GPU Process Memory(*)\\Local Usage", 0, &process_memory_) != ERROR_SUCCESS)
+        process_memory_ = nullptr;
 
     if (!engine_) {
         std::cerr << "GPU: PDH engine counter unavailable (status=" << engine_status
@@ -156,7 +178,8 @@ GpuCollector::~GpuCollector() {
 }
 
 bool GpuCollector::read(PDH_HCOUNTER counter,
-                        std::unordered_map<std::uint32_t, double>& values, std::optional<double>& total, bool adapter_memory) {
+                        std::unordered_map<std::uint32_t, double>& values, std::optional<double>& total,
+                        bool adapter_memory, bool process_memory) {
     if (!counter) return false;
     constexpr DWORD max_bytes = 16 * 1024 * 1024;
     for (int attempt = 0; attempt < 3; ++attempt) {
@@ -173,12 +196,25 @@ bool GpuCollector::read(PDH_HCOUNTER counter,
         bool valid = false;
         double memory_sum = 0;
         std::unordered_map<std::wstring, double> engines;
+        std::unordered_set<std::wstring> seen_process_instances;
         for (DWORD i = 0; i < count; ++i) {
             const auto& item = items[i];
             if (item.FmtValue.CStatus != PDH_CSTATUS_VALID_DATA && item.FmtValue.CStatus != PDH_CSTATUS_NEW_DATA) continue;
             const double value = item.FmtValue.doubleValue;
             if (!item.szName || !std::isfinite(value) || value < 0) continue;
             if (adapter_memory) { memory_sum += value; valid = true; continue; }
+            if (process_memory) {
+                const auto pid = gpu_instance_pid(item.szName);
+                if (!pid || value >= static_cast<double>(std::numeric_limits<std::uint64_t>::max())) continue;
+                const std::wstring instance(item.szName);
+                // Repeated PDH instance keys are not additional allocations.
+                if (!seen_process_instances.insert(instance).second) continue;
+                auto& sum = values[*pid];
+                if (sum > static_cast<double>(std::numeric_limits<std::uint64_t>::max()) - value) continue;
+                sum += value; // Distinct local physical-adapter instances of one PID.
+                valid = true;
+                continue;
+            }
             const auto pid = gpu_instance_pid(item.szName);
             if (!pid) continue;
             valid = true;
@@ -210,8 +246,16 @@ void GpuCollector::collect(Snapshot& snapshot) {
     if (collected && read(adapter_memory_, engine, memory_total, true) && memory_total
         && *memory_total < static_cast<double>(std::numeric_limits<std::uint64_t>::max()))
         snapshot.total_gpu_memory = static_cast<std::uint64_t>(*memory_total);
+    // GPU Process Memory reads from the same PDH query and same sample as
+    // GPU Engine and GPU Adapter Memory; independent of overlay column choices.
+    std::unordered_map<std::uint32_t,double> per_pid_local;
+    std::optional<double> unused_total;
+    const bool pdh_local_ok = collected && read(process_memory_,per_pid_local,
+        unused_total,false,true);
+    if (!pdh_local_ok) per_pid_local.clear();
+    std::unordered_set<std::uint32_t> pdh_selected;
     GpuAccessProbe probe{};
-    const bool memory_ok = collect_memory(snapshot,probe);
+    const bool memory_ok = collect_memory(snapshot,probe,per_pid_local,pdh_selected);
     // Diagnostic aggregation is deliberately bounded; no per-process log entries.
     if (probe.attempted>0 && (++gpu_access_samples_==1 || gpu_access_samples_%15==0)) {
         diagnostics::write(diagnostics::Level::info,"gpu.memory.access",
@@ -223,6 +267,9 @@ void GpuCollector::collect(Snapshot& snapshot) {
             " full_query_ok="+std::to_string(probe.query_full_ok)+
             " full_query_failed="+std::to_string(probe.query_full_failed)+
             " valid_processes="+std::to_string(probe.returned)+
+            " pdh_status="+(pdh_local_ok?"ready":"unavailable")+
+            " pdh_local_pids="+std::to_string(per_pid_local.size())+
+            " pdh_selected="+std::to_string(probe.pdh_selected)+
             " first_d3dkmt_ntstatus="+(probe.has_d3dkmt_failure?
                 std::to_string(probe.first_d3dkmt_failure):"none"));
     }
@@ -233,8 +280,14 @@ void GpuCollector::collect(Snapshot& snapshot) {
         // D3DKMT reports allocated local memory. If it exceeds a known global
         // adapter usage or physical capacity, do not mislabel it as resident VRAM.
         // Never cap or synthesize bytes; unknown is preferable to false precision.
+        // PDH Local Usage and GPU Adapter Dedicated Usage can differ in WDDM
+        // accounting; never reject a verified local per-PID sample merely
+        // because an asynchronous adapter-wide counter is lower. Physical
+        // capacity remains a hard plausibility bound.
+        const auto used_limit = pdh_selected.contains(row.pid)
+            ? std::optional<std::uint64_t>{} : snapshot.total_gpu_memory;
         if (row.dedicated_gpu_bytes && !gpu_process_memory_consistent(
-                *row.dedicated_gpu_bytes, snapshot.total_gpu_memory,
+                *row.dedicated_gpu_bytes, used_limit,
                 snapshot.total_gpu_memory_capacity)) {
             row.dedicated_gpu_bytes.reset();
             inconsistent_usage = true;
