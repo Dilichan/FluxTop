@@ -1,0 +1,12 @@
+#!/bin/sh
+# v37 local enforcement: reject commits when any Release regression fails.
+if ! git diff --quiet --; then
+  echo "v37: unstaged tracked changes detected; stage or revert before committing" >&2
+  exit 1
+fi
+if ! command -v pwsh >/dev/null 2>&1; then
+  echo "v37: PowerShell 7 (pwsh) is required for the regression commit gate" >&2
+  exit 1
+fi
+pwsh -NoProfile -NonInteractive -File tools/Check-Regression.ps1
+exit $?

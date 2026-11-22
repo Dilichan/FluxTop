@@ -16,6 +16,8 @@ jobs:
         run: cmake --preset windows
       - name: Build Release
         run: cmake --build --preset release
+      - name: Behavioural regression contracts
+        run: ctest --preset release --output-on-failure -R "^(core|regression_contracts|history|statistics|disk_attribution|temperature_detection|jsonl_contract|smoke|overlay_smoke)$"
       - name: Test including native JSONL and installer fixtures
         run: ctest --preset release --output-on-failure
       # Native Git, fallback, process timeout and UAC policy checks are included in CTest.
