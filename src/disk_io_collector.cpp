@@ -26,7 +26,7 @@ constexpr GUID disk_guid{0x3d6fa8d4,0xfe05,0x11d0,{0x9d,0xda,0x00,0xc0,0x4f,0xd7
 constexpr GUID file_guid{0x90cbdc39,0x4a3e,0x11d1,{0x84,0xf4,0x00,0x00,0xf8,0x04,0x64,0xe3}};
 constexpr GUID thread_guid{0x3d6fa8d1,0xfe05,0x11d0,{0x9d,0xda,0x00,0xc0,0x4f,0xd7,0xba,0x7c}};
 constexpr std::size_t max_irps=65536;
-constexpr std::uint64_t filetime_second=10000000ULL;
+
 // TDH handles MOF versions and 32/64-bit ETW pointer widths.
 std::optional<std::uint64_t> property(EVENT_RECORD* event,const wchar_t* name) {
     PROPERTY_DATA_DESCRIPTOR desc{};
@@ -420,18 +420,13 @@ void DiskIoCollector::collect(Snapshot& snapshot) {
             self.last_diagnostics=now;
             report=true;
         }
-        // IRPs survive sampling boundaries; old ones are evicted to limit reuse.
-        constexpr std::uint64_t retention=10ULL*filetime_second;
+        // IRPs survive sampling boundaries. Keep FileIo and DiskIo-init caches
+        // bounded to the SAME 10-second validity window used for correlation.
+        // Invalid timestamp zero must also expire instead of occupying a slot.
         const auto latest=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count()/100)+116444736000000000ULL;
-        for(auto it=self.irps.begin();it!=self.irps.end();) {
-            if(latest>it->second.at && latest-it->second.at>retention)it=self.irps.erase(it);
-            else ++it;
-        }
-        for(auto it=self.disk_inits.begin();it!=self.disk_inits.end();) {
-            if(latest>it->second.at && latest-it->second.at>retention)it=self.disk_inits.erase(it);
-            else ++it;
-        }
+        disk_io_expire_requests(self.irps,latest);
+        disk_io_expire_requests(self.disk_inits,latest);
     }
     DiskDeliveryAccounting delivered{};
     delivered.matched=matched;
@@ -548,9 +543,9 @@ void DiskIoCollector::collect(Snapshot& snapshot) {
             delivered.no_baseline+=pid_bytes;
             continue;
         }
-        if(found!=counts.end() && found->second.first_event &&
-            found->second.first_event<*row.creation_time) {
-            delivered.pid_reused+=pid_bytes; // PID reuse.
+        if(!disk_io_pid_lifetime_valid(true,row.creation_time,
+            found==counts.end()?0ULL:found->second.first_event)) {
+            delivered.pid_reused+=pid_bytes; // Discard old PID lifetime, never reassign its bytes.
             continue;
         }
         const Impl::Bytes* bytes=found==counts.end()?nullptr:&found->second;
@@ -570,7 +565,8 @@ void DiskIoCollector::collect(Snapshot& snapshot) {
             if(physical_by_volume[i]) {
                 // No confirmed bytes for a volume means unknown unless its
                 // physical interval was fully attributable to known processes.
-                if(!amount && verified_by_volume[i]!=physical_by_volume[i])continue;
+                if(!amount && !disk_io_volume_zero_certified(
+                    physical_by_volume[i],verified_by_volume[i]))continue;
                 row.disk_volume_bytes_per_second[i]=static_cast<double>(amount)/seconds;
                 const auto pressure=disk_io_pressure(drive.active_percent,amount,physical_by_volume[i]);
                 if(pressure){

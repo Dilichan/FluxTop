@@ -3,6 +3,7 @@
 // SATA, NVMe, SAS and mechanical HDDs all expose physical disk offsets through ETW.
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <initializer_list>
 #include <optional>
@@ -29,6 +30,37 @@ inline std::optional<wchar_t> disk_io_volume_for(const std::vector<PhysicalVolum
         }
     }
     return found;
+}
+// A pending ETW request cannot be correlated with a completion older than
+// this interval. Expire cached FileIo/DiskIo-init requests on the same clock.
+inline constexpr std::uint64_t disk_io_request_max_age_ticks=100000000ULL; // 10s FILETIME
+// Returns how many stale or invalid pending requests were erased. The caller
+// holds the ETW mutex; map values have a FILETIME `at` member.
+template<class Map>
+std::size_t disk_io_expire_requests(Map& pending,std::uint64_t now) {
+    if(!now)return 0;
+    std::size_t removed=0;
+    for(auto it=pending.begin();it!=pending.end();) {
+        const auto at=it->second.at;
+        if(!at || (now>=at && now-at>disk_io_request_max_age_ticks)) {
+            it=pending.erase(it);
+            ++removed;
+        } else ++it;
+    }
+    return removed;
+}
+// Only publish a PID's measured data if its sample has a CPU/process baseline
+// and the initiating ETW request does not predate the process creation FILETIME.
+// request_at=0 is allowed solely for a confirmed zero in a fully observed interval.
+inline bool disk_io_pid_lifetime_valid(bool has_baseline,
+    std::optional<std::uint64_t> creation_time,std::uint64_t request_at) noexcept {
+    return has_baseline && creation_time && (!request_at || request_at>=*creation_time);
+}
+// A zero for a particular volume is meaningful only if physical bytes were
+// observed for that volume and all those bytes have confirmed per-volume owners.
+inline bool disk_io_volume_zero_certified(std::uint64_t physical,
+    std::uint64_t verified) noexcept {
+    return physical>0 && verified==physical;
 }
 // Full coverage certifies zeros for an observed interval. Any fewer matched
 // bytes is partial coverage, regardless of the storage technology.
@@ -103,8 +135,8 @@ private:
 // A cached FileIo operation is not proof that any physical I/O occurred.
 inline bool disk_io_valid_completion(std::uint64_t started,std::uint64_t finished,
     bool started_write,bool finished_write) noexcept {
-    constexpr std::uint64_t max_request_age=100000000ULL; // 10 seconds, FILETIME ticks
-    return started!=0 && finished>=started && finished-started<=max_request_age &&
+    return started!=0 && finished>=started &&
+        finished-started<=disk_io_request_max_age_ticks &&
         started_write==finished_write;
 }
 // Heuristic: apportion measured volume active time by its fraction of *physical* bytes.
