@@ -2,6 +2,7 @@
 #include "fluxtop/statistics_page.hpp"
 #include "fluxtop/history_identity.hpp"
 #include "fluxtop/statistics_axis.hpp"
+#include "fluxtop/statistics_chart_controls.hpp"
 #include "fluxtop/statistics_sidebar_order.hpp"
 #include "fluxtop/windows.hpp"
 #include "fluxtop/metric_text.hpp"
@@ -1529,11 +1530,11 @@ void StatisticsPage::toggle_section_pause() {
             state.samples=system_points_; // Immutable copy: future sampler ticks cannot move this chart.
             state.info=system_info_;
             state.to=system_view_end();
-            state.from=state.to-std::array<std::int64_t,3>{{60000,300000,900000}}[system_range_];
+            state.from=state.to-chart_system_duration(system_range_);
         } else {
             state.apps=selected_section_==4?live_apps_:history_.history;
             const auto axis=selected_section_-4;
-            state.zoom=auto_scale_[axis]?cached_auto_zoom_[axis]:1.0;
+            state.zoom=chart_effective_zoom(auto_scale_[axis],cached_auto_zoom_[axis],1.0);
             state.to=selected_section_==4?live_view_end():window_to_;
             state.from=selected_section_==4?state.to-60000:window_from_;
         }
@@ -1565,9 +1566,9 @@ void StatisticsPage::draw(HDC dc) {
     if(selected_disk_letter_) {
         const auto disk_index=static_cast<unsigned>(selected_disk_letter_-L'A');
         const auto& held=frozen_views_[6U+disk_index];
-        const auto range=std::array<std::int64_t,3>{{60000,300000,900000}}[system_range_];
+        const auto range=chart_system_duration(system_range_);
         const auto right=held.paused?held.to:system_view_end();
-        const auto begin=held.paused?held.from:right-range;
+        const auto begin=chart_window(held.paused,{held.from,held.to},{right-range,right}).from;
         const auto* samples=held.paused?&held.samples:nullptr;
         draw_system_graph(dc,one_minute,5U+disk_index,
             begin,right,system_autoscale_,1.0,system_hover_,samples);
@@ -1578,10 +1579,10 @@ void StatisticsPage::draw(HDC dc) {
             L": "+stat_percent(reading);
         label(dc,detail.c_str(),310,731,RGB(45,52,60));
     } else if(selected_section_<4) {
-        const auto range=std::array<std::int64_t,3>{{60000,300000,900000}}[system_range_];
+        const auto range=chart_system_duration(system_range_);
         const auto& held=frozen_views_[selected_section_];
         const auto right=held.paused?held.to:system_view_end();
-        const auto begin=held.paused?held.from:right-range;
+        const auto begin=chart_window(held.paused,{held.from,held.to},{right-range,right}).from;
         const auto* samples=held.paused?&held.samples:nullptr;
         if(selected_section_==3) {
             const RECT gpu{310,190,1364,372};
@@ -1617,18 +1618,18 @@ void StatisticsPage::mouse(int x,int y) {
     if(selected_disk_letter_) {
         const auto disk_index=static_cast<unsigned>(selected_disk_letter_-L'A');
         const auto& held=frozen_views_[6U+disk_index];
-        const auto range=std::array<std::int64_t,3>{{60000,300000,900000}}[system_range_];
+        const auto range=chart_system_duration(system_range_);
         const auto right=held.paused?held.to:system_view_end();
-        const auto begin=held.paused?held.from:right-range;
+        const auto begin=chart_window(held.paused,{held.from,held.to},{right-range,right}).from;
         show_system_hover(5U+disk_index,system_hover_,one_minute,begin,right,
             held.paused?&held.samples:nullptr);
         return;
     }
     if(selected_section_<4) {
-        const auto range=std::array<std::int64_t,3>{{60000,300000,900000}}[system_range_];
+        const auto range=chart_system_duration(system_range_);
         const auto& held=frozen_views_[selected_section_];
         const auto right=held.paused?held.to:system_view_end();
-        const auto begin=held.paused?held.from:right-range;
+        const auto begin=chart_window(held.paused,{held.from,held.to},{right-range,right}).from;
         const auto* samples=held.paused?&held.samples:nullptr;
         if(selected_section_==3) {
             const RECT gpu{310,190,1364,372};
@@ -1655,7 +1656,7 @@ void StatisticsPage::mouse(int x,int y) {
     const auto from=held.paused?held.from:(in_live?now-60000:window_from_);
     const auto to=held.paused?held.to:(in_live?now:window_to_);
     const double zoom=held.paused?held.zoom:
-        (auto_scale_[in_live?0:1]?cached_auto_zoom_[in_live?0:1]:1.0);
+        chart_effective_zoom(auto_scale_[in_live?0:1],cached_auto_zoom_[in_live?0:1],1.0);
     const double graph_width=static_cast<double>(area.right-area.left)+
         (in_live && !held.paused && to>=live_view_end()-1000?live_tail_guard_px:0);
     double best=9.0*9.0;
@@ -2069,8 +2070,8 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
                 refresh_auto_axis(index,true);
             auto& held=frozen_views_[4U+index];
             if(held.paused)
-                held.zoom=auto_scale_[index]?
-                    auto_vertical_zoom(held.apps,held.from,held.to):1.0;
+                held.zoom=chart_effective_zoom(auto_scale_[index],
+                    auto_vertical_zoom(held.apps,held.from,held.to),1.0);
             ini_overlay_write(settings_,index==0?L"stats_auto_live":L"stats_auto_history",
                 auto_scale_[index]);
             InvalidateRect(hwnd_,nullptr,FALSE);

@@ -29,7 +29,7 @@ Invoke-Checked $cmake @('--build',$build,'--config','Release','--parallel') 'Rel
 Invoke-Checked $ctest @('--test-dir',$build,'-C','Release','--output-on-failure') 'full CTest'
 # The mandatory behavioural subset must exist, not merely have a matching *policy* name.
 $required = @('core','regression_contracts','history','statistics','disk_attribution',
-    'temperature_detection','disk_pipeline','autoscore_visibility','statistics_axis','jsonl_contract','smoke','overlay_smoke')
+    'temperature_detection','disk_pipeline','autoscore_visibility','chart_controls','jsonl_contract','smoke','overlay_smoke')
 $list = & $ctest --test-dir $build -C Release -N
 if ($LASTEXITCODE -ne 0) { throw 'CTest test enumeration failed' }
 foreach ($name in $required) {

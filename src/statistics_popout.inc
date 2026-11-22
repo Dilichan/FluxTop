@@ -5,18 +5,14 @@ std::wstring popup_auto_scale_key(unsigned kind) {
     return L"stats_popup_auto_disk_"+std::wstring(1,static_cast<wchar_t>(L'A'+kind-6));
 }
 void StatisticsPage::popup_range(const PopupState& popup,std::int64_t& from,std::int64_t& to) const {
-    const auto end=popup.paused?popup.frozen_to:(popup.kind>=2?system_view_end():
-        popup.kind==0?live_view_end():window_to_);
-    const auto begin=popup.paused?popup.frozen_from:(popup.kind>=2?end-std::array<std::int64_t,3>{{60000,300000,900000}}[system_range_]:
-        popup.kind==0?end-60000:window_from_);
-    const double total=static_cast<double>(std::max<std::int64_t>(1000,end-begin));
-    const double span=std::max(1000.0,total/std::clamp(popup.zoom_x,1.0,128.0));
-    const double room=std::max(0.0,(total-span)/2.0);
-    const double center=(static_cast<double>(begin)+static_cast<double>(end))/2.0
-        +std::clamp(popup.pan_ms,-room,room);
-    from=static_cast<std::int64_t>(center-span/2.0);
-    to=static_cast<std::int64_t>(center+span/2.0);
-    if(to<=from) to=from+1000;
+    const auto end=popup.kind>=2?system_view_end():
+        popup.kind==0?live_view_end():window_to_;
+    const auto begin=popup.kind>=2?end-chart_system_duration(system_range_):
+        popup.kind==0?end-60000:window_from_;
+    const auto window=chart_popup_window(chart_window(popup.paused,
+        {popup.frozen_from,popup.frozen_to},{begin,end}),popup.zoom_x,popup.pan_ms);
+    from=window.from;
+    to=window.to;
 }
 void StatisticsPage::open_popup(unsigned kind) {
     if(kind>=popups_.size()) return;
@@ -38,6 +34,10 @@ void StatisticsPage::open_popup(unsigned kind) {
     register_window_class(cls,"Register detached statistics graph");
     popup.owner=this;popup.kind=kind;
     popup.zoom_x=1.0;popup.zoom_y=1.0;popup.pan_ms=0;
+    popup.cached_auto_zoom=1.0;popup.target_auto_zoom=1.0;
+    popup.axis_initialized=false;popup.axis_dirty=true;
+    popup.paused=false;popup.frozen_from=0;popup.frozen_to=0;
+    popup.frozen_system.clear();popup.frozen_apps.clear();
     const auto auto_key=popup_auto_scale_key(kind);
     popup.auto_scale=ini_overlay_read(settings_,auto_key.c_str(),1)!=0;
     popup.dragging=false;popup.cursor={-1,-1};
@@ -99,7 +99,8 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
         popup.axis_dirty=false;
         SetTimer(hwnd_,animate_message,33,nullptr);
     }
-    const double vertical_zoom=popup.auto_scale?popup.cached_auto_zoom:popup.zoom_y;
+    const double vertical_zoom=chart_effective_zoom(popup.auto_scale,
+        popup.cached_auto_zoom,popup.zoom_y);
     draw_graph(dc,graph,apps,from,to,L"",popup.kind==0 && !popup.paused,vertical_zoom,true);
     // Hover uses the very same series and plotting scale as the detached graph.
     if(popup.cursor.x>=graph.left && popup.cursor.x<=graph.right
@@ -186,7 +187,7 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
                     (popup->kind==0?page->live_view_end():page->window_to_);
                 popup->frozen_to=latest;
                 popup->frozen_from=popup->kind>=2?
-                    latest-std::array<std::int64_t,3>{{60000,300000,900000}}[page->system_range_]:
+                    latest-chart_system_duration(page->system_range_):
                     (popup->kind==0?latest-60000:page->window_from_);
                 if(popup->kind>=2)popup->frozen_system=page->system_points_;
                 else popup->frozen_apps=popup->kind==0?page->live_apps_:page->history_.history;
@@ -310,7 +311,7 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
             popup->pan_ms-=static_cast<double>(current.x-popup->last.x)
                 *static_cast<double>(to-from)/static_cast<double>(width);
             const auto full=popup->kind>=2?
-                static_cast<double>(std::array<std::int64_t,3>{{60000,300000,900000}}[page->system_range_]):
+                static_cast<double>(chart_system_duration(page->system_range_)):
                 popup->kind==0?60000.0:
                 static_cast<double>(std::max<std::int64_t>(1000,page->window_to_-page->window_from_));
             const double half_range=std::max(0.0,(full-full/popup->zoom_x)/2.0);
@@ -353,6 +354,10 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
         popup->fill_toggle=nullptr;
         popup->pause_toggle=nullptr;
         popup->paused=false;
+        popup->frozen_from=0;popup->frozen_to=0;
+        popup->cached_auto_zoom=1.0;popup->target_auto_zoom=1.0;
+        popup->axis_initialized=false;popup->axis_dirty=true;
+        popup->zoom_x=1.0;popup->zoom_y=1.0;popup->pan_ms=0.0;
         popup->frozen_system.clear();popup->frozen_apps.clear();
         page->system_tip_active_=false;
         if(page->tooltip_)ShowWindow(page->tooltip_,SW_HIDE);
