@@ -60,6 +60,9 @@ private:
     std::unordered_map<std::uint32_t, Baseline> previous_;
 };
 
+// AutoScore is based on measurements, never on which columns the user displays.
+// Bit 5 is the one physical-disk category; per-volume readings are not separate score categories.
+inline constexpr unsigned auto_score_all_metrics = 63U;
 enum class Sort { cpu, ram, gpu, vram, automatic, rx, tx, network };
 class SpikeTracker {
 public:
@@ -75,7 +78,8 @@ private:
     };
     std::unordered_map<std::uint32_t, Baseline> previous_;
 };
-AutoRank auto_rank(const Process& row, unsigned visible_metrics = 31U);
+// The optional mask is for metric-specific diagnostics, not UI visibility.
+AutoRank auto_rank(const Process& row, unsigned visible_metrics = auto_score_all_metrics);
 // Independent per-cell orange flag, using the same threshold as AutoRank.
 bool auto_metric_has_burst(const Process& row, AutoMetric metric);
 // Actual utilization for colors, independent of weighted AutoScore. Network has no absolute capacity.
@@ -84,9 +88,9 @@ std::optional<double> auto_metric_load_percent(const Process& row, AutoMetric me
 // Display-only aggregation of verified same-image parent/child processes.
 // Original per-PID snapshots and history are never modified.
 std::vector<Process> aggregate_application_processes(const std::vector<Process>& rows);
-void sort_processes(std::vector<Process>& rows, Sort sort, unsigned visible_metrics = 31U);
+void sort_processes(std::vector<Process>& rows, Sort sort, unsigned visible_metrics = auto_score_all_metrics);
 // Sort borrowed rows without copying their names, paths, or member PID buffers.
-void sort_process_refs(std::vector<const Process*>& rows, Sort sort, unsigned visible_metrics = 31U);
+void sort_process_refs(std::vector<const Process*>& rows, Sort sort, unsigned visible_metrics = auto_score_all_metrics);
 // Move the focused process to row zero without changing the order of other rows.
 // Return false if pid is zero or not present in this snapshot.
 bool prioritize_focused_process(std::vector<Process>& rows, std::uint32_t pid);

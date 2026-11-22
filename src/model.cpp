@@ -327,13 +327,15 @@ std::vector<Process> aggregate_application_processes(const std::vector<Process>&
 namespace {
 // Shared ordering ensures pointer sorting and owned-row sorting remain identical.
 bool process_before(const Process& a,const Process& b,Sort sort,unsigned visible_metrics) {
-    const auto value = [sort,visible_metrics](const Process& row) -> std::optional<double> {
+    // Retain the public sort signature for compatibility, but ignore presentation masks.
+    (void)visible_metrics;
+    const auto value = [sort](const Process& row) -> std::optional<double> {
         switch (sort) {
         case Sort::cpu: return row.cpu_percent;
         case Sort::ram: return row.working_set ? std::optional<double>(static_cast<double>(*row.working_set)) : std::nullopt;
         case Sort::gpu: return row.gpu_percent;
         case Sort::vram: return row.dedicated_gpu_bytes ? std::optional<double>(static_cast<double>(*row.dedicated_gpu_bytes)) : std::nullopt;
-        case Sort::automatic: return auto_rank(row, visible_metrics).score;
+        case Sort::automatic: return auto_rank(row, auto_score_all_metrics).score;
         case Sort::rx: return row.rx_bytes_per_second;
         case Sort::tx: return row.tx_bytes_per_second;
         case Sort::network:

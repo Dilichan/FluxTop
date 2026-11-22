@@ -128,7 +128,7 @@ struct Observation {
 std::array<std::optional<double>,history_metric_count> metrics_of(const Process& group){
     std::array<std::optional<double>,history_metric_count> v{};
     if(history_score_available(group))
-        v[0]=auto_rank(group,63U).score; // Unknown is NULL, not a measured zero.
+        v[0]=auto_rank(group,auto_score_all_metrics).score; // Unknown is NULL, not a measured zero.
     v[1]=group.cpu_percent;
     if(group.working_set) v[2]=static_cast<double>(*group.working_set);
     v[3]=group.gpu_percent;

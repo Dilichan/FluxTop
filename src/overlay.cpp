@@ -167,8 +167,9 @@ private:
     bool summary_only() const { return summary_ || (!metrics_ && !has_enabled_disks() && !disk_total_enabled_); }
     unsigned active_metrics() const { return metrics_ ? metrics_ : ((has_enabled_disks() || disk_total_enabled_)?0U:all_metrics); }
     unsigned ranking_metrics() const {
-        return active_metrics() | ((disk_total_enabled_ || has_enabled_disks())?32U:0U);
-    } // ETW-confirmed disk pressure only; unknown data never contributes.
+        // Display switches only affect columns; AutoScore always uses every available metric.
+        return auto_score_all_metrics;
+    }
     float table_width() const {
         const auto base=calculate_overlay_columns(text_size(),active_metrics(),summary_only(),show_icons_).total_width;
         const auto n=enabled_disk_letters().size()+(disk_total_enabled_?1U:0U);
