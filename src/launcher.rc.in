@@ -2,6 +2,8 @@
 101 ICON "@ICON@"
 201 RCDATA "@INPUT@"
 205 RCDATA "@UNINSTALLER@"
+@intel_resource_line@
+@pawnio_resource_line@
 STRINGTABLE
 BEGIN
 202 L"@payload_hash@"

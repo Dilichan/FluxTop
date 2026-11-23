@@ -2,6 +2,7 @@
 #include "fluxtop/diagnostics.hpp"
 #include "fluxtop/release_update.hpp"
 #include "fluxtop/installation.hpp"
+#include "fluxtop/pawnio_bundle.hpp"
 #include <shellapi.h>
 #include <shlobj.h>
 #include <array>
@@ -108,7 +109,8 @@ bool close_monitor_for_consented_update() {
 }
 }
 int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
-    fluxtop::diagnostics::write(fluxtop::diagnostics::Level::info,"launcher.start","bootstrap started");
+    if(std::wstring_view(GetCommandLineW()).find(L"--pawnio-dry-run")==std::wstring_view::npos)
+        fluxtop::diagnostics::write(fluxtop::diagnostics::Level::info,"launcher.start","bootstrap started");
     bool prepare=false,install_only=false;
     try {
         const HRESULT com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
@@ -118,7 +120,7 @@ int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
         int count{}; auto** argv=CommandLineToArgvW(GetCommandLineW(),&count);
         if (!argv) throw fluxtop::windows_error("Read launcher arguments");
         struct Arguments { wchar_t** value; ~Arguments(){ LocalFree(value); } } arguments{argv};
-        bool tray=false,autostart=false,uninstall=false,custom_directory=false,install_and_launch=false,check_update=false;
+        bool tray=false,autostart=false,uninstall=false,custom_directory=false,install_and_launch=false,check_update=false,pawnio_dry_run=false;
         std::filesystem::path directory;
         for (int i=1;i<count;++i) {
             const std::wstring_view arg(argv[i]);
@@ -129,11 +131,21 @@ int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
             else if (arg==L"--install-and-launch") install_and_launch=true;
             else if (arg==L"--check-update") check_update=true;
             else if (arg==L"--uninstall") uninstall=true;
+            else if (arg==L"--pawnio-dry-run") pawnio_dry_run=true;
             else if (arg==L"--data-dir" && i+1<count) {
                 custom_directory=true;
                 directory=std::filesystem::absolute(argv[++i]);
             }
             else throw std::runtime_error("Supported options: --tray, --prepare-only, --install-only, --uninstall, --check-update, --data-dir PATH");
+        }
+
+        // Side-effect-free offline verifier: no writes, UAC, driver install, or
+        // changes to existing FluxTop registration. Returns an exit code only.
+        if (pawnio_dry_run) {
+            if (tray || autostart || uninstall || install_only || install_and_launch ||
+                prepare || check_update || custom_directory)
+                return 2;
+            return fluxtop::pawnio_bundle_verified(executable()) ? 0 : 3;
         }
         fluxtop::diagnostics::write(fluxtop::diagnostics::Level::info,"launcher.options",
             "tray="+std::to_string(tray)+" autostart="+std::to_string(autostart)+
@@ -236,7 +248,7 @@ int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
                 const auto installed_tag=fluxtop::launcher_release_tag(installed);
                 const bool upgrade=installed_tag.empty() || fluxtop::newer_release(tag,installed_tag);
                 const wchar_t* prompt = !registered
-                    ? L"Установить FluxTop для текущего пользователя? Программа появится в меню «Пуск» и списке установленных приложений."
+                    ? L"Установить FluxTop для текущего пользователя? Будет установлен необходимый подписанный компонент мониторинга оборудования; программа появится в меню «Пуск» и списке установленных приложений."
                     : upgrade
                         ? L"FluxTop уже установлен. Обновить установленную версию и запустить?"
                         : L"FluxTop уже установлен. Запустить установленную копию?";
@@ -286,6 +298,15 @@ int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
         std::filesystem::create_directories(version);
         const auto monitor=version/L"fluxtop.exe";
         publish(monitor,bytes,size);
+        // Optional pre-verified MSR module is packaged into the launcher at build time.
+        // No downloads, no implicit driver installation and no launch failure if absent.
+        if(const auto resource_msr=FindResourceW(module,MAKEINTRESOURCEW(206),RT_RCDATA)) {
+            const auto content_msr=LoadResource(module,resource_msr);
+            const auto* data_msr=content_msr?static_cast<const BYTE*>(LockResource(content_msr)):nullptr;
+            const auto size_msr=SizeofResource(module,resource_msr);
+            if(data_msr && size_msr>0 && size_msr<=65536)
+                publish(version/L"IntelMSR.bin",data_msr,size_msr);
+        }
         cache_launcher(directory);
         if (prepare) return 0;
         SHELLEXECUTEINFOW start{}; start.cbSize=sizeof(start); start.fMask=SEE_MASK_NOCLOSEPROCESS;

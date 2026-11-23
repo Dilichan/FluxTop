@@ -1259,7 +1259,7 @@ void StatisticsPage::draw_sidebar(HDC dc) {
         SetTextColor(dc,colors[section]);SetBkMode(dc,TRANSPARENT);
         DrawTextW(dc,reading.c_str(),-1,&value_area,DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
         const RECT spark{26,y+38,249,y+94};
-        std::vector<POINT> points,second_gpu_line;
+        std::vector<POINT> points,second_gpu_line,second_cpu_temperature_line;
         std::vector<ChartBar> bars;
         const auto add=[&](std::int64_t at,double value,std::int64_t begin,std::int64_t end,double max_y){
             if(at<begin || at>end || end<=begin || max_y<=0)return;
@@ -1298,9 +1298,31 @@ void StatisticsPage::draw_sidebar(HDC dc) {
                 second_gpu_line.push_back({x,ypoint});
                 previous_vram=actual;
             }
-            if(!system_points_.empty() && system_points_.back().values[4])
+            if(section==3 && !system_points_.empty() && system_points_.back().values[4])
                 extend_recent_line(second_gpu_line,spark.right,system_points_.back().time,
                     latest,animation_duration_ms_);
+            // The CPU sidebar mirrors GPU: two independent curves share the
+            // same compact renderer. CPU load and package temperature use
+            // separate 0..100 scales and no additional sensor reads.
+            if(section==0) {
+                std::optional<double> previous_temperature;
+                for(const auto& sample:system_points_)if(sample.cpu_temperature &&
+                    sample.time>=latest-60000 && sample.time<=latest) {
+                    const double actual=*sample.cpu_temperature;
+                    const double displayed=(&sample==&system_points_.back() && previous_temperature)?
+                        eased_latest_value(*previous_temperature,actual,
+                            animation_started_,animation_duration_ms_):actual;
+                    const auto x=spark.left+static_cast<LONG>(
+                        (sample.time-(latest-60000))*(spark.right-spark.left)/60000.0);
+                    const auto ypoint=spark.bottom-2-static_cast<LONG>(
+                        std::clamp(displayed/100.0,0.0,1.0)*(spark.bottom-spark.top-5));
+                    second_cpu_temperature_line.push_back({x,ypoint});
+                    previous_temperature=actual;
+                }
+                if(!system_points_.empty() && system_points_.back().cpu_temperature)
+                    extend_recent_line(second_cpu_temperature_line,spark.right,
+                        system_points_.back().time,latest,animation_duration_ms_);
+            }
         } else if(section==4 || section==5) {
             const auto& apps=section==4?live_apps_:history_.history;
             const auto start=section==4?latest-60000:window_from_;
@@ -1324,12 +1346,16 @@ void StatisticsPage::draw_sidebar(HDC dc) {
             extend_fresh_left_edge(points,spark,latest-60000,latest,animation_duration_ms_);
             if(section==3)
                 extend_fresh_left_edge(second_gpu_line,spark,latest-60000,latest,animation_duration_ms_);
+            if(section==0)
+                extend_fresh_left_edge(second_cpu_temperature_line,spark,latest-60000,latest,animation_duration_ms_);
         }
         // Mini-charts use the very same renderer, with a white paper and no grid.
-        // The GPU pair is passed as two series, so both fills remain below both lines.
+        // GPU and CPU pairs use the shared painter (both fills below both strokes).
         std::vector<ChartStroke> plots;
-        plots.reserve(section==3?2U:1U);
+        plots.reserve(section==0 || section==3?2U:1U);
         if(points.size()>1)plots.push_back({std::move(points),colors[section]});
+        if(section==0 && second_cpu_temperature_line.size()>1)
+            plots.push_back({std::move(second_cpu_temperature_line),RGB(235,75,43)});
         if(section==3 && second_gpu_line.size()>1)
             plots.push_back({std::move(second_gpu_line),RGB(194,89,178)});
         ChartStyle style{};

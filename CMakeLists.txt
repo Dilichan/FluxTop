@@ -30,7 +30,7 @@ target_include_directories(fluxtop_history PUBLIC include)
 target_compile_features(fluxtop_history PUBLIC cxx_std_20)
 target_compile_definitions(fluxtop_history PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
 target_link_libraries(fluxtop_history PUBLIC fluxtop_core fluxtop_logging winsqlite3)
-add_executable(fluxtop src/main.cpp src/process_collector.cpp src/gpu_collector.cpp src/fps_collector.cpp src/privileges.cpp src/sampler.cpp src/overlay.cpp src/statistics_page.cpp src/statistics_history.cpp src/network_collector.cpp src/disk_collector.cpp src/disk_temperature.cpp src/disk_io_collector.cpp src/autostart.cpp src/temperatures.cpp
+add_executable(fluxtop src/main.cpp src/process_collector.cpp src/gpu_collector.cpp src/fps_collector.cpp src/privileges.cpp src/sampler.cpp src/overlay.cpp src/statistics_page.cpp src/statistics_history.cpp src/network_collector.cpp src/disk_collector.cpp src/disk_temperature.cpp src/disk_io_collector.cpp src/autostart.cpp src/temperatures.cpp src/intel_dts.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/fluxtop.rc")
 target_link_libraries(fluxtop PRIVATE fluxtop_core fluxtop_icons fluxtop_history psapi pdh advapi32 d2d1 dwrite shell32 user32 gdi32 ole32 oleaut32 wbemuuid comctl32 tdh uuid)
 target_compile_definitions(fluxtop PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN
@@ -56,13 +56,13 @@ add_custom_command(OUTPUT "${launcher_resource}"
         "-DUNINSTALLER=$<TARGET_FILE:fluxtop_uninstaller>"
         "-DRELEASE_TAG=${FLUXTOP_RELEASE_TAG}" "-DTEMPLATE=${PROJECT_SOURCE_DIR}/src/launcher.rc.in"
         -P "${PROJECT_SOURCE_DIR}/tools/Generate-LauncherResource.cmake"
-    DEPENDS fluxtop fluxtop_uninstaller "${PROJECT_SOURCE_DIR}/assets/branding/fluxtop.ico" "${PROJECT_SOURCE_DIR}/tools/Generate-LauncherResource.cmake" "${PROJECT_SOURCE_DIR}/src/launcher.rc.in"
+    DEPENDS fluxtop fluxtop_uninstaller "${PROJECT_SOURCE_DIR}/assets/pawnio/PawnIO_setup.exe" "${PROJECT_SOURCE_DIR}/assets/branding/fluxtop.ico" "${PROJECT_SOURCE_DIR}/tools/Generate-LauncherResource.cmake" "${PROJECT_SOURCE_DIR}/src/launcher.rc.in"
     VERBATIM)
-add_executable(fluxtop_launcher WIN32 src/launcher.cpp src/installation.cpp "${launcher_resource}")
+add_executable(fluxtop_launcher WIN32 src/launcher.cpp src/installation.cpp src/pawnio_bundle.cpp "${launcher_resource}")
 target_include_directories(fluxtop_launcher PRIVATE include)
 target_compile_features(fluxtop_launcher PRIVATE cxx_std_20)
 target_compile_definitions(fluxtop_launcher PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
-target_link_libraries(fluxtop_launcher PRIVATE fluxtop_release_update fluxtop_logging shell32 user32 ole32 advapi32 uuid)
+target_link_libraries(fluxtop_launcher PRIVATE fluxtop_release_update fluxtop_logging shell32 user32 ole32 advapi32 uuid crypt32 wintrust bcrypt)
 set_target_properties(fluxtop_launcher PROPERTIES OUTPUT_NAME FluxTop
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/package/$<CONFIG>")
 
@@ -82,6 +82,11 @@ target_compile_definitions(fluxtop_source_autostart PRIVATE FLUXTOP_SOURCE_GUI)
 target_link_libraries(fluxtop_source_autostart PRIVATE fluxtop_source_checkout fluxtop_logging shell32 ole32 advapi32 uuid)
 set_target_properties(fluxtop_source_autostart PROPERTIES OUTPUT_NAME FluxTopSourceAutostart)
 
+if(EXISTS "${PROJECT_SOURCE_DIR}/assets/pawnio/IntelMSR.bin")
+    add_custom_command(TARGET fluxtop POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${PROJECT_SOURCE_DIR}/assets/pawnio/IntelMSR.bin" "$<TARGET_FILE_DIR:fluxtop>/IntelMSR.bin")
+endif()
 include(CTest)
 if(BUILD_TESTING)
     add_executable(fluxtop_uninstall_tests tests/uninstall_tests.cpp src/uninstall_cleanup.cpp)
@@ -121,6 +126,31 @@ if(BUILD_TESTING)
     add_executable(fluxtop_native_launcher_fixture_tests tests/native_launcher_fixture_tests.cpp)
     target_compile_features(fluxtop_native_launcher_fixture_tests PRIVATE cxx_std_20)
     target_link_libraries(fluxtop_native_launcher_fixture_tests PRIVATE bcrypt)
+    add_executable(fluxtop_pawnio_bundle_tests tests/pawnio_bundle_tests.cpp src/pawnio_bundle.cpp)
+    target_include_directories(fluxtop_pawnio_bundle_tests PRIVATE include)
+    target_compile_features(fluxtop_pawnio_bundle_tests PRIVATE cxx_std_20)
+    target_compile_options(fluxtop_pawnio_bundle_tests PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/EHsc>)
+    target_compile_definitions(fluxtop_pawnio_bundle_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
+    target_link_libraries(fluxtop_pawnio_bundle_tests PRIVATE crypt32 wintrust bcrypt shell32 ole32 advapi32 fluxtop_logging)
+    add_test(NAME pawnio_bundle COMMAND fluxtop_pawnio_bundle_tests "$<TARGET_FILE:fluxtop_launcher>")
+    add_executable(fluxtop_pawnio_install_policy_tests tests/pawnio_install_policy_tests.cpp)
+    target_include_directories(fluxtop_pawnio_install_policy_tests PRIVATE include)
+    target_compile_features(fluxtop_pawnio_install_policy_tests PRIVATE cxx_std_20)
+    target_compile_options(fluxtop_pawnio_install_policy_tests PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/EHsc>)
+    target_link_libraries(fluxtop_pawnio_install_policy_tests PRIVATE fluxtop_logging)
+    # Only the resource-verification function is needed; never call install.
+    target_sources(fluxtop_pawnio_install_policy_tests PRIVATE src/pawnio_bundle.cpp)
+    target_compile_definitions(fluxtop_pawnio_install_policy_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
+    target_link_libraries(fluxtop_pawnio_install_policy_tests PRIVATE crypt32 wintrust shell32 advapi32 bcrypt ole32)
+    add_executable(fluxtop_pawnio_stage_security_tests tests/pawnio_stage_security_tests.cpp)
+    target_compile_features(fluxtop_pawnio_stage_security_tests PRIVATE cxx_std_20)
+    target_compile_options(fluxtop_pawnio_stage_security_tests PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/EHsc>)
+    add_test(NAME pawnio_stage_security COMMAND fluxtop_pawnio_stage_security_tests "${PROJECT_SOURCE_DIR}")
+    set_tests_properties(pawnio_stage_security PROPERTIES TIMEOUT 20)
+    add_test(NAME pawnio_install_policy COMMAND fluxtop_pawnio_install_policy_tests
+        "$<TARGET_FILE:fluxtop_launcher>" "${PROJECT_SOURCE_DIR}")
+    set_tests_properties(pawnio_install_policy PROPERTIES TIMEOUT 30)
+    set_tests_properties(pawnio_bundle PROPERTIES TIMEOUT 30)
     add_test(NAME portable COMMAND fluxtop_native_launcher_fixture_tests portable
         "$<TARGET_FILE:fluxtop_launcher>" "$<TARGET_FILE:fluxtop>" "${CMAKE_CURRENT_BINARY_DIR}")
     add_test(NAME installation_fixture COMMAND fluxtop_native_launcher_fixture_tests installation_fixture
@@ -170,12 +200,17 @@ if(BUILD_TESTING)
     add_test(NAME fps_header_policy COMMAND fluxtop_native_policy_tests "${PROJECT_SOURCE_DIR}" "fps_header_policy")
     add_test(NAME gpu_group_memory_policy COMMAND fluxtop_native_policy_tests "${PROJECT_SOURCE_DIR}" "gpu_group_memory_policy")
     set_tests_properties(history PROPERTIES TIMEOUT 20)
-    add_executable(fluxtop_temperature_tests tests/temperature_tests.cpp src/temperatures.cpp)
+    add_executable(fluxtop_temperature_tests tests/temperature_tests.cpp src/temperatures.cpp src/intel_dts.cpp)
     target_include_directories(fluxtop_temperature_tests PRIVATE include)
     target_compile_features(fluxtop_temperature_tests PRIVATE cxx_std_20)
     target_compile_definitions(fluxtop_temperature_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
     target_link_libraries(fluxtop_temperature_tests PRIVATE wbemuuid ole32 oleaut32 fluxtop_logging)
     add_test(NAME temperature_detection COMMAND fluxtop_temperature_tests)
+    add_executable(fluxtop_intel_dts_tests tests/intel_dts_tests.cpp src/intel_dts.cpp)
+    target_include_directories(fluxtop_intel_dts_tests PRIVATE include)
+    target_compile_features(fluxtop_intel_dts_tests PRIVATE cxx_std_20)
+    target_compile_definitions(fluxtop_intel_dts_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
+    add_test(NAME intel_dts_decode COMMAND fluxtop_intel_dts_tests)
     add_executable(fluxtop_network_tests tests/network_tests.cpp src/network_collector.cpp)
     target_link_libraries(fluxtop_network_tests PRIVATE fluxtop_core advapi32 ole32 tdh ws2_32)
     target_compile_definitions(fluxtop_network_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)

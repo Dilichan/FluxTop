@@ -154,6 +154,13 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "frozen_system,true", "WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN",
             "if(popup->kind<2 || popup->dragging)InvalidateRect(window,nullptr,FALSE);"});
         need(header,{"PaintBuffer tooltip_buffer_;", "bool position_tooltip(POINT screen,int offset_x,int offset_y);"});
+        // CPU sidebar pair (load + temperature) must use the same shared
+        // renderer as the GPU/VRAM mini-chart, without polling hardware in UI.
+        need(page,{"second_cpu_temperature_line",
+            "if(section==0 && second_cpu_temperature_line.size()>1)",
+            "plots.push_back({std::move(second_cpu_temperature_line),RGB(235,75,43)})",
+            "extend_fresh_left_edge(second_cpu_temperature_line",
+            "draw_chart_core(dc,style,plots,bars)"});
         need(header,{"std::array<FrozenView,32> frozen_views_"});
         need(page,{"const bool disk=selected_disk_letter_!=0;", "refresh_pause_control();",
             "held.paused?&held.samples:nullptr", "open_popup(selected_disk_letter_"});

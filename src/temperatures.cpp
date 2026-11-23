@@ -1,4 +1,5 @@
 #include "fluxtop/temperatures.hpp"
+#include "fluxtop/intel_dts.hpp"
 #include "fluxtop/diagnostics.hpp"
 #include <wbemidl.h>
 #include <wrl/client.h>
@@ -339,6 +340,12 @@ private:
 
 HardwareTemperatures read_hardware_temperatures() {
     auto result=read_hwinfo_temperatures();
+    const auto dts=read_intel_dts();
+    if(dts.package_c){
+        result.cpu_c=dts.package_c;
+        result.cpu_from_board=false;
+        result.cpu_source="intel-dts-pawnio";
+    }
     if (!result.cpu_c || result.cpu_from_board) {
         static WmiCpuCache cpu_wmi;
         if(const auto value=cpu_wmi.latest()) {

@@ -2,6 +2,7 @@
 #include "fluxtop/diagnostics.hpp"
 #include "fluxtop/windows.hpp"
 #include "fluxtop/release_update.hpp"
+#include "fluxtop/pawnio_bundle.hpp"
 
 #include <windows.h>
 #include <shlobj.h>
@@ -215,6 +216,11 @@ void install_application(const std::filesystem::path& source,
     copy_if_needed(source,installed);
     install_native_uninstaller(installed,data_directory);
     if (!register_windows) return;
+    // FluxTop.PawnIO.Bundle.v48.2: real user installations only.
+    // Never run a kernel-driver installer in isolated CI/portable fixtures.
+    // Failure (including user cancellation or driver policy rejection)
+    // must not block installation of the normal resource monitor.
+    maybe_install_embedded_pawnio(installed,data_directory);
     make_shortcut(installed,start_menu_link());
     // A restricted/locked Startup shortcut must not make installation fail.
     // Keep the original shortcut intact and report how to repair its target.
