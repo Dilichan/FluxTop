@@ -3,12 +3,16 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <cstdint>
+#include "fluxtop/temperature_selection.hpp"
 namespace fluxtop {
 struct HardwareTemperatures {
     std::optional<double> cpu_c, gpu_c;
     bool cpu_from_board{}; // Explicit CPU socket/board zone, NOT processor die/package.
     std::string cpu_source{"unavailable"}; // Diagnostic provenance, not a process metric.
     std::string hwinfo_status{"unavailable"}; // Last HWiNFO availability reason.
+    CpuTemperatureKind cpu_kind{CpuTemperatureKind::package};
+    std::uint64_t cpu_sampled_tick{}; // Monotonic timestamp, or zero if missing.
 };
 // Pure validation/selection rules: testable without HWiNFO or WMI installed.
 bool cpu_temperature_valid(double celsius) noexcept;

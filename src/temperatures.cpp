@@ -1,5 +1,6 @@
 #include "fluxtop/temperatures.hpp"
 #include "fluxtop/intel_dts.hpp"
+#include "fluxtop/temperature_selection.hpp"
 #include "fluxtop/diagnostics.hpp"
 #include <wbemidl.h>
 #include <wrl/client.h>
@@ -9,6 +10,7 @@
 #include <thread>
 #include <windows.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -125,15 +127,27 @@ HardwareTemperatures read_hwinfo_temperatures() {
             const int cp = hwinfo_cpu_sensor_priority(group,label);
             const int gp = label.find("gpu temperature")!=std::string::npos ? 3
                 : label.find("gpu core")!=std::string::npos && label.find("temperature")!=std::string::npos ? 2 : 0;
-            if (cp>cpu_priority) { result.cpu_c=temperature; cpu_priority=cp; }
+            if (cp>cpu_priority) {
+                result.cpu_c=temperature;cpu_priority=cp;
+                result.cpu_kind=cp==5?CpuTemperatureKind::package:
+                    cp>=3?CpuTemperatureKind::die:
+                    cp==2?CpuTemperatureKind::core_average:CpuTemperatureKind::core;
+            }
             const int bp = hwinfo_board_sensor_priority(group,label);
             if (bp > board_priority) { board_priority=bp; board_temp=temperature; }
             if (gpu && gp>gpu_priority) { result.gpu_c=temperature; gpu_priority=gp; }
         }
-        if (!result.cpu_c && board_temp) { result.cpu_c=board_temp; result.cpu_from_board=true; }
+        if (!result.cpu_c && board_temp) {
+            result.cpu_c=board_temp;result.cpu_from_board=true;
+            result.cpu_kind=CpuTemperatureKind::board;
+        }
         if (result.cpu_c) {
             result.cpu_source=result.cpu_from_board?"hwinfo-board":"hwinfo-die";
             result.hwinfo_status="ready";
+            const auto now_ms=GetTickCount64();
+            const auto age_s=static_cast<std::uint64_t>(now-header.poll_time);
+            const auto age_ms=age_s*1000ULL;
+            result.cpu_sampled_tick=age_ms<now_ms?now_ms-age_ms:1;
         }
     } while(false);
     UnmapViewOfFile(data);
@@ -216,7 +230,7 @@ std::optional<double> wmi_number(IWbemClassObject* obj, const wchar_t* property)
     VariantClear(&value);
     return result;
 }
-struct CpuReading { double celsius{}; bool board{}; unsigned source{}; };
+struct CpuReading { double celsius{}; bool board{}; unsigned source{}; ULONGLONG sampled_tick{}; };
 std::optional<CpuReading> read_wmi_cpu_namespace(IWbemLocator* locator, const wchar_t* name, unsigned source) {
     ScopedBstr scope(name), language(L"WQL");
     ScopedBstr sql(L"SELECT Name, Identifier, Value FROM Sensor WHERE SensorType='Temperature'");
@@ -312,7 +326,7 @@ public:
         if (!sample || GetTickCount64()-sample>20000) return std::nullopt;
         const auto value=celsius_.load(std::memory_order_relaxed);
         if (!std::isfinite(value)) return std::nullopt;
-        return CpuReading{value,board_.load(std::memory_order_relaxed),source_.load(std::memory_order_relaxed)};
+        return CpuReading{value,board_.load(std::memory_order_relaxed),source_.load(std::memory_order_relaxed),sample};
     }
 private:
     void loop(std::stop_token stop) {
@@ -338,40 +352,60 @@ private:
 };
 } // namespace
 
+// FluxTop temperature arbitration v49: the sampler consumes cached values only.
+// One native Intel DTS reader and one WMI worker; no driver calls from UI.
 HardwareTemperatures read_hardware_temperatures() {
+    static WmiCpuCache cpu_wmi; // Warm fallback, even while Intel DTS is working.
+    static CpuTemperatureSelector selector;
     auto result=read_hwinfo_temperatures();
     const auto dts=read_intel_dts();
+    const auto wmi=cpu_wmi.latest();
+    const auto now=static_cast<std::uint64_t>(GetTickCount64());
+    std::array<CpuTemperatureCandidate,3> candidates{};
+    std::size_t count=0;
     if(dts.package_c){
-        result.cpu_c=dts.package_c;
-        result.cpu_from_board=false;
-        result.cpu_source="intel-dts-pawnio";
+        candidates[count++]={CpuTemperatureProvider::intel_dts,CpuTemperatureKind::package,
+            dts.package_c,dts.sampled_tick};
     }
-    if (!result.cpu_c || result.cpu_from_board) {
-        static WmiCpuCache cpu_wmi;
-        if(const auto value=cpu_wmi.latest()) {
-            if(cpu_temperature_should_replace(result.cpu_c.has_value(),result.cpu_from_board,value->board)) {
-                result.cpu_c=value->celsius;
-                result.cpu_from_board=value->board;
-                const char* provider=value->source==1?"libre-hardware-monitor":
-                    value->source==2?"open-hardware-monitor":
-                    value->source==3?"acpi":"unknown-wmi";
-                result.cpu_source=std::string(provider)+(value->board?"-board":"-die");
-            }
+    if(result.cpu_c){
+        candidates[count++]={CpuTemperatureProvider::hwinfo,result.cpu_kind,
+            result.cpu_c,result.cpu_sampled_tick};
+    }
+    if(wmi){
+        candidates[count++]={wmi->source==1?CpuTemperatureProvider::libre_wmi:
+            wmi->source==2?CpuTemperatureProvider::open_wmi:CpuTemperatureProvider::acpi,
+            wmi->source==3?CpuTemperatureKind::acpi:
+                wmi->board?CpuTemperatureKind::board:CpuTemperatureKind::die,
+            wmi->celsius,wmi->sampled_tick};
+    }
+    const auto chosen=selector.select(candidates.data(),count,now);
+    result.cpu_c=chosen.celsius;
+    result.cpu_kind=chosen.kind;
+    result.cpu_sampled_tick=chosen.sampled_tick;
+    result.cpu_from_board=chosen.celsius &&
+        (chosen.kind==CpuTemperatureKind::board || chosen.kind==CpuTemperatureKind::acpi);
+    if(chosen.celsius){
+        switch(chosen.provider){
+        case CpuTemperatureProvider::intel_dts: result.cpu_source="intel-dts-pawnio";break;
+        case CpuTemperatureProvider::hwinfo: result.cpu_source=result.cpu_from_board?"hwinfo-board":"hwinfo-die";break;
+        case CpuTemperatureProvider::libre_wmi: result.cpu_source=result.cpu_from_board?"libre-hardware-monitor-board":"libre-hardware-monitor-die";break;
+        case CpuTemperatureProvider::open_wmi: result.cpu_source=result.cpu_from_board?"open-hardware-monitor-board":"open-hardware-monitor-die";break;
+        case CpuTemperatureProvider::acpi: result.cpu_source="acpi-board";break;
         }
-    }
-    // Emit a transition only, not a log line per sampling interval.
+    }else result.cpu_source="unavailable";
+    // Only transitions get logged; never flood activity.log on every sample.
     static std::mutex status_mutex;
-    static std::string last_source, last_reason;
+    static std::string last_source,last_reason;
     const std::string reason=result.cpu_c?"ready":
         std::string("no-valid-cpu-temperature; hwinfo=")+result.hwinfo_status+
-        "; wmi-provider-or-sensor-unavailable";
+        "; intel-dts-or-wmi-unavailable";
     {
         std::lock_guard guard(status_mutex);
-        if(last_source!=result.cpu_source || last_reason!=reason) {
-            last_source=result.cpu_source;
-            last_reason=reason;
+        if(last_source!=result.cpu_source || last_reason!=reason){
+            last_source=result.cpu_source;last_reason=reason;
             diagnostics::write(result.cpu_c?diagnostics::Level::info:diagnostics::Level::warning,
-                "temperature.cpu", "source="+result.cpu_source+" status="+reason);
+                "temperature.cpu","source="+result.cpu_source+" sensor="+
+                std::string(cpu_temperature_kind_name(result.cpu_kind))+" status="+reason);
         }
     }
     return result;
