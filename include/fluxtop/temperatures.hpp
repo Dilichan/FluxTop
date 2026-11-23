@@ -5,8 +5,10 @@
 #include <string_view>
 #include <cstdint>
 #include "fluxtop/temperature_selection.hpp"
+#include "fluxtop/intel_dts.hpp"
 namespace fluxtop {
 struct HardwareTemperatures {
+    IntelDtsSnapshot intel_cores; // Cached source data for v50, independent of selected CPU package provider.
     std::optional<double> cpu_c, gpu_c;
     bool cpu_from_board{}; // Explicit CPU socket/board zone, NOT processor die/package.
     std::string cpu_source{"unavailable"}; // Diagnostic provenance, not a process metric.

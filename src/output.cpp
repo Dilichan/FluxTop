@@ -131,6 +131,31 @@ void write_jsonl(std::ostream& out, const Snapshot& s, unsigned top) {
         ? s.cpu_temperature_source : "unavailable");
     out << ",\"cpu_temperature_board\":" << ((valid_cpu && s.cpu_temperature_board)
         ? "true" : "false");
+    // v50: additional fields, preserving legacy cpu_temperature_c/source fields.
+    const auto& cpu_cores=s.intel_core_temperatures;
+    out << ",\"cpu_core_max_c\":"; measured(out,cpu_cores.core_max_c);
+    out << ",\"cpu_core_average_c\":"; measured(out,cpu_cores.core_average_c);
+    out << ",\"cpu_physical_core_count\":" << cpu_cores.physical_cores
+        << ",\"cpu_logical_processor_count\":" << cpu_cores.logical_processors
+        << ",\"cpu_core_available_count\":" << cpu_cores.available_cores
+        << ",\"cpu_core_partial\":" << (cpu_cores.partial?"true":"false")
+        << ",\"cpu_core_sampled_tick\":" << cpu_cores.sampled_tick
+        << ",\"cpu_core_temperatures\":[";
+    for(std::size_t i=0;i<cpu_cores.cores.size();++i){
+        const auto& core=cpu_cores.cores[i];
+        if(i)out << ',';
+        out << "{\"core_id\":" << core.core_id
+            << ",\"processor_group\":" << core.group
+            << ",\"logical_processor\":" << core.logical
+            << ",\"logical_siblings\":" << core.logical_siblings
+            << ",\"type\":" << json_escape(core.performance?"P":"E")
+            << ",\"sensor_independence_unverified\":"
+            << (core.sensor_independent_unverified?"true":"false")
+            << ",\"temperature_c\":";
+        measured(out,core.celsius);
+        out << '}';
+    }
+    out << "]";
     out << "},\"disk_io_status\":" << json_escape(s.disk_io_status)
         << ",\"disk_measurement_quality\":" << json_escape(disk_quality(s.disk_io_status))
         << ",\"logical_disks\":[";

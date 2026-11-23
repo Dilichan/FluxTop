@@ -359,6 +359,7 @@ HardwareTemperatures read_hardware_temperatures() {
     static CpuTemperatureSelector selector;
     auto result=read_hwinfo_temperatures();
     const auto dts=read_intel_dts();
+    result.intel_cores=dts;
     const auto wmi=cpu_wmi.latest();
     const auto now=static_cast<std::uint64_t>(GetTickCount64());
     std::array<CpuTemperatureCandidate,3> candidates{};

@@ -28,6 +28,7 @@ Snapshot Sampler::collect() {
     if (fps_enabled_) fps_.collect(snapshot.processes, fps_targets_);
     const auto hwtemps = read_hardware_temperatures();
     snapshot.cpu_temperature_c = hwtemps.cpu_c;
+    snapshot.intel_core_temperatures = hwtemps.intel_cores;
     snapshot.cpu_temperature_board = hwtemps.cpu_from_board;
     snapshot.cpu_temperature_source = hwtemps.cpu_source;
     if (!snapshot.gpu_temperature_c) snapshot.gpu_temperature_c = hwtemps.gpu_c;

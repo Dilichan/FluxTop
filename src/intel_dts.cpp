@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -13,6 +14,26 @@
 #include <vector>
 
 namespace fluxtop {
+// A missing core is represented by nullopt. Never include it in aggregates.
+void intel_dts_finalize(IntelDtsSnapshot& sample) noexcept {
+    sample.physical_cores=static_cast<unsigned>(sample.cores.size());
+    sample.available_cores=0;
+    sample.core_max_c.reset();
+    sample.core_average_c.reset();
+    double sum=0.0;
+    for(const auto& core:sample.cores){
+        if(!core.celsius || !std::isfinite(*core.celsius) ||
+            *core.celsius < -10.0 || *core.celsius>125.0)continue;
+        ++sample.available_cores;
+        sum+=*core.celsius;
+        if(!sample.core_max_c || *sample.core_max_c<*core.celsius)
+            sample.core_max_c=*core.celsius;
+    }
+    if(sample.available_cores)
+        sample.core_average_c=sum/static_cast<double>(sample.available_cores);
+    sample.partial=sample.physical_cores==0 ||
+        sample.available_cores<sample.physical_cores || !sample.package_c;
+}
 std::optional<double> intel_dts_decode(std::uint64_t target,std::uint64_t status) noexcept {
     constexpr std::uint64_t valid=1ULL<<31;
     if(!(status&valid))return std::nullopt;
@@ -29,7 +50,7 @@ constexpr std::uint64_t temperature_target=0x1A2;
 constexpr std::uint64_t package_thermal_status=0x1B1;
 constexpr std::uint64_t thermal_status=0x19C;
 constexpr std::uint64_t max_age_ms=30000;
-struct LogicalCore { WORD group{}; KAFFINITY mask{}; unsigned logical{}; unsigned core{}; bool performance{}; };
+struct LogicalCore { WORD group{}; KAFFINITY mask{}; unsigned logical{}; unsigned core{}; unsigned siblings{}; bool performance{}; };
 struct WinHandle {
     HANDLE h{INVALID_HANDLE_VALUE};
     ~WinHandle(){if(h!=INVALID_HANDLE_VALUE)CloseHandle(h);}
@@ -88,11 +109,18 @@ std::vector<LogicalCore> cpu_topology(){
         const auto* item=reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(blob.data()+pos);
         if(item->Size<sizeof(ULONG)*2 || item->Size>bytes-pos)break;
         if(item->Relationship==RelationProcessorCore){
+            unsigned siblings=0;
+            for(WORD gi=0;gi<item->Processor.GroupCount;++gi) {
+                const KAFFINITY mask=item->Processor.GroupMask[gi].Mask;
+                for(unsigned bit=0;bit<sizeof(KAFFINITY)*8;++bit)
+                    if(mask&(static_cast<KAFFINITY>(1)<<bit))++siblings;
+            }
             for(WORD gi=0;gi<item->Processor.GroupCount;++gi){
                 const GROUP_AFFINITY ga=item->Processor.GroupMask[gi];
                 for(unsigned bit=0;bit<sizeof(KAFFINITY)*8;++bit){
                     KAFFINITY mask=static_cast<KAFFINITY>(1)<<bit;
-                    if(ga.Mask&mask)result.push_back({ga.Group,mask,bit,core_id,item->Processor.EfficiencyClass==0});
+                    if(ga.Mask&mask)result.push_back({ga.Group,mask,bit,core_id,
+                        siblings,item->Processor.EfficiencyClass==0});
                 }
             }
             ++core_id;
@@ -111,6 +139,7 @@ IntelDtsSnapshot poll(){
     sample.driver_ready=true;
     auto topology=cpu_topology();
     if(topology.empty())return sample;
+    sample.logical_processors=static_cast<unsigned>(topology.size());
     // Package reading uses one representative logical processor. Each physical
     // core reads its own register using the first logical processor in that core.
     GROUP_AFFINITY prior{};
@@ -122,7 +151,11 @@ IntelDtsSnapshot poll(){
         GROUP_AFFINITY target{};
         target.Group=logical.group;
         target.Mask=logical.mask;
-        if(!SetThreadGroupAffinity(GetCurrentThread(),&target,&prior))continue;
+        if(!SetThreadGroupAffinity(GetCurrentThread(),&target,&prior)){
+            sample.cores.push_back({logical.group,logical.logical,logical.core,
+                logical.performance,std::nullopt,logical.siblings,true});
+            continue;
+        }
         int cpuid[4]{};
         __cpuidex(cpuid,0x1A,0);
         const unsigned core_type=static_cast<unsigned>(cpuid[0])>>24;
@@ -136,10 +169,16 @@ IntelDtsSnapshot poll(){
                 sample.package_c=intel_dts_decode(tj,package_raw);
         }
         SetThreadGroupAffinity(GetCurrentThread(),&prior,nullptr);
-        sample.cores.push_back({logical.group,logical.logical,logical.core,performance,
-            target_ok && core_ok?intel_dts_decode(tj,core_raw):std::nullopt});
+        // Core type 0x20 means Atom/E-core, 0x40 Core/P-core; Windows
+        // EfficiencyClass is a fallback only on CPUs not exposing CPUID 0x1A.
+        const bool hybrid_known=core_type==0x20 || core_type==0x40;
+        sample.cores.push_back({logical.group,logical.logical,logical.core,
+            hybrid_known?performance:logical.performance,
+            target_ok && core_ok?intel_dts_decode(tj,core_raw):std::nullopt,
+            logical.siblings,core_type==0x20});
     }
     sample.sampled_tick=GetTickCount64();
+    intel_dts_finalize(sample);
     return sample;
 }
 class CachedIntelDts {
@@ -152,6 +191,7 @@ public:
         if(!result.sampled_tick || now<result.sampled_tick || now-result.sampled_tick>max_age_ms){
             result.package_c.reset();
             for(auto& core:result.cores)core.celsius.reset();
+            intel_dts_finalize(result);
         }
         return result;
     }

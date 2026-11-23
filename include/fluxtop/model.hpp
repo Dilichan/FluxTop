@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include "fluxtop/intel_dts.hpp"
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -121,6 +122,7 @@ struct Snapshot {
     std::optional<double> total_cpu_percent, total_gpu_percent;
     std::optional<std::uint64_t> total_ram_used, total_ram_capacity, total_gpu_memory, total_gpu_memory_capacity;
     std::optional<double> cpu_temperature_c, gpu_temperature_c;
+    IntelDtsSnapshot intel_core_temperatures; // Per-core cache for v50 UI/JSONL.
     bool cpu_temperature_board{}; // True if CPU value is an explicit motherboard/ACPI CPU zone.
     std::string cpu_temperature_source{"unavailable"}; // Provenance, never inferred from a numeric value.
     std::optional<double> total_rx_bytes_per_second, total_tx_bytes_per_second;
