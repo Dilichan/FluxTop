@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 namespace fluxtop {
 struct IntelCoreTemperature {
@@ -21,7 +22,13 @@ struct IntelDtsSnapshot {
     unsigned physical_cores{}, logical_processors{}, available_cores{};
     std::optional<double> core_max_c, core_average_c;
     bool partial{};
+    std::string status{"initializing"}; // driver/missing-module/ready/partial, not a temperature.
+
 };
+// Detect physical/logical topology without PawnIO, UAC or MSR access.
+IntelDtsSnapshot intel_dts_topology_snapshot();
+// Clear expired/failed readings while retaining Windows topology.
+void intel_dts_invalidate(IntelDtsSnapshot& sample) noexcept;
 // Pure aggregation, also used by deterministic regression tests.
 void intel_dts_finalize(IntelDtsSnapshot& sample) noexcept;
 // Pure MSR decoding; unknown values are not replaced with zero.

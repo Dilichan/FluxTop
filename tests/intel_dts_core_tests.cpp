@@ -32,5 +32,16 @@ int main(){
     check(sample.available_cores==2,"equal temperatures do not mean duplicate sensor");
     check(sample.cores[2].sensor_independent_unverified && !sample.cores[0].sensor_independent_unverified,
         "E-core independence qualification preserved");
+    auto topology=intel_dts_topology_snapshot();
+    check(topology.physical_cores>0 && topology.logical_processors>=topology.physical_cores,
+        "Windows topology exists without opening PawnIO");
+    check(topology.cores.size()==topology.physical_cores,
+        "one distinct entry per physical core without driver");
+    check(topology.available_cores==0 && !topology.package_c && topology.partial,
+        "topology snapshot does not fabricate temperatures");
+    intel_dts_invalidate(sample);
+    check(sample.physical_cores==3 && sample.logical_processors==5 &&
+        sample.available_cores==0 && sample.partial,
+        "failed driver preserves physical and logical topology");
     return failures?1:0;
 }

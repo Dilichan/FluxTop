@@ -139,6 +139,7 @@ void write_jsonl(std::ostream& out, const Snapshot& s, unsigned top) {
         << ",\"cpu_logical_processor_count\":" << cpu_cores.logical_processors
         << ",\"cpu_core_available_count\":" << cpu_cores.available_cores
         << ",\"cpu_core_partial\":" << (cpu_cores.partial?"true":"false")
+        << ",\"cpu_dts_status\":" << json_escape(cpu_cores.status)
         << ",\"cpu_core_sampled_tick\":" << cpu_cores.sampled_tick
         << ",\"cpu_core_temperatures\":[";
     for(std::size_t i=0;i<cpu_cores.cores.size();++i){

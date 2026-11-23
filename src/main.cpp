@@ -42,6 +42,17 @@ int wmain(int argc, wchar_t** argv) {
         const auto options = fluxtop::parse_options(args);
         if (options.help) { std::cout << fluxtop::usage(); return 0; }
         if (options.version) { std::cout << "FluxTop " << FLUXTOP_VERSION << '\n'; return 0; }
+        // FluxTop.v50.2.admin-required: one supported runtime privilege mode.
+        // The launcher requests UAC using runas; raw CLI callers must elevate
+        // their terminal. Do not relaunch the CLI, as stdout/JSONL would be lost.
+        const auto access=fluxtop::initialize_privileges();
+        if (!access.elevated.value_or(false)) {
+            fluxtop::diagnostics::write(fluxtop::diagnostics::Level::warning,
+                "process.elevation","monitor requires administrator token");
+            std::cerr << "FluxTop requires administrator privileges. "
+                "Run the installed launcher or start PowerShell as Administrator.\n";
+            return ERROR_ELEVATION_REQUIRED;
+        }
         fluxtop::diagnostics::write(fluxtop::diagnostics::Level::info,"process.options",
             "overlay="+std::to_string(options.overlay)+" interval_ms="+std::to_string(options.interval_ms));
         if (options.overlay) return fluxtop::run_overlay(options);
