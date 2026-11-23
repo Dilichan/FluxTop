@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 include(cmake/MsvcNinjaDependencies.cmake)
-project(FluxTop VERSION 0.2.6 LANGUAGES CXX RC)
+project(FluxTop VERSION 0.2.7 LANGUAGES CXX RC)
 fluxtop_configure_compiler_environment()
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 set(FLUXTOP_RELEASE_TAG "v${PROJECT_VERSION}" CACHE STRING "GitHub release tag embedded in the downloadable launcher")

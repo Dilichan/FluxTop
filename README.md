@@ -14,7 +14,7 @@
 <p align="center">
   <a href="https://github.com/Dilichan/FluxTop/releases/latest/download/FluxTop.exe"><strong>Скачать FluxTop.exe</strong></a>
   · <a href="https://github.com/Dilichan/FluxTop/releases">Все релизы</a>
-  · <a href="docs/RELEASE_NOTES.md">Что нового в v0.2.6</a>
+  · <a href="docs/RELEASE_NOTES.md">Что нового в v0.2.7</a>
   · <a href="https://github.com/Dilichan/FluxTop/issues">Сообщить об ошибке</a>
 </p>
 
