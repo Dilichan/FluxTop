@@ -7,6 +7,7 @@ struct CpuLogicalUsage {
     unsigned group{}, number{}, core_id{};
     bool performance{};
     std::optional<double> percent; // null if no baseline, counter missing or stale.
+    bool operator==(const CpuLogicalUsage&)const=default;
 };
 // Return null for invalid PDH data; never treat an unavailable measurement as zero.
 inline std::optional<double> cpu_logical_percent(double percent) noexcept {

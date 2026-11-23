@@ -1,6 +1,8 @@
 #pragma once
 #include "fluxtop/model.hpp"
 #include "fluxtop/statistics_history.hpp"
+#include "fluxtop/cpu_view.hpp"
+#include "fluxtop/system_graph_history.hpp"
 #include <windows.h>
 #include <commctrl.h>
 #include <array>
@@ -16,7 +18,7 @@ namespace fluxtop {
 class StatisticsPage {
 public:
     StatisticsPage(HWND parent, std::filesystem::path database,
-        std::wstring settings_path, unsigned limit);
+        std::wstring settings_path, unsigned limit,std::shared_ptr<SystemGraphHistory> graph_history);
     ~StatisticsPage();
     StatisticsPage(const StatisticsPage&)=delete;
     StatisticsPage& operator=(const StatisticsPage&)=delete;
@@ -24,9 +26,10 @@ public:
     void resize(int x,int y,int width,int height);
     void activate(bool active);
     void set_limit(unsigned limit);
+    void set_cpu_view(const CpuViewSettings& settings);
     void on_snapshot(std::int64_t timestamp_ms,const std::vector<Process>& grouped,unsigned interval_ms,const Snapshot& system);
 private:
-    struct SystemPoint;
+    using SystemPoint=SystemChartPoint;
     static LRESULT CALLBACK dispatch(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp);
     static LRESULT CALLBACK hover_dispatch(HWND window,UINT msg,WPARAM wp,LPARAM lp);
     static LRESULT CALLBACK table_dispatch(HWND window,UINT msg,WPARAM wp,LPARAM lp);
@@ -48,6 +51,7 @@ private:
     struct ChartStroke {
         std::vector<POINT> points;
         COLORREF color{};
+        bool dotted{};
     };
     struct ChartBar {
         RECT area{};
@@ -71,6 +75,10 @@ private:
     void fill_under(HDC dc,const std::vector<POINT>& points,LONG baseline,COLORREF color,BYTE opacity=31);
     void draw_system_details(HDC dc,unsigned metric);
     void select_disk(wchar_t letter);
+    void select_core(std::size_t index);
+    std::vector<CpuChartSeries> cpu_metric_series(unsigned metric,const CpuChartSample& sample)const;
+    void draw_core_pair(HDC dc,const RECT& area,std::size_t core,std::int64_t from,std::int64_t to,
+        bool autoscale,double zoom,POINT hover,const std::deque<SystemPoint>* frozen=nullptr,bool detached=false);
     void show_system_hover(unsigned metric,POINT cursor,const RECT& area,std::int64_t from,std::int64_t to,const std::deque<SystemPoint>* frozen=nullptr);
     void draw_system_hover(HDC dc,const RECT& bounds);
     bool advance_time_view(double elapsed_ms);
@@ -120,13 +128,6 @@ private:
     COLORREF chart_color(const StatisticsApplication& app) const;
     HPEN graph_pen(COLORREF color,bool dotted);
     std::int64_t custom_timestamp(HWND picker,bool until_end);
-    struct SystemPoint {
-        std::int64_t time{};
-        std::array<std::optional<double>,5> values{}; // CPU%, RAM%, network Mbps, GPU%, VRAM%
-        std::array<std::optional<double>,26> disks{}; // Same timeline, per-letter activity percent.
-        std::optional<double> cpu_temperature{}; // Real CPU package/board temperature, Celsius.
-        std::array<std::optional<double>,26> disk_temperatures{}; // Device temperature per mounted drive.
-    };
     struct PopupState {
         StatisticsPage* owner{};
         unsigned kind{};
@@ -151,20 +152,25 @@ private:
     PaintBuffer page_buffer_;
     PaintBuffer tooltip_buffer_; // Reusable native tooltip double buffer.
     PaintBuffer fill_color_buffer_; // Reused 1x1 bitmap for GDI alpha blending.
-    std::array<PopupState,32> popups_{}; // Six existing graphs + disks A: through Z:.
+    std::deque<PopupState> popups_{32}; // Append cores; deque keeps native callback pointers stable.
     // FluxTop.SystemDashboard.Stage1: bounded, sampler-fed system history.
-    std::deque<SystemPoint> system_points_;
+    std::shared_ptr<SystemGraphHistory> graph_history_;
+    const std::deque<SystemPoint>& system_points_;
+    CpuViewSettings cpu_view_;
     ULONGLONG hover_last_frame_{};
     POINT system_hover_{-1,-1};
     unsigned selected_section_{0}; // CPU, RAM, network, GPU, AutoScore, history, uptime
     wchar_t selected_disk_letter_{};
+    std::optional<std::size_t> selected_core_;
+    std::vector<IntelCoreTemperature> core_entries_;
+    std::vector<std::size_t> core_indices_;
     std::vector<wchar_t> disk_letters_;
     unsigned sidebar_scroll_{};
-    unsigned system_range_{0}; // 1, 5, 15 minutes
+    unsigned system_range_{0}; // 1, 5, 15, 30 minutes.
     bool system_autoscale_{true};
     // Independent axis easing for embedded and detached system charts (five metrics).
-    std::array<std::array<double,32>,2> smooth_system_axis_max_{};
-    std::array<std::array<ULONGLONG,32>,2> smooth_system_axis_tick_{};
+    std::array<std::vector<double>,2> smooth_system_axis_max_{{std::vector<double>(32),std::vector<double>(32)}};
+    std::array<std::vector<ULONGLONG>,2> smooth_system_axis_tick_{{std::vector<ULONGLONG>(32),std::vector<ULONGLONG>(32)}};
     HWND system_period_{},system_auto_{},system_popout_{},fill_toggle_{},pause_toggle_{};
     void toggle_section_pause();
     void refresh_pause_control();
@@ -186,7 +192,7 @@ private:
         double zoom{1.0};
         SystemInfo info{};
     };
-    std::array<FrozenView,32> frozen_views_{}; // Six existing graph views + 26 per-disk pauses.
+    std::deque<FrozenView> frozen_views_{32};
     bool system_tip_active_{};
     unsigned system_tip_metric_{};
     SystemPoint system_tip_sample_{};

@@ -110,6 +110,13 @@ std::vector<LogicalCore> cpu_topology(){
     if(!GetLogicalProcessorInformationEx(RelationProcessorCore,
         reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(blob.data()),&bytes))return {};
     std::vector<LogicalCore> result;
+    BYTE maximum_class=0;
+    for(DWORD pos=0;pos+sizeof(ULONG)*2<=bytes;) {
+        const auto* item=reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(blob.data()+pos);
+        if(item->Size<sizeof(ULONG)*2 || item->Size>bytes-pos)break;
+        if(item->Relationship==RelationProcessorCore)maximum_class=std::max(maximum_class,item->Processor.EfficiencyClass);
+        pos+=item->Size;
+    }
     unsigned core_id=0;
     for(DWORD pos=0;pos+sizeof(ULONG)*2<=bytes;){
         const auto* item=reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(blob.data()+pos);
@@ -126,7 +133,7 @@ std::vector<LogicalCore> cpu_topology(){
                 for(unsigned bit=0;bit<sizeof(KAFFINITY)*8;++bit){
                     KAFFINITY mask=static_cast<KAFFINITY>(1)<<bit;
                     if(ga.Mask&mask)result.push_back({ga.Group,mask,bit,core_id,
-                        siblings,item->Processor.EfficiencyClass==0});
+                        siblings,item->Processor.EfficiencyClass==maximum_class});
                 }
             }
             ++core_id;
@@ -138,6 +145,15 @@ std::vector<LogicalCore> cpu_topology(){
 } // namespace
 IntelDtsSnapshot intel_dts_topology_snapshot(){
     IntelDtsSnapshot sample;
+    int limits[4]{};__cpuid(limits,static_cast<int>(0x80000000U));
+    if(static_cast<unsigned>(limits[0])>=0x80000004U) {
+        char name[49]{};
+        for(unsigned leaf=0;leaf<3;++leaf){int part[4]{};__cpuid(part,static_cast<int>(0x80000002U+leaf));
+            std::memcpy(name+leaf*16,part,16);}
+        for(const char c:std::string_view(name))sample.cpu_name+=static_cast<wchar_t>(static_cast<unsigned char>(c));
+        const auto first=sample.cpu_name.find_first_not_of(L' ');
+        if(first!=sample.cpu_name.npos)sample.cpu_name.erase(0,first);
+    }
     const auto topology=cpu_topology();
     sample.logical_processors=static_cast<unsigned>(topology.size());
     for(const auto& logical:topology)

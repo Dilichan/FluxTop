@@ -2,6 +2,7 @@
 #include "fluxtop/application_display_name.hpp"
 #include "fluxtop/diagnostics.hpp"
 #include "fluxtop/overlay_layout.hpp"
+#include "fluxtop/cpu_view.hpp"
 
 #include "fluxtop/statistics_page.hpp"
 #include "fluxtop/app_icons.hpp"
@@ -10,6 +11,7 @@
 #include "fluxtop/windows.hpp"
 #include "fluxtop/metric_text.hpp"
 #include "fluxtop/overlay_ini.hpp"
+#include "fluxtop/control_wheel.hpp"
 #include "fluxtop/resource_ids.h"
 
 #include <windowsx.h>
@@ -26,6 +28,7 @@
 #include <iomanip>
 #include <sstream>
 #include <unordered_map>
+#include <tuple>
 
 namespace fluxtop {
 namespace {
@@ -37,7 +40,8 @@ constexpr UINT foreground_update_message = WM_APP + 13;
 constexpr int toggle_hotkey = 1, client_hotkey = 2;
 enum Control : UINT { open_client = 100, toggle_table, quit_app, top_label, top_control, sort_control, font_control,
     alpha_control, visible_control, move_control, icons_control, stats_control, startup_control,
-    alpha_label, interval_control, summary_control, header_colors_control, row_colors_control, animation_control, metric_control = 200, disk_checkbox_control = 300, disk_total_checkbox_control = 326, tab_control = 450, font_label = 500, interval_label = 501 };
+    alpha_label, interval_control, summary_control, header_colors_control, row_colors_control, animation_control, metric_control = 200, disk_checkbox_control = 300, disk_total_checkbox_control = 326, tab_control = 450, font_label = 500, interval_label = 501,
+    cpu_package_control=604,cpu_max_control,cpu_average_control,cpu_checkbox_control=700 };
 constexpr unsigned all_metrics = 31; // Five resource columns; FPS is in the application heading.
 constexpr unsigned default_metrics = 31;
 constexpr std::array<Sort, 8> sort_ui_values{Sort::automatic, Sort::cpu, Sort::ram, Sort::gpu,
@@ -109,6 +113,7 @@ struct Row {
     // Each visible numeric cell has its own utilization and burst color.
     std::array<std::optional<double>,4> loads{}; // CPU / RAM / GPU / GPU RAM
     std::array<bool,6> bursts{};                 // CPU / RAM / GPU / GPU RAM / Rx / Tx
+    std::vector<std::optional<double>> logical_cpu;
     bool operator==(const Row&) const = default;
 };
 
@@ -136,6 +141,8 @@ private:
     void refresh_disk_controls();
     std::vector<wchar_t> enabled_disk_letters() const;
     float disk_left(std::size_t ordinal) const;
+    void cpu_settings_changed();
+    void refresh_cpu_controls(bool force=false);
     void client_stats();
     HWND control(const wchar_t* kind, const wchar_t* label, DWORD style, UINT id, int x, int y, int width, int height);
     void set_visible(bool visible);
@@ -165,8 +172,8 @@ private:
     float text_size() const { return static_cast<float>(options_.font_size); }
     float row_height() const { return text_size() * 1.6f; }
     bool has_enabled_disks() const { return !enabled_disk_letters().empty(); }
-    bool summary_only() const { return summary_ || (!metrics_ && !has_enabled_disks() && !disk_total_enabled_); }
-    unsigned active_metrics() const { return metrics_ ? metrics_ : ((has_enabled_disks() || disk_total_enabled_)?0U:all_metrics); }
+    bool summary_only() const { return summary_ || (!metrics_ && !has_enabled_disks() && !disk_total_enabled_ && cpu_columns_.empty()); }
+    unsigned active_metrics() const { return metrics_ ? metrics_ : ((has_enabled_disks() || disk_total_enabled_ || !cpu_columns_.empty())?0U:all_metrics); }
     unsigned ranking_metrics() const {
         // Display switches only affect columns; AutoScore always uses every available metric.
         return auto_score_all_metrics;
@@ -174,9 +181,11 @@ private:
     float table_width() const {
         const auto base=calculate_overlay_columns(text_size(),active_metrics(),summary_only(),show_icons_).total_width;
         const auto n=enabled_disk_letters().size()+(disk_total_enabled_?1U:0U);
-        return base + (n ? text_size()*(overlay_layout.column_gap+
+        float width=base + (n ? text_size()*(overlay_layout.column_gap+
             static_cast<float>(n)*overlay_layout.disk_width+
             static_cast<float>(n-1)*overlay_layout.column_gap) : 0.0f);
+        for(const auto& column:cpu_columns_)width+=text_size()*(overlay_layout.column_gap+static_cast<float>(column.width));
+        return width;
     }
     float dip(int px) const { return static_cast<float>(px) * 96.0f / static_cast<float>(dpi_); }
     int pixels(float value) const { return static_cast<int>(value * static_cast<float>(dpi_) / 96.0f + .5f); }
@@ -188,6 +197,12 @@ private:
     HWND hwnd_{}, client_{}, tabs_{};
     unsigned client_page_{};
     std::unique_ptr<StatisticsPage> statistics_;
+    std::shared_ptr<SystemGraphHistory> graph_history_=std::make_shared<SystemGraphHistory>();
+    CpuViewSettings cpu_view_;
+    std::vector<CpuViewColumn> cpu_columns_;
+    HWND cpu_label_{};
+    std::vector<std::pair<HWND,std::size_t>> cpu_checks_;
+    std::vector<CpuViewId> cpu_topology_ids_;
     HICON icon_{}, large_icon_{};
     HWINEVENTHOOK foreground_hook_{};
     DWORD focused_pid_{}; // Auto-ranked pinned application.
@@ -289,6 +304,7 @@ Overlay::~Overlay() {
 void Overlay::load_settings() {
     settings_ = local_file(L"FLUXTOP_OVERLAY_SETTINGS", L"overlay.ini").wstring();
     if (settings_.empty()) return;
+    cpu_view_=load_cpu_view([this](const auto& key){return ini_overlay_read_text(settings_,key);});
     const auto read = [&](const wchar_t* key, int fallback) { return ini_overlay_read_int(settings_,key,fallback); };
     x_ = read(L"x", CW_USEDEFAULT); y_ = read(L"y", CW_USEDEFAULT);
     if (read(L"layout_version", 0) >= 2) opacity_ = static_cast<unsigned>(std::clamp(read(L"opacity", 100), 1, 100));
@@ -328,6 +344,7 @@ void Overlay::save_settings() noexcept {
         save(L"disk_columns",static_cast<int>(selected_disks_mask_));
         save(L"disk_total_column",disk_total_enabled_?1:0);
         save(L"interval_ms", static_cast<int>(options_.interval_ms));
+        save_cpu_view(cpu_view_,[this](const auto& key,const auto& text){ini_overlay_write_text(settings_,key,text);});
     } catch (...) {}
 }
 void Overlay::load_icons() {
@@ -361,6 +378,36 @@ float Overlay::disk_left(std::size_t ordinal) const {
     const auto base=calculate_overlay_columns(text_size(),active_metrics(),summary_only(),show_icons_).total_width;
     return base-overlay_layout.right_padding+text_size()*(overlay_layout.column_gap+
         static_cast<float>(ordinal)*(overlay_layout.disk_width+overlay_layout.column_gap));
+}
+void Overlay::cpu_settings_changed(){
+    if(snapshot_)cpu_columns_=cpu_view_columns(cpu_view_,snapshot_->intel_core_temperatures);
+    if(statistics_)statistics_->set_cpu_view(cpu_view_);
+    clear_row_images();update_view();save_settings();fit_table();InvalidateRect(hwnd_,nullptr,FALSE);
+}
+void Overlay::refresh_cpu_controls(bool force){
+    if(!cpu_label_ || !snapshot_)return;
+    const auto& topology=snapshot_->intel_core_temperatures;
+    std::vector<CpuViewId> detected;for(const auto& core:topology.cores)detected.push_back({core.group,core.core_id});
+    if(!force && detected==cpu_topology_ids_)return;
+    cpu_topology_ids_=std::move(detected);
+    for(const auto id:cpu_topology_ids_)if(cpu_view_.columns.size()<512 && std::none_of(cpu_view_.columns.begin(),cpu_view_.columns.end(),[&](const auto& c){return c.id==id;}))
+        cpu_view_.columns.push_back({id,false,14});
+    for(const auto& [window,index]:cpu_checks_){
+        (void)index;controls_.erase(std::remove_if(controls_.begin(),controls_.end(),[window](const auto& child){return child.window==window;}),controls_.end());
+        DestroyWindow(window);
+    }cpu_checks_.clear();
+    for(const auto& core:topology.cores){
+        const auto found=std::find_if(cpu_view_.columns.begin(),cpu_view_.columns.end(),[&](const auto& col){return col.id==CpuViewId{core.group,core.core_id};});
+        if(found==cpu_view_.columns.end())continue;
+        const auto ordinal=cpu_checks_.size();
+        const auto name=cpu_core_label(core,topology.cores);
+        const auto box=control(L"BUTTON",name.c_str(),BS_AUTOCHECKBOX|WS_TABSTOP,cpu_checkbox_control+static_cast<UINT>(ordinal),
+            22+static_cast<int>(ordinal%5)*104,520+static_cast<int>(ordinal/5)*32,100,26);
+        SendMessageW(box,BM_SETCHECK,found->visible?BST_CHECKED:BST_UNCHECKED,0);
+        cpu_checks_.emplace_back(box,static_cast<std::size_t>(found-cpu_view_.columns.begin()));
+        if(client_page_!=0)ShowWindow(box,SW_HIDE);
+    }
+    if(!initializing_client_)refresh_disk_controls();
 }
 void Overlay::refresh_disk_controls() {
     if(!client_ || !IsWindow(client_))return;
@@ -399,7 +446,9 @@ void Overlay::refresh_disk_controls() {
     }
     // The same responsive checkbox grid also determines the settings height.
     const int rows=static_cast<int>((available_disk_letters_.size()+1U+4U)/5U);
-    const int summary_y=486+rows*32;
+    const int cpu_y=486+rows*32;
+    const int cpu_aggregate_y=cpu_y+28+static_cast<int>((cpu_checks_.size()+4)/5)*32;
+    const int summary_y=cpu_aggregate_y+36;
     const int header_y=summary_y+33;
     const int animation_y=header_y+36;
     const int stats_y=animation_y+43;
@@ -413,6 +462,10 @@ void Overlay::refresh_disk_controls() {
             return;
         }
     };
+    position(cpu_label_,cpu_y);
+    for(std::size_t i=0;i<cpu_checks_.size();++i)position(cpu_checks_[i].first,cpu_y+28+static_cast<int>(i/5)*32);
+    position(GetDlgItem(client_,cpu_package_control),cpu_aggregate_y);position(GetDlgItem(client_,cpu_max_control),cpu_aggregate_y);
+    position(GetDlgItem(client_,cpu_average_control),cpu_aggregate_y);
     position(GetDlgItem(client_,summary_control),summary_y);
     position(GetDlgItem(client_,header_colors_control),header_y);
     position(GetDlgItem(client_,row_colors_control),header_y);
@@ -476,6 +529,7 @@ HWND Overlay::control(const wchar_t* kind, const wchar_t* label, DWORD style, UI
     const auto window = CreateWindowExW(0, kind, label, WS_CHILD | WS_VISIBLE | style, 0, 0, 1, 1,
         client_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr), nullptr);
     if (!window) throw windows_error("Client control");
+    protect_setting_from_wheel(window,kind);
     controls_.push_back({window, {x,y,x+width,y+height}}); return window;
 }
 void Overlay::show_client() {
@@ -579,14 +633,22 @@ void Overlay::init_client() {
     control(L"STATIC", L"", 0, stats_control, 22, 747, 536, 104);
     shortcuts_label_=control(L"STATIC", L"Ctrl+Alt+F9 — клиент   ·   Ctrl+Alt+F10 — оверлей", 0, 0, 22, 859, 540, 24);
     control(L"BUTTON", L"Завершить работу", WS_TABSTOP, quit_app, 373, 899, 185, 32);
-    statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,options_.top);
+    statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,options_.top,graph_history_);
+    statistics_->set_cpu_view(cpu_view_);
     statistics_->activate(false);
+    if(snapshot_)statistics_->on_snapshot(snapshot_->timestamp_ms,grouped_processes_,options_.interval_ms,*snapshot_);
+    cpu_label_=control(L"STATIC",L"Ядра CPU:",0,0,22,520,540,24);
+    for(const auto [id,label,enabled]:{std::tuple{cpu_package_control,L"CPU Package",cpu_view_.package},std::tuple{cpu_max_control,L"Core Max",cpu_view_.maximum},std::tuple{cpu_average_control,L"Core Average",cpu_view_.average}}){
+        const auto box=control(L"BUTTON",label,BS_AUTOCHECKBOX|WS_TABSTOP,id,22+static_cast<int>(id-cpu_package_control)*190,720,180,26);
+        SendMessageW(box,BM_SETCHECK,enabled?BST_CHECKED:BST_UNCHECKED,0);
+    }
+    refresh_cpu_controls();
     refresh_disk_controls();
     initializing_client_ = false; client_stats();
 }
 void Overlay::switch_page(unsigned page) {
     diagnostics::write(diagnostics::Level::info,"ui.page","tab="+std::to_string(page));
-    if(page==1 && client_page_!=1) {
+    if(page!=0 && client_page_==0) {
         // A quick tab switch can precede the delayed Settings trackbar commit.
         const auto pending_top=SendDlgItemMessageW(client_,top_control,TBM_GETPOS,0,0);
         if(pending_top>=1 && pending_top<=100 &&
@@ -596,7 +658,7 @@ void Overlay::switch_page(unsigned page) {
         }
         if(statistics_) statistics_->set_limit(options_.top);
     }
-    client_page_=page==1?1:0;
+    client_page_=page==1?1U:0U;
     for(const auto& child:controls_) ShowWindow(child.window,client_page_==0?SW_SHOW:SW_HIDE);
     // Statistics gets a readable workspace; Settings retains its compact dimensions.
     layout_client();
@@ -605,23 +667,33 @@ void Overlay::switch_page(unsigned page) {
 void Overlay::layout_client() {
     if (!client_) return;
     const auto px = [this](int value) { return MulDiv(value, static_cast<int>(client_dpi_), 96); };
-    const auto font = CreateFontW(-px(14), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-    for (const auto& child : controls_) {
-        SendMessageW(child.window, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-        MoveWindow(child.window, px(child.bounds.left), px(child.bounds.top+40), px(child.bounds.right-child.bounds.left), px(child.bounds.bottom-child.bounds.top), TRUE);
-    }
     const int page_width=client_page_==1?1420:680;
     int settings_height=840;
     for(const auto& child:controls_)if(GetDlgCtrlID(child.window)==static_cast<int>(quit_app))
         settings_height=std::max(settings_height,static_cast<int>(child.bounds.bottom)+68);
-    const int page_height=client_page_==1?920:settings_height;
+    MONITORINFO monitor{sizeof(monitor)};GetMonitorInfoW(MonitorFromWindow(client_,MONITOR_DEFAULTTONEAREST),&monitor);
+    const int available=std::max(400,MulDiv(monitor.rcWork.bottom-monitor.rcWork.top,96,static_cast<int>(client_dpi_))-80);
+    const int page_height=client_page_==1?std::min(1000,available):std::min(settings_height,available);
+    ShowScrollBar(client_,SB_BOTH,FALSE);
+    const double fit=client_page_==0?std::min(1.0,static_cast<double>(page_height-40)/static_cast<double>(settings_height-40)):1.0;
+    const auto fitted=[fit](int value){return static_cast<int>(std::lround(value*fit));};
+    const auto font = CreateFontW(-px(std::max(9,fitted(14))), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    for(const auto& child:controls_){
+        SendMessageW(child.window, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        MoveWindow(child.window,px(child.bounds.left),px(40+fitted(child.bounds.top)),px(child.bounds.right-child.bounds.left),px(fitted(child.bounds.bottom-child.bounds.top)),TRUE);
+        ShowWindow(child.window,client_page_==0?SW_SHOW:SW_HIDE);
+    }
     if(tabs_) MoveWindow(tabs_,0,0,px(page_width),px(page_height),TRUE);
     if(statistics_) statistics_->resize(px(12),px(40),px(page_width-24),px(page_height-52));
     if (client_font_) DeleteObject(client_font_); client_font_ = font;
     RECT rect{0,0,px(page_width),px(page_height)};
     AdjustWindowRectExForDpi(&rect, static_cast<DWORD>(GetWindowLongPtrW(client_, GWL_STYLE)), FALSE, 0, client_dpi_);
-    SetWindowPos(client_, nullptr, 0, 0, rect.right-rect.left, rect.bottom-rect.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    RECT current{};GetWindowRect(client_,&current);
+    const int height=rect.bottom-rect.top;
+    const int top=std::clamp(static_cast<int>(current.top),static_cast<int>(monitor.rcWork.top),
+        std::max(static_cast<int>(monitor.rcWork.top),static_cast<int>(monitor.rcWork.bottom)-height));
+    SetWindowPos(client_, nullptr, current.left, top, rect.right-rect.left, height, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 void Overlay::apply_client() {
     const auto old_font_size = options_.font_size;
@@ -730,6 +802,11 @@ void Overlay::receive() {
         pending_.reset(); pending_finished_ = false; posted_ = false;
     }
     if (received_snapshot && snapshot_) {
+        graph_history_->append(*snapshot_,GetTickCount64(),std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        const auto updated_cpu_columns=cpu_view_columns(cpu_view_,snapshot_->intel_core_temperatures);
+        if(updated_cpu_columns!=cpu_columns_){cpu_columns_=updated_cpu_columns;clear_row_images();if(hwnd_)fit_table();}
+        refresh_cpu_controls();
         std::vector<wchar_t> detected;
         detected.reserve(snapshot_->disks.size());
         for(const auto& disk:snapshot_->disks)detected.push_back(disk.letter);
@@ -835,7 +912,8 @@ void Overlay::update_view() {
             memory(p.working_set),percent(p.gpu_percent),memory(p.dedicated_gpu_bytes),
             network_rate(p.rx_bytes_per_second,p.tx_bytes_per_second),
             p.disk_read_bytes_per_second,p.disk_write_bytes_per_second,
-            p.disk_volume_bytes_per_second,loads,bursts});
+            p.disk_volume_bytes_per_second,loads,bursts,{}});
+        for(const auto& column:cpu_columns_)next.back().logical_cpu.push_back(cpu_application_core_load(p.cpu_execution,column.id,s.intel_core_temperatures));
     }
     // A single PresentMon target: the actual foreground window, regardless of table sorting.
     std::vector<std::uint32_t> fps_targets;
@@ -1243,6 +1321,9 @@ void Overlay::paint(bool animation_only) {
     const auto geometry=calculate_overlay_columns(text_size(),active_metrics(),summary_only(),show_icons_);
     const float height=row_height();
     const auto selected_disk_letters=enabled_disk_letters();
+    // Extend the disk-column strip once per frame, never allocate per CPU cell.
+    const auto cpu_geometry=cpu_column_layout(disk_left(selected_disk_letters.size()+(disk_total_enabled_?1U:0U)),
+        text_size(),overlay_layout.column_gap,cpu_columns_);
     const auto row_cells=[&](float y) {
         std::array<D2D1_RECT_F,6> cells{}; // Application + five resource metrics.
         for(std::size_t column=0;column<cells.size();++column)
@@ -1306,6 +1387,17 @@ void Overlay::paint(bool animation_only) {
             const std::wstring title=metric_text::disk_name(letters[i])+L" "+metric_text::disk_activity(reading);
             draw_text(title,area,number_font_.Get(),header_colors_,false,reading);
         }
+    }
+    const auto core_readings=snapshot_ && !cpu_columns_.empty()?cpu_chart_sample(*snapshot_):CpuChartSample{};
+    for(std::size_t i=0;i<cpu_columns_.size();++i){
+        const auto& column=cpu_columns_[i];std::optional<double> reading;
+        reading=cpu_chart_value({CpuSeriesKind::core_load,column.id,L"",false},core_readings,{});
+        const auto temperature=cpu_chart_value({CpuSeriesKind::core,column.id,L"",false},core_readings,{});
+        const float x=cpu_geometry[i].first;
+        const auto core=std::find_if(core_readings.cores.begin(),core_readings.cores.end(),[&](const auto& item){return column.id==CpuViewId{item.group,item.core_id};});
+        const auto name=core==core_readings.cores.end()?std::wstring(L"Core ")+std::to_wstring(column.id.number+1):cpu_core_label(*core,core_readings.cores);
+        draw_text(name+L" "+percent(reading)+L" "+metric_text::temperature(temperature),
+            D2D1::RectF(x,1,cpu_geometry[i].second,1+height),number_font_.Get(),header_colors_,false,reading);
     }
     } // Header values and layout stay untouched during animation-only frames.
     // The header never moves or gets covered by transitioning rows.
@@ -1397,6 +1489,12 @@ void Overlay::paint(bool animation_only) {
             const auto index=static_cast<unsigned>(selected_disk_letters[d]-L'A');
             draw_text(disk_text(row.disk_volumes[index]),D2D1::RectF(x,y,
                 x+overlay_layout.disk_width*text_size(),y+height),number_font_.Get());
+        }
+        for(std::size_t c=0;c<cpu_columns_.size();++c){
+            const auto reading=c<row.logical_cpu.size()?row.logical_cpu[c]:std::optional<double>{};
+            const float x=cpu_geometry[c].first;
+            draw_text(percent(reading),D2D1::RectF(x,y,cpu_geometry[c].second,y+height),
+                number_font_.Get(),row_colors_,false,reading);
         }
     }
     if(partial_body)target_->PopAxisAlignedClip();
@@ -1533,6 +1631,16 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         if (initializing_client_) return 0;
         diagnostics::write(diagnostics::Level::trace,"ui.command",
             "control_id="+std::to_string(LOWORD(wp))+" notification="+std::to_string(HIWORD(wp)));
+        if(LOWORD(wp)>=cpu_checkbox_control && LOWORD(wp)<cpu_checkbox_control+cpu_checks_.size() && HIWORD(wp)==BN_CLICKED){
+            const auto& [box,index]=cpu_checks_[LOWORD(wp)-cpu_checkbox_control];
+            cpu_view_.columns[index].visible=SendMessageW(box,BM_GETCHECK,0,0)==BST_CHECKED;
+            cpu_settings_changed();return 0;
+        }
+        if(LOWORD(wp)>=cpu_package_control && LOWORD(wp)<=cpu_average_control && HIWORD(wp)==BN_CLICKED){
+            cpu_view_.package=SendDlgItemMessageW(client_,cpu_package_control,BM_GETCHECK,0,0)==BST_CHECKED;
+            cpu_view_.maximum=SendDlgItemMessageW(client_,cpu_max_control,BM_GETCHECK,0,0)==BST_CHECKED;
+            cpu_view_.average=SendDlgItemMessageW(client_,cpu_average_control,BM_GETCHECK,0,0)==BST_CHECKED;cpu_settings_changed();return 0;
+        }
         if (LOWORD(wp)==sort_control && HIWORD(wp)==CBN_SELCHANGE) {
             apply_client(); return 0;
         }
@@ -1564,6 +1672,7 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         case quit_app: DestroyWindow(hwnd_); return 0;
         }
         break;
+    case WM_VSCROLL:case WM_MOUSEWHEEL:return 0;
     case WM_TIMER:
         if (wp==settings_timer) { KillTimer(window,settings_timer); apply_client(); return 0; }
         break;
@@ -1572,6 +1681,7 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         KillTimer(window,settings_timer); apply_client(); DestroyWindow(window); return 0;
     case WM_DESTROY:
         statistics_.reset(); tabs_=nullptr; client_=nullptr; controls_.clear();
+        cpu_label_=nullptr;cpu_checks_.clear();cpu_topology_ids_.clear();
         disk_checks_.fill(nullptr);disk_total_check_=nullptr;shortcuts_label_=nullptr;
         if (client_font_) { DeleteObject(client_font_); client_font_=nullptr; } activity(); return 0;
     }

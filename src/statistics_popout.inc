@@ -1,6 +1,7 @@
 // Reuse the StatisticsPage model and colour map: detached windows never collect data.
 // The original six popup indices are stable; disk A:..Z: use kinds 6..31.
 std::wstring popup_auto_scale_key(unsigned kind) {
+    if(kind>=32)return L"stats_popup_auto_core_"+std::to_wstring(kind-32);
     if(kind<popup_auto_scale_keys.size())return popup_auto_scale_keys[kind];
     return L"stats_popup_auto_disk_"+std::wstring(1,static_cast<wchar_t>(L'A'+kind-6));
 }
@@ -44,13 +45,13 @@ void StatisticsPage::open_popup(unsigned kind) {
     const std::array<const wchar_t*,6> titles{{L"FluxTop — последняя минута (AutoScore)",
         L"FluxTop — история (AutoScore)",L"FluxTop — ЦП",L"FluxTop — память",
         L"FluxTop — сеть",L"FluxTop — GPU"}};
-    const auto disk_title=kind>=6
+    const auto disk_title=kind>=32?L"FluxTop — "+cpu_core_label(core_entries_[kind-32],core_entries_):kind>=6
         ?L"FluxTop — Disk "+std::wstring(1,static_cast<wchar_t>(L'A'+kind-6))
         :std::wstring{};
     const wchar_t* title=kind<titles.size()?titles[kind]:disk_title.c_str();
     popup.window=CreateWindowExW(0,window_class,title,
         WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,
-        CW_USEDEFAULT,CW_USEDEFAULT,1050,590,nullptr,nullptr,GetModuleHandleW(nullptr),&popup);
+        CW_USEDEFAULT,CW_USEDEFAULT,1050,820,nullptr,nullptr,GetModuleHandleW(nullptr),&popup);
     if(!popup.window) throw windows_error("Create detached statistics graph");
     ShowWindow(popup.window,SW_SHOW);
     UpdateWindow(popup.window);
@@ -67,29 +68,31 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
     const auto old_font=SelectObject(dc,popup_font_?popup_font_:GetStockObject(DEFAULT_GUI_FONT));
     const std::array<const wchar_t*,6> names{{L"AutoScore · последняя минута",L"AutoScore · история",
         L"ЦП",L"Память",L"Сеть",L"GPU"}};
-    const auto disk_name=popup.kind>=6
+    const auto disk_name=popup.kind>=32?cpu_core_label(core_entries_[popup.kind-32],core_entries_):popup.kind>=6
         ?L"Disk "+std::wstring(1,static_cast<wchar_t>(L'A'+popup.kind-6))
         :std::wstring{};
     label(dc,popup.kind<names.size()?names[popup.kind]:disk_name.c_str(),22,55);
     // Controls are native Win32; navigation instructions are intentionally absent.
     std::int64_t from{},to{};popup_range(popup,from,to);
-    const RECT graph{68,114,client.right-30,client.bottom-60};
+    const RECT graph{116,114,client.right-30,client.bottom-60};
     const auto* frozen_system=popup.paused?&popup.frozen_system:nullptr;
     if(popup.kind>=2) {
-        if(popup.kind==5) {
-            const LONG middle=114+(client.bottom-174)/2;
-            const RECT gpu{68,114,client.right-30,middle-23};
-            const RECT vram{68,middle+26,client.right-30,client.bottom-60};
-            label(dc,L"Загрузка GPU",170,90,RGB(131,54,156));
-            label(dc,L"Использование VRAM",170,middle+4,RGB(194,89,178));
+        if(popup.kind>=32){
+            draw_core_pair(dc,graph,popup.kind-32,from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system,true);
+        } else if(popup.kind==5) {
+            const auto split=chart_pair_split(graph.top,graph.bottom);
+            const RECT gpu{116,114,client.right-30,split.first_bottom};
+            const RECT vram{116,split.second_top,client.right-30,client.bottom-60};
+            label(dc,L"Загрузка GPU",gpu.left,90,RGB(131,54,156));
+            label(dc,L"Использование VRAM",vram.left,vram.top-28,RGB(194,89,178));
             draw_system_graph(dc,gpu,3,from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system,true);
             draw_system_graph(dc,vram,4,from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system,true);
         } else if(popup.kind==2) {
-            const LONG middle=(graph.top+graph.bottom)/2;
-            const RECT cpu{68,114,client.right-30,middle-23};
-            const RECT temperature{68,middle+26,client.right-30,client.bottom-60};
-            label(dc,L"Загрузка CPU",170,90,RGB(14,132,177));
-            label(dc,L"Температура CPU",170,middle+4,RGB(211,93,59));
+            const auto split=chart_pair_split(graph.top,graph.bottom);
+            const RECT cpu{116,114,client.right-30,split.first_bottom};
+            const RECT temperature{116,split.second_top,client.right-30,client.bottom-60};
+            label(dc,L"Загрузка CPU",cpu.left,90,RGB(14,132,177));
+            label(dc,L"Температура CPU",temperature.left,temperature.top-28,RGB(211,93,59));
             draw_system_graph(dc,cpu,0,from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system,true);
             draw_system_graph(dc,temperature,31,from,to,popup.auto_scale,popup.zoom_y,popup.cursor,frozen_system,true);
         } else draw_system_graph(dc,graph,popup.kind>=6?popup.kind-1:popup.kind-2,
@@ -258,8 +261,8 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
             RECT r{};GetClientRect(window,&r);
             POINT cursor{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
             ScreenToClient(window,&cursor);
-            const double fraction=std::clamp((static_cast<double>(cursor.x)-68.0)
-                /static_cast<double>(std::max<LONG>(1,r.right-98)),0.0,1.0);
+            const double fraction=std::clamp((static_cast<double>(cursor.x)-116.0)
+                /static_cast<double>(std::max<LONG>(1,r.right-146)),0.0,1.0);
             std::int64_t before_from{},before_to{};
             page->popup_range(*popup,before_from,before_to);
             const double at=static_cast<double>(before_from)
@@ -298,16 +301,32 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
         popup->cursor=current;
         if(popup->kind>=2) {
             RECT bounds{};GetClientRect(window,&bounds);
-            const RECT chart{68,114,bounds.right-30,bounds.bottom-60};
+            const RECT chart{116,114,bounds.right-30,bounds.bottom-60};
             std::int64_t from{},to{};page->popup_range(*popup,from,to);
-            if(popup->kind==5) {
-                const LONG middle=114+(bounds.bottom-174)/2;
-                const RECT gpu{68,114,bounds.right-30,middle-23};
-                const RECT vram{68,middle+26,bounds.right-30,bounds.bottom-60};
+            if(popup->kind>=32){
+                const auto split=chart_pair_split(chart.top,chart.bottom);
+                const RECT load{chart.left,chart.top,chart.right,split.first_bottom};
+                const RECT temperature{chart.left,split.second_top,chart.right,chart.bottom};
+                const bool thermal=current.y>=temperature.top;
+                page->show_system_hover(32U+2U*(popup->kind-32)+(thermal?1U:0U),current,thermal?temperature:load,
+                    from,to,popup->paused?&popup->frozen_system:nullptr);
+            } else if(popup->kind==5) {
+                const auto split=chart_pair_split(chart.top,chart.bottom);
+                const RECT gpu{116,114,bounds.right-30,split.first_bottom};
+                const RECT vram{116,split.second_top,bounds.right-30,bounds.bottom-60};
                 if(current.y>=vram.top && current.y<=vram.bottom)
                     page->show_system_hover(4,current,vram,from,to,
                         popup->paused?&popup->frozen_system:nullptr);
                 else page->show_system_hover(3,current,gpu,from,to,
+                        popup->paused?&popup->frozen_system:nullptr);
+            } else if(popup->kind==2) {
+                const auto split=chart_pair_split(chart.top,chart.bottom);
+                const RECT cpu{116,114,bounds.right-30,split.first_bottom};
+                const RECT temperature{116,split.second_top,bounds.right-30,bounds.bottom-60};
+                if(current.y>=temperature.top && current.y<=temperature.bottom)
+                    page->show_system_hover(31,current,temperature,from,to,
+                        popup->paused?&popup->frozen_system:nullptr);
+                else page->show_system_hover(0,current,cpu,from,to,
                         popup->paused?&popup->frozen_system:nullptr);
             } else page->show_system_hover(popup->kind>=6?popup->kind-1:popup->kind-2,
                 current,chart,from,to,popup->paused?&popup->frozen_system:nullptr);
@@ -315,7 +334,7 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
         if(popup->dragging) {
             std::int64_t from{},to{};page->popup_range(*popup,from,to);
             RECT r{};GetClientRect(window,&r);
-            const auto width=std::max<LONG>(1,r.right-98);
+            const auto width=std::max<LONG>(1,r.right-146);
             popup->pan_ms-=static_cast<double>(current.x-popup->last.x)
                 *static_cast<double>(to-from)/static_cast<double>(width);
             const auto full=popup->kind>=2?
@@ -342,7 +361,8 @@ LRESULT CALLBACK StatisticsPage::popup_dispatch(HWND window,UINT msg,WPARAM wp,L
         return 0;
     case WM_GETMINMAXINFO: {
         auto* bounds=reinterpret_cast<MINMAXINFO*>(lp);
-        bounds->ptMinTrackSize={460,340};
+        const bool paired=popup->kind==2 || popup->kind==5 || popup->kind>=32;
+        bounds->ptMinTrackSize={paired?640:460,paired?640:340};
         return 0;
     }
     case WM_SIZE: {

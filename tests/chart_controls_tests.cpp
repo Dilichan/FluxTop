@@ -8,9 +8,16 @@ static void check(bool pass,const char* message) {
 }
 int main() {
     try {
+        for(const long height:{640L,820L,1080L}){
+            const auto split=chart_pair_split(114,height-100);
+            check(split.first_bottom>114 && split.second_top<height-100,
+                "Paired charts retain positive plot heights at supported window sizes");
+            check(split.first_bottom+24+18<split.second_top-28,
+                "Upper chart dates must clear the lower chart caption after resizing");
+        }
         check(chart_system_duration(0)==60000 && chart_system_duration(1)==300000 &&
-            chart_system_duration(2)==900000 && chart_system_duration(99)==900000,
-            "System graph presets must share their 1/5/15-minute timing");
+            chart_system_duration(2)==900000 && chart_system_duration(3)==1800000 && chart_system_duration(99)==1800000,
+            "System graph presets must share their 1/5/15/30-minute timing");
         const ChartTimeWindow frozen{100,200},live{300,400};
         const auto a=chart_window(true,frozen,live),b=chart_window(false,frozen,live);
         check(a.from==100 && a.to==200 && b.from==300 && b.to==400,
@@ -45,7 +52,7 @@ int main() {
         const auto nan=chart_popup_window(source,2.0,NAN);
         check(nan.from==zoomed.from && nan.to==zoomed.to,
             "Invalid pan input must not corrupt chart coordinates");
-        std::cout << "Independent chart zoom/pause/range contracts passed\n";
+        std::cout << "Independent chart zoom/pause/range and paired-label spacing contracts passed\n";
         return 0;
     } catch(const std::exception& e) {
         std::cerr << e.what() << '\n'; return 1;

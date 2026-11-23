@@ -89,7 +89,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "history_.uptime=std::move(item->second.uptime);","DTM_SETRANGE",
             "stats_limit_id","stats_history_top","stats_uptime_top",
             "PostMessageW(GetParent(hwnd_),WM_APP+215"});
-        need(overlay,{"statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,options_.top)",
+        need(overlay,{"statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,options_.top,graph_history_)",
             "statistics_->set_limit(options_.top)"});
     } else if(policy=="statistics_popout_policy") {
         const auto page=read(root/"src/statistics_page.cpp");
@@ -113,14 +113,17 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         absent(page,{"GetPrivateProfileIntW(","WritePrivateProfileStringW(","RegisterClassExW("});
         absent(overlay,{"GetPrivateProfileIntW(","WritePrivateProfileStringW(","RegisterClassExW("});
         absent(popup,{"GetPrivateProfileIntW(","WritePrivateProfileStringW(","RegisterClassExW("});
-        need(header,{"PopupState","target_auto_zoom_","std::array<PopupState,32> popups_",
-            "std::array<std::optional<double>,5> values", "fill_enabled_", "smooth_system_end_",
+        need(header,{"PopupState","target_auto_zoom_","std::deque<PopupState> popups_{32}",
+            "SystemChartPoint", "fill_enabled_", "smooth_system_end_",
             "frozen_views_", "toggle_section_pause()", "pause_toggle_"});
         need(page,{"FluxTop.SystemDashboard.VisualRefinement.v1", "draw_system_hover(dc,rect)",
-            "GdiAlphaBlend(dc,left,top,right-left,bottom-top", "point.values[4]", "advance_time_view(elapsed)",
+            "GdiAlphaBlend(dc,left,top,right-left,bottom-top", "advance_time_view(elapsed)",
             "LPtoDP(dc,polygon.data()", "ExtSelectClipRgn(dc,mask,RGN_AND)",
             "for(const auto& plot:plots)fill_under(", "for(const auto& plot:plots) {",
             "stats_chart_fill"});
+        need(read(root/"src/system_graph_history.cpp"),{"point.values[4]","points_.push_back(std::move(point))"});
+        need(overlay,{"graph_history_->append(*snapshot_", "options_.top,graph_history_)"});
+        need(header,{"const std::deque<SystemPoint>& system_points_"});
         need(page,{"void extend_recent_line(std::vector<POINT>& line,LONG right,",
             "void extend_fresh_left_edge(std::vector<POINT>& line,const RECT& area,",
             "if(is_live)extend_fresh_left_edge(line,area,from,to,animation_duration_ms_);",
@@ -140,7 +143,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "const bool sidebar_only=paint_font_ && ps.rcPaint.left>=0 &&",
             "draw_sidebar(buffer);"});
         absent(page,{"if(!live_page && !live_popup)return false;"});
-        need(header,{"std::array<std::array<double,32>,2> smooth_system_axis_max_",
+        need(header,{"std::array<std::vector<double>,2> smooth_system_axis_max_",
             "const std::deque<SystemPoint>* frozen=nullptr,bool detached=false"});
         // AutoScore, system graphs and sidebar mini-charts must share the same
         // renderer instead of introducing private per-view GDI painting loops.
@@ -148,8 +151,8 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         for(std::size_t at=0;(at=page.find("draw_chart_core(dc,style,plots",at))
             !=std::string::npos;at+=sizeof("draw_chart_core(dc,style,plots")-1)
             ++shared_calls;
-        if(shared_calls!=4U)
-            throw std::runtime_error("Expected exactly four shared chart renderer call sites");
+        if(shared_calls!=5U)
+            throw std::runtime_error("Expected five shared chart renderer call sites including physical core cards");
         need(popup,{"popup->fill_toggle", "popup_auto_id+1", "page->show_system_hover(popup->kind>=6?popup->kind-1:popup->kind-2",
             "frozen_system,true", "WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN",
             "if(popup->kind<2 || popup->dragging)InvalidateRect(window,nullptr,FALSE);"});
@@ -161,7 +164,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "plots.push_back({std::move(second_cpu_temperature_line),RGB(235,75,43)})",
             "extend_fresh_left_edge(second_cpu_temperature_line",
             "draw_chart_core(dc,style,plots,bars)"});
-        need(header,{"std::array<FrozenView,32> frozen_views_"});
+        need(header,{"std::deque<FrozenView> frozen_views_{32}"});
         need(page,{"const bool disk=selected_disk_letter_!=0;", "refresh_pause_control();",
             "held.paused?&held.samples:nullptr", "open_popup(selected_disk_letter_"});
         need(popup,{"popup_auto_scale_key(unsigned kind)", "popup.kind>=6?popup.kind-1:popup.kind-2",
@@ -172,7 +175,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "page->tooltip_buffer_.prepare(dc,bounds.right,bounds.bottom)",
             "if(content_changed || newly_shown)InvalidateRect(tooltip_,nullptr,FALSE);",
             "WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN"});
-        need(page,{"FluxTop.SystemDashboard.Stage1","system_points_.push_back(point)",
+        need(page,{"FluxTop.SystemDashboard.Stage1","graph_history_->append(system,GetTickCount64(),now_ms())",
             "stats_selected_section","case WM_LBUTTONUP:","system_popout_id"});
         need(popup,{"popup.kind>=2","draw_system_graph(dc,graph,popup.kind>=6?popup.kind-1:popup.kind-2",
             "popup_auto_scale_keys"});
@@ -189,11 +192,13 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "target_auto_zoom_[index]","axis_initialized_[index]","popup.axis_dirty=true",
             "const auto now=live_view_end();"});
         need(popup,{"WM_MOUSEWHEEL","WM_LBUTTONDOWN","WM_LBUTTONDBLCLK","draw_graph(",
-            "paint_popup(","1050,590,nullptr,nullptr,GetModuleHandleW(nullptr),&popup)",
+            "paint_popup(","1050,820,nullptr,nullptr,GetModuleHandleW(nullptr),&popup)",
             "popup.kind==0?live_view_end():window_to_"});
         need(overlay,{"grouped_processes_,options_.interval_ms",
             "if (wp==SIZE_MINIMIZED) return 0;"});
         absent(overlay,{"PostMessageW(window,WM_CLOSE,0,0)"});
+        need(page,{"draw_core_pair(dc,area,*selected_core_", "select_core(core_indices_[item->index]);"});
+        need(popup,{"draw_core_pair(dc,graph,popup.kind-32", "if(popup->kind>=32)"});
     } else if(policy=="statistics_tooltip_axis_policy") {
         const auto page=read(root/"src/statistics_page.cpp");
         const auto header=read(root/"include/fluxtop/statistics_page.hpp");
@@ -275,13 +280,16 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "true,true,displayed.loads[metric],alpha","options_.interval_ms*0.65",
             "frame_cost*2"});
     } else if(policy=="overlay_settings_animation_policy") {
+        absent(overlay,{"CpuSettingsPage","TabCtrl_InsertItem(tabs_,2"});
+        need(overlay,{"cpu_checkbox_control+static_cast<UINT>(ordinal)","BS_AUTOCHECKBOX|WS_TABSTOP,cpu_checkbox_control", "cpu_application_core_load(p.cpu_execution"});
+        absent(overlay,{"cpu_list_=control(WC_LISTVIEWW","cpu_up_control","cpu_width_control"});
         need(overlay,{"font_control, 290, 146, 268, 32","MAKELPARAM(5,42)",
             "font_control,TBM_GETPOS","interval_control, 290, 378, 268, 32",
             "MAKELPARAM(1,10)","interval_control,TBM_GETPOS","save(L\"font_size\"",
             "save(L\"interval_ms\"","const bool is_font=",
             "SetTimer(window,settings_timer,150,nullptr)","apply_client();",
-            "statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,options_.top)",
-            "if(page==1 && client_page_!=1) {",
+            "statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,options_.top,graph_history_)",
+            "if(page!=0 && client_page_==0) {",
             "const auto pending_top=SendDlgItemMessageW(client_,top_control,TBM_GETPOS,0,0);",
             "static_cast<unsigned>(pending_top)!=options_.top) {",
             "if(statistics_) statistics_->set_limit(options_.top);",
@@ -302,7 +310,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         need(overlay,{"for (const auto label : {L\"Авто\", L\"CPU\", L\"RAM\", L\"GPU\""});
         regex_need(overlay,"L\"Авто\\s*[—-]",false);
         need(overlay,{"disk_checkbox_control = 300","std::array<HWND,26> disk_checks_{};",
-            "disk_checkbox_control+ordinal","const int summary_y=486+rows*32;",
+            "disk_checkbox_control+ordinal","const int cpu_y=486+rows*32;","const int summary_y=cpu_aggregate_y+36;",
             "SendMessageW(disk_checks_[i],BM_GETCHECK,0,0)",
             "const int preferred_x=static_cast<int>(rect.right)-width;"});
         absent(overlay,{"LBS_MULTIPLESEL","LB_GETSEL","LB_SETSEL",

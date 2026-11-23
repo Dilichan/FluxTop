@@ -7,6 +7,7 @@
 #include "fluxtop/windows.hpp"
 #include "fluxtop/metric_text.hpp"
 #include "fluxtop/overlay_ini.hpp"
+#include "fluxtop/control_wheel.hpp"
 #include <commctrl.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -24,6 +25,15 @@
 #include <unordered_map>
 #include <numeric>
 
+namespace {
+bool cpu_temperature_metric(unsigned metric){return metric==31 || (metric>=32 && (metric-32)%2==1);}
+COLORREF cpu_series_color(std::size_t index,bool temperature){
+    constexpr std::array<COLORREF,8> colors{{RGB(14,132,177),RGB(218,94,0),RGB(0,138,88),RGB(169,50,157),
+        RGB(117,105,0),RGB(41,73,175),RGB(172,46,64),RGB(73,111,101)}};
+    return colors[(index+(temperature?1U:0U))%colors.size()];
+}
+}
+
 namespace fluxtop {
 namespace {
 constexpr wchar_t page_class[]=L"FluxTop.Statistics.Page";
@@ -33,13 +43,13 @@ constexpr UINT ready_message=WM_APP+201;
 constexpr UINT_PTR animate_message=2201;
 enum : int { period_id=1001,from_id,to_id,system_id,table_id,stats_limit_id,popout_live_id,popout_history_id,popout_table_id,history_limit_id,uptime_limit_id,uptime_period_id,uptime_from_id,uptime_to_id };
 // Logical page dimensions; chart labels and Win32 controls share the same grid.
-constexpr int page_width=1400, page_height=860;
+constexpr int page_width=1400, page_height=940;
 // One shared right-edge guard for live charts; historical charts remain unchanged.
 constexpr int live_tail_guard_px=18;
 constexpr int spark_tail_guard_px=8;
 constexpr int auto_live_id=1201, auto_history_id=1202, popup_auto_id=1203, system_period_id=1210, system_auto_id=1211, system_popout_id=1212;
-constexpr RECT one_minute{310,171,1364,665};
-constexpr RECT history_chart{310,171,1364,665};
+constexpr RECT one_minute{380,171,1364,665};
+constexpr RECT history_chart{380,171,1364,665};
 constexpr std::array<const wchar_t*,6> popup_auto_scale_keys{{
     L"stats_popup_auto_live",L"stats_popup_auto_history",L"stats_popup_auto_cpu",
     L"stats_popup_auto_ram",L"stats_popup_auto_network",L"stats_popup_auto_gpu"}};
@@ -176,6 +186,25 @@ double eased_axis(double current,double target,double elapsed_ms) {
 void label(HDC dc,const wchar_t* text,int x,int y,COLORREF color=RGB(58,56,52)) {
     SetTextColor(dc,color); SetBkMode(dc,TRANSPARENT); TextOutW(dc,x,y,text,static_cast<int>(wcslen(text)));
 }
+void chart_y_labels(HDC dc,const RECT& plot,std::wstring_view maximum){
+    RECT upper{plot.left-108,plot.top-3,plot.left-8,plot.top+20};
+    RECT lower{plot.left-108,plot.bottom-20,plot.left-8,plot.bottom+3};
+    SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(58,56,52));
+    constexpr UINT flags=DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX;
+    DrawTextW(dc,maximum.data(),static_cast<int>(maximum.size()),&upper,flags);
+    DrawTextW(dc,L"0",1,&lower,flags);
+}
+void sidebar_heading(HDC dc,std::wstring_view name,std::wstring_view reading,int y,
+    COLORREF reading_color,COLORREF name_color=RGB(32,44,52)) {
+    SIZE extent{};GetTextExtentPoint32W(dc,reading.data(),static_cast<int>(reading.size()),&extent);
+    const LONG reading_width=std::clamp(extent.cx,0L,174L);
+    RECT title{26,y+7,250-reading_width-8,y+30};
+    RECT value{250-reading_width,y+7,250,y+30};
+    SetBkMode(dc,TRANSPARENT);SetTextColor(dc,name_color);
+    DrawTextW(dc,name.data(),static_cast<int>(name.size()),&title,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+    SetTextColor(dc,reading_color);
+    DrawTextW(dc,reading.data(),static_cast<int>(reading.size()),&value,DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+}
 } // namespace
 StatisticsPage::PaintBuffer::~PaintBuffer() { clear(); }
 void StatisticsPage::PaintBuffer::clear() noexcept {
@@ -198,8 +227,9 @@ HDC StatisticsPage::PaintBuffer::prepare(HDC reference,LONG w,LONG h) {
     return dc;
 }
 StatisticsPage::StatisticsPage(HWND parent,std::filesystem::path database,
-    std::wstring settings_path,unsigned limit)
-    :database_(std::move(database)),settings_(std::move(settings_path)) {
+    std::wstring settings_path,unsigned limit,std::shared_ptr<SystemGraphHistory> graph_history)
+    :graph_history_(std::move(graph_history)),system_points_(graph_history_->points()),
+    database_(std::move(database)),settings_(std::move(settings_path)) {
     // The live graph uses the SAME limit as overlay rows, across tabs.
     limit_=std::clamp(limit,1U,100U);
     history_limit_=std::clamp(ini_overlay_read(settings_,L"stats_history_top",limit_),1U,100U);
@@ -210,7 +240,7 @@ StatisticsPage::StatisticsPage(HWND parent,std::filesystem::path database,
     selected_section_=std::clamp(ini_overlay_read(settings_,L"stats_selected_section",0),0U,6U);
     const UINT saved_disk=ini_overlay_read(settings_,L"stats_selected_disk",0);
     selected_disk_letter_=saved_disk>=L'A' && saved_disk<=L'Z'?static_cast<wchar_t>(saved_disk):0;
-    system_range_=std::clamp(ini_overlay_read(settings_,L"stats_system_range",0),0U,2U);
+    system_range_=std::clamp(ini_overlay_read(settings_,L"stats_system_range",0),0U,3U);
     system_autoscale_=ini_overlay_read(settings_,L"stats_system_auto",1)!=0;
     fill_enabled_=ini_overlay_read(settings_,L"stats_chart_fill",1)!=0;
     for(unsigned kind=0;kind<popups_.size();++kind) {
@@ -280,8 +310,10 @@ StatisticsPage::~StatisticsPage() {
 void StatisticsPage::make_controls() {
     const auto mod=GetModuleHandleW(nullptr);
     auto add=[&](const wchar_t* class_name,const wchar_t* title,DWORD style,int id)->HWND{
-        return CreateWindowExW(0,class_name,title,WS_CHILD|WS_VISIBLE|style,0,0,1,1,
+        const auto window=CreateWindowExW(0,class_name,title,WS_CHILD|WS_VISIBLE|style,0,0,1,1,
             hwnd_,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),mod,nullptr);
+        protect_setting_from_wheel(window,class_name);
+        return window;
     };
     period_=add(L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP|WS_VSCROLL,period_id);
     for(const auto* text:{L"За 24 часа",L"За 7 дней",L"Свой период"})
@@ -338,7 +370,7 @@ void StatisticsPage::make_controls() {
     SendMessageW(auto_history_,BM_SETCHECK,auto_scale_[1]?BST_CHECKED:BST_UNCHECKED,0);
     popout_table_=add(L"BUTTON",L"Открыть отдельно",WS_TABSTOP,popout_table_id);
     system_period_=add(L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP|WS_VSCROLL,system_period_id);
-    for(const auto* caption:{L"1 минута",L"5 минут",L"15 минут"})
+    for(const auto* caption:{L"1 минута",L"5 минут",L"15 минут",L"30 минут"})
         SendMessageW(system_period_,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(caption));
     SendMessageW(system_period_,CB_SETCURSEL,system_range_,0);
     system_auto_=add(L"BUTTON",L"Автомасштаб",BS_AUTOCHECKBOX|WS_TABSTOP,system_auto_id);
@@ -354,14 +386,15 @@ void StatisticsPage::resize(int x,int y,int width,int height) {
 }
 void StatisticsPage::layout() {
     if(!hwnd_ || !period_) return;
+    ShowScrollBar(hwnd_,SB_BOTH,FALSE);
     RECT r{};GetClientRect(hwnd_,&r);
     const auto sx=[&](int x){return MulDiv(x,std::max<LONG>(1,r.right),page_width);};
     const auto sy=[&](int y){return MulDiv(y,std::max<LONG>(1,r.bottom),page_height);};
     const auto put=[&](HWND control,int x,int y,int w,int h){
         MoveWindow(control,sx(x),sy(y),sx(w),sy(h),TRUE);
     };
-    const bool live=!selected_disk_letter_ && selected_section_==4,history=!selected_disk_letter_ && selected_section_==5,uptime=!selected_disk_letter_ && selected_section_==6;
-    const bool system=selected_disk_letter_ || selected_section_<4;
+    const bool live=!selected_core_ && !selected_disk_letter_ && selected_section_==4,history=!selected_core_ && !selected_disk_letter_ && selected_section_==5,uptime=!selected_core_ && !selected_disk_letter_ && selected_section_==6;
+    const bool system=selected_core_ || selected_disk_letter_ || selected_section_<4;
     // Old per-graph options are preserved above the selected chart, never in its popup only.
     put(limit_label_,292,66,260,28);
     put(limit_slider_,546,63,225,33);
@@ -425,11 +458,18 @@ void StatisticsPage::layout() {
     ListView_SetTextColor(table_,GetSysColor(COLOR_WINDOWTEXT));
 }
 void StatisticsPage::activate(bool active) {
+    if(active && !active_ && !system_points_.empty()) {
+        // Show the already collected timeline on the first paint, without
+        // waiting for another sampler tick or animating from an old cursor.
+        smooth_system_end_=static_cast<double>(std::max(now_ms(),system_points_.back().time));
+        smooth_live_end_=static_cast<double>(now_ms());
+        SetTimer(hwnd_,animate_message,33,nullptr);
+    }
     active_=active;ShowWindow(hwnd_,active?SW_SHOW:SW_HIDE);
     if(!active) page_buffer_.clear(); // Release offscreen memory in other settings tabs.
     if(!active && tooltip_) ShowWindow(tooltip_,SW_HIDE);
     if(!active && !has_popup()) KillTimer(hwnd_,animate_message);
-    if(active) request();
+    if(active) {request();InvalidateRect(hwnd_,nullptr,FALSE);}
 }
 void StatisticsPage::set_limit(unsigned limit) {
     diagnostics::write(diagnostics::Level::info,"ui.statistics_limit","limit="+std::to_string(limit));
@@ -703,12 +743,14 @@ bool StatisticsPage::has_popup() const {
     return std::any_of(popups_.begin(),popups_.end(),[](const auto& p){return p.window!=nullptr;});
 }
 unsigned StatisticsPage::selected_popup_kind() const {
+    if(selected_core_)return 32U+static_cast<unsigned>(*selected_core_);
     constexpr std::array<unsigned,6> mapping{{2,3,4,5,0,1}};
     return mapping[std::min<std::size_t>(selected_section_,5)];
 }
 void StatisticsPage::select_disk(wchar_t letter) {
     if(letter<L'A' || letter>L'Z' || selected_disk_letter_==letter)return;
     selected_disk_letter_=letter;
+    selected_core_.reset();
     ini_overlay_write(settings_,L"stats_selected_disk",static_cast<int>(letter));
     system_hover_={-1,-1};system_tip_active_=false;hover_section_=-1;
     if(tooltip_)ShowWindow(tooltip_,SW_HIDE);
@@ -716,7 +758,8 @@ void StatisticsPage::select_disk(wchar_t letter) {
     layout();InvalidateRect(hwnd_,nullptr,FALSE);
 }
 void StatisticsPage::select_section(unsigned index) {
-    if(index>=7 || (index==selected_section_ && !selected_disk_letter_))return;
+    if(index>=7 || (index==selected_section_ && !selected_disk_letter_ && !selected_core_))return;
+    selected_core_.reset();
     selected_disk_letter_=0;
     ini_overlay_write(settings_,L"stats_selected_disk",0);
     selected_section_=index;
@@ -730,21 +773,28 @@ void StatisticsPage::select_section(unsigned index) {
     if(index>=4)request();
     InvalidateRect(hwnd_,nullptr,FALSE);
 }
+void StatisticsPage::select_core(std::size_t index){
+    if(index>=core_entries_.size())return;
+    selected_core_=index;selected_disk_letter_=0;selected_section_=0;
+    system_hover_={-1,-1};system_tip_active_=false;hover_section_=-1;
+    if(tooltip_)ShowWindow(tooltip_,SW_HIDE);
+    refresh_pause_control();layout();InvalidateRect(hwnd_,nullptr,FALSE);
+}
+void StatisticsPage::set_cpu_view(const CpuViewSettings& settings){
+    cpu_view_=settings;
+    system_tip_active_=false;if(tooltip_)ShowWindow(tooltip_,SW_HIDE);
+    if(hwnd_)InvalidateRect(hwnd_,nullptr,FALSE);
+    for(auto& popup:popups_)if(popup.window)InvalidateRect(popup.window,nullptr,FALSE);
+}
 void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Process>& grouped,
     unsigned interval_ms,const Snapshot& system) {
-    if(!active_ && !has_popup() && !table_window_) return;
-    // A standalone uptime table only needs periodic database refreshes, not
-    // rebuilding and repainting the one-minute graph for every sample.
-    if(!active_ && !has_popup()) {
-        if(now_ms()-last_history_refresh_>30000) request();
-        return;
-    }
+    graph_history_->append(system,GetTickCount64(),now_ms()); // Duplicate delivery is ignored.
     std::vector<wchar_t> found_letters;
     found_letters.reserve(system.disks.size());
     for(const auto& disk:system.disks)found_letters.push_back(disk.letter);
     if(found_letters!=disk_letters_) {
         disk_letters_=std::move(found_letters);
-        const auto max_scroll=static_cast<unsigned>(disk_letters_.size());
+            const auto max_scroll=static_cast<unsigned>(disk_letters_.size()+core_indices_.size());
         sidebar_scroll_=std::min(sidebar_scroll_,max_scroll);
         if(selected_disk_letter_ && std::find(disk_letters_.begin(),disk_letters_.end(),selected_disk_letter_)==disk_letters_.end()) {
             selected_disk_letter_=0;
@@ -753,23 +803,19 @@ void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Pro
             layout();
         }
     }
-    SystemPoint point;point.time=timestamp_ms;
-    for(const auto& disk:system.disks)
-        if(disk.letter>=L'A' && disk.letter<=L'Z')
-            point.disks[disk.letter-L'A']=disk.active_percent;
-    point.cpu_temperature=system.cpu_temperature_c;
-    for(const auto& disk:system.disks)
-        if(disk.letter>=L'A' && disk.letter<=L'Z')
-            point.disk_temperatures[disk.letter-L'A']=disk.temperature_c;
-    point.values[0]=system.total_cpu_percent;
-    if(system.total_ram_used && system.total_ram_capacity && *system.total_ram_capacity)
-        point.values[1]=100.0*static_cast<double>(*system.total_ram_used)/static_cast<double>(*system.total_ram_capacity);
-    if(system.total_rx_bytes_per_second && system.total_tx_bytes_per_second)
-        point.values[2]=8.0*(*system.total_rx_bytes_per_second+*system.total_tx_bytes_per_second)/1000000.0;
-    point.values[3]=system.total_gpu_percent;
-    if(system.total_gpu_memory && system.total_gpu_memory_capacity && *system.total_gpu_memory_capacity)
-        point.values[4]=100.0*static_cast<double>(*system.total_gpu_memory)/
-            static_cast<double>(*system.total_gpu_memory_capacity);
+    core_indices_.clear();
+    for(const auto& core:system.intel_core_temperatures.cores){
+        auto found=std::find_if(core_entries_.begin(),core_entries_.end(),[&](const auto& entry){return entry.group==core.group && entry.core_id==core.core_id;});
+        if(found==core_entries_.end() && core_entries_.size()<512){core_entries_.push_back(core);found=std::prev(core_entries_.end());}
+        if(found!=core_entries_.end()){*found=core;core_indices_.push_back(static_cast<std::size_t>(found-core_entries_.begin()));}
+    }
+    const auto states=32+core_entries_.size();
+    sidebar_scroll_=std::min(sidebar_scroll_,static_cast<unsigned>(disk_letters_.size()+core_indices_.size()));
+    while(popups_.size()<states){popups_.emplace_back();popups_.back().owner=this;popups_.back().kind=static_cast<unsigned>(popups_.size()-1);}
+    frozen_views_.resize(states);
+    for(auto& axis:smooth_system_axis_max_)axis.resize(32+2*core_entries_.size());
+    for(auto& axis:smooth_system_axis_tick_)axis.resize(32+2*core_entries_.size());
+    if(selected_core_ && std::find(core_indices_.begin(),core_indices_.end(),*selected_core_)==core_indices_.end())selected_core_.reset();
     system_info_.ram_used=system.total_ram_used;
     system_info_.ram_capacity=system.total_ram_capacity;
     system_info_.gpu_memory=system.total_gpu_memory;
@@ -782,12 +828,14 @@ void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Pro
     system_info_.cpu_source=system.cpu_temperature_source;
     system_info_.logical_processors=system.logical_processors;
     system_info_.collection_ms=system.collection_ms;
-    system_points_.push_back(point);
     if(smooth_system_end_<=0.0)smooth_system_end_=static_cast<double>(timestamp_ms);
     if(smooth_live_end_<=0.0)smooth_live_end_=static_cast<double>(timestamp_ms);
-    while(!system_points_.empty() && system_points_.front().time<timestamp_ms-900000)
-        system_points_.pop_front();
-    while(system_points_.size()>900U)system_points_.pop_front();
+    if(!active_ && !has_popup() && !table_window_) return;
+    // Hidden pages retain the monitor-owned system timeline without doing UI/DB work.
+    if(!active_ && !has_popup()) {
+        if(now_ms()-last_history_refresh_>30000) request();
+        return;
+    }
     animation_started_=GetTickCount64();
     animation_duration_ms_=std::clamp(interval_ms,250U,10000U);
     last_live_timestamp_=timestamp_ms;
@@ -978,7 +1026,7 @@ void StatisticsPage::draw_chart_core(HDC dc,const ChartStyle& style,
     for(const auto& plot:plots) {
         const auto& line=plot.points;
         if(line.empty())continue;
-        const HPEN stroke=graph_pen(plot.color,false);
+        const HPEN stroke=graph_pen(plot.color,plot.dotted);
         const HGDIOBJ previous=stroke?SelectObject(dc,stroke):nullptr;
         if(line.size()>1)
             Polyline(dc,line.data(),static_cast<int>(line.size()));
@@ -1071,8 +1119,7 @@ void StatisticsPage::draw_graph(HDC dc,const RECT& area,const std::vector<Statis
     }
     label(dc,caption,area.left,area.top-28,RGB(64,63,61));
     const auto top_value=std::to_wstring(static_cast<int>(std::lround(100.0/vertical_zoom)));
-    label(dc,top_value.c_str(),area.left-33,area.top-3);
-    label(dc,L"0",area.left-15,area.bottom-13);
+    chart_y_labels(dc,area,top_value);
     if(apps.empty() || std::none_of(apps.begin(),apps.end(),[](const auto& a){return !a.points.empty();}))
         label(dc,is_live?L"Ожидание данных…":L"Нет данных за выбранный период",
             area.left+20,area.top+55,RGB(119,111,98));
@@ -1240,14 +1287,13 @@ void StatisticsPage::draw_sidebar(HDC dc) {
     const std::int64_t latest=system_view_end();
     for(unsigned section=0;section<names.size();++section) {
         const int y=18+(static_cast<int>(statistics_sidebar_section_row(
-            section,static_cast<unsigned>(disk_letters_.size())))-static_cast<int>(sidebar_scroll_))*114;
+            section,static_cast<unsigned>(disk_letters_.size()),static_cast<unsigned>(core_indices_.size())))-static_cast<int>(sidebar_scroll_))*114;
         if(y>=830 || y+105<=18)continue;
         const RECT item{14,y,266,y+105};
-        HBRUSH face=CreateSolidBrush(!selected_disk_letter_ && section==selected_section_?RGB(225,233,241):RGB(245,246,247));
+        HBRUSH face=CreateSolidBrush(!selected_core_ && !selected_disk_letter_ && section==selected_section_?RGB(225,233,241):RGB(245,246,247));
         FillRect(dc,&item,face);DeleteObject(face);
-        HBRUSH border=CreateSolidBrush(!selected_disk_letter_ && section==selected_section_?RGB(52,115,156):RGB(206,211,214));
+        HBRUSH border=CreateSolidBrush(!selected_core_ && !selected_disk_letter_ && section==selected_section_?RGB(52,115,156):RGB(206,211,214));
         FrameRect(dc,&item,border);DeleteObject(border);
-        label(dc,names[section],26,y+9,RGB(32,44,52));
         std::wstring reading=L"—";
         if(section<4 && !system_points_.empty()) {
             const auto& value=system_points_.back().values[section];
@@ -1255,9 +1301,7 @@ void StatisticsPage::draw_sidebar(HDC dc) {
         } else if(section==4)reading=L"1 мин";
         else if(section==5)reading=L"История";
         else if(section==6)reading=std::to_wstring(history_.uptime.size())+L" прил.";
-        RECT value_area{92,y+7,250,y+30};
-        SetTextColor(dc,colors[section]);SetBkMode(dc,TRANSPARENT);
-        DrawTextW(dc,reading.c_str(),-1,&value_area,DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
+        sidebar_heading(dc,names[section],reading,y,colors[section]);
         const RECT spark{26,y+38,249,y+94};
         std::vector<POINT> points,second_gpu_line,second_cpu_temperature_line;
         std::vector<ChartBar> bars;
@@ -1364,10 +1408,42 @@ void StatisticsPage::draw_sidebar(HDC dc) {
         style.right_edge_overscan=section<5?spark_tail_guard_px:0;
         draw_chart_core(dc,style,plots,bars);
     }
+    for(std::size_t ordinal=0;ordinal<core_indices_.size();++ordinal){
+        const auto index=core_indices_[ordinal];const auto& core=core_entries_[index];
+        const int y=18+(static_cast<int>(ordinal)+2-static_cast<int>(sidebar_scroll_))*114;
+        if(y>=830 || y+105<=18)continue;
+        const RECT item{14,y,266,y+105};const bool chosen=selected_core_==index;
+        const auto face=CreateSolidBrush(chosen?RGB(225,233,241):RGB(245,246,247));FillRect(dc,&item,face);DeleteObject(face);
+        const auto edge=CreateSolidBrush(chosen?RGB(52,115,156):RGB(206,211,214));FrameRect(dc,&item,edge);DeleteObject(edge);
+        const CpuViewId id{core.group,core.core_id};
+        const auto load=CpuChartSeries{CpuSeriesKind::core_load,id,L"",false};
+        const auto temperature=CpuChartSeries{CpuSeriesKind::core,id,L"",core.sensor_independent_unverified};
+        const auto usage=system_points_.empty()?std::optional<double>{}:cpu_chart_value(load,system_points_.back().cpu,{});
+        const auto celsius=system_points_.empty()?std::optional<double>{}:cpu_chart_value(temperature,system_points_.back().cpu,{});
+        const auto name=cpu_core_label(core,core_entries_);
+        const auto reading=stat_percent(usage)+L" · "+metric_text::temperature(celsius);
+        sidebar_heading(dc,name,reading,y,RGB(89,76,153),RGB(0,0,0));
+        const RECT spark{26,y+38,249,y+94};std::vector<ChartStroke> plots;
+        for(unsigned series=0;series<2;++series){
+            std::vector<POINT> line;const auto color=series?RGB(211,93,59):RGB(14,132,177);
+            const auto finish=[&]{if(!line.empty()){plots.push_back({std::move(line),color});line.clear();}};
+            for(const auto& sample:system_points_){
+                if(sample.time<latest-60000 || sample.time>latest)continue;
+                const auto value=cpu_chart_value(series?temperature:load,sample.cpu,{});
+                if(!value){finish();continue;}
+                const auto x=spark.left+static_cast<LONG>(static_cast<double>(sample.time-latest+60000)*(spark.right-spark.left)/60000.0);
+                line.push_back({x,spark.bottom-static_cast<LONG>(std::clamp(*value/(series?130.0:100.0),0.0,1.0)*(spark.bottom-spark.top))});
+            }finish();
+        }
+        ChartStyle style{};style.area=spark;style.from=latest-60000;style.to=latest;
+        style.paper=RGB(255,255,255);style.fill_opacity=26;style.point_markers=false;
+        style.right_edge_overscan=spark_tail_guard_px;
+        draw_chart_core(dc,style,plots);
+    }
     for(std::size_t i=0;i<disk_letters_.size();++i) {
         const wchar_t letter=disk_letters_[i];
         const unsigned index=static_cast<unsigned>(letter-L'A');
-        const int y=18+(static_cast<int>(statistics_sidebar_disk_row(static_cast<unsigned>(i)))
+        const int y=18+(static_cast<int>(statistics_sidebar_disk_row(static_cast<unsigned>(i),static_cast<unsigned>(core_indices_.size())))
             -static_cast<int>(sidebar_scroll_))*114;
         if(y>=830 || y+105<=18)continue;
         const RECT item{14,y,266,y+105};
@@ -1377,12 +1453,9 @@ void StatisticsPage::draw_sidebar(HDC dc) {
         HBRUSH border=CreateSolidBrush(chosen?RGB(52,115,156):RGB(206,211,214));
         FrameRect(dc,&item,border);DeleteObject(border);
         const std::wstring name=metric_text::disk_name(letter);
-        label(dc,name.c_str(),26,y+9,RGB(32,44,52));
         const auto latest_value=system_points_.empty()?std::optional<double>{}:system_points_.back().disks[index];
         const auto reading=metric_text::disk_activity(latest_value);
-        RECT box{92,y+7,250,y+30};
-        SetTextColor(dc,RGB(42,132,108));SetBkMode(dc,TRANSPARENT);
-        DrawTextW(dc,reading.c_str(),-1,&box,DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
+        sidebar_heading(dc,name,reading,y,RGB(42,132,108));
         const RECT spark{26,y+38,249,y+94};
         std::vector<POINT> points;
         std::optional<double> before;
@@ -1408,25 +1481,50 @@ void StatisticsPage::draw_sidebar(HDC dc) {
         draw_chart_core(dc,style,plots);
     }
 }
+std::vector<CpuChartSeries> StatisticsPage::cpu_metric_series(unsigned metric,const CpuChartSample& sample)const{
+    if(metric>=32){const auto index=(metric-32)/2;
+        if(index>=core_entries_.size())return {};
+        const auto& core=core_entries_[index];return cpu_core_chart_series(sample,{core.group,core.core_id},cpu_temperature_metric(metric));
+    }
+    return cpu_chart_series(cpu_view_,sample,cpu_temperature_metric(metric));
+}
+void StatisticsPage::draw_core_pair(HDC dc,const RECT& area,std::size_t core,std::int64_t from,std::int64_t to,
+    bool autoscale,double zoom,POINT hover,const std::deque<SystemPoint>* frozen,bool detached){
+    const auto split=chart_pair_split(area.top,area.bottom);
+    const RECT load{area.left,area.top,area.right,split.first_bottom};
+    const RECT temperature{area.left,split.second_top,area.right,area.bottom};
+    const auto name=cpu_core_label(core_entries_[core],core_entries_);
+    label(dc,(L"Загрузка "+name).c_str(),area.left,area.top-28,RGB(14,132,177));
+    label(dc,(L"Температура "+name).c_str(),area.left,temperature.top-28,RGB(211,93,59));
+    const auto metric=32U+2U*static_cast<unsigned>(core);
+    draw_system_graph(dc,load,metric,from,to,autoscale,zoom,hover,frozen,detached);
+    draw_system_graph(dc,temperature,metric+1,from,to,autoscale,zoom,hover,frozen,detached);
+}
 void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
     std::int64_t from,std::int64_t to,bool autoscale,double manual_zoom,POINT hover,
     const std::deque<SystemPoint>* frozen,bool detached) {
     const auto& samples=frozen?*frozen:system_points_;
     (void)hover; // The old on-graph readings have moved to the native hover bubble.
-    if(metric>=32)return;
+    if(metric>=smooth_system_axis_max_[0].size())return;
     constexpr std::array<COLORREF,5> ink{{RGB(14,132,177),RGB(67,105,181),RGB(184,55,114),
         RGB(131,54,156),RGB(194,89,178)}};
-    const unsigned count=1U;
-    double max_y=metric==2?1.0:100.0;
+    const bool cpu_metric=metric==0 || metric>=31;
+    const bool cpu_temperature=cpu_temperature_metric(metric);
+    const auto cpu_series=cpu_metric?cpu_metric_series(metric,samples.empty()?CpuChartSample{}:samples.back().cpu):std::vector<CpuChartSeries>{};
+    const unsigned count=cpu_metric?static_cast<unsigned>(cpu_series.size()):1U;
+    const auto reading=[&](const SystemPoint& sample,unsigned index){
+        return cpu_metric?cpu_chart_value(cpu_series[index],sample.cpu,sample.values[0]):
+            (metric<5?sample.values[metric]:sample.disks[metric-5]);
+    };
+    double max_y=metric==2?1.0:(cpu_temperature?130.0:100.0);
     if(autoscale) {
         max_y=metric==2?0.1:5.0;
         for(const auto& sample:samples)if(sample.time>=from && sample.time<=to)
             for(unsigned s=0;s<count;++s) {
-                const auto value=metric+s==31?sample.cpu_temperature:
-                    (metric+s<5?sample.values[metric+s]:sample.disks[metric+s-5]);
+                const auto value=reading(sample,s);
                 if(value)max_y=std::max(max_y,*value*(metric==2?1.2:1.12));
             }
-        if(metric!=2)max_y=std::min(100.0,std::ceil(max_y/5.0)*5.0);
+        if(metric!=2)max_y=std::min(cpu_temperature?130.0:100.0,std::ceil(max_y/5.0)*5.0);
     } else max_y/=std::clamp(manual_zoom,1.0,100.0);
     max_y=std::max(max_y,.001);
     if(autoscale && !frozen) {
@@ -1462,14 +1560,14 @@ void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
                 if(!samples.empty() && segment_end==samples.back().time)
                     extend_recent_line(line,area.right,segment_end,to,animation_duration_ms_);
             }
-            plots.push_back({std::move(line),index==31?RGB(211,93,59):(index<ink.size()?ink[index]:RGB(42,132,108))});
+            plots.push_back({std::move(line),cpu_metric?cpu_series_color(s,cpu_temperature):
+                (index<ink.size()?ink[index]:RGB(42,132,108)),cpu_metric && s%2==1});
             line.clear();
             previous_measurement.reset();
             segment_end=0;
         };
         for(const auto& sample:samples) {
-            const auto value=index==31?sample.cpu_temperature:
-                (index<5?sample.values[index]:sample.disks[index-5]);
+            const auto value=reading(sample,s);
             if(sample.time<from || sample.time>to || !value) {
                 finish_segment();continue;
             }
@@ -1490,11 +1588,28 @@ void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
     ChartStyle style{};
     style.area=area;style.from=from;style.to=to;
     style.horizontal_rows=5;style.time_divisions=10;
+    style.adaptive_fill=cpu_metric && count>1;
     style.right_edge_overscan=!frozen && to>=system_view_end()-1000?live_tail_guard_px:0;
     draw_chart_core(dc,style,plots);
-    const auto cap=stat_decimal(max_y)+(metric==2?L" Mbps":(metric==31?L" °C":L"%"));
-    label(dc,cap.c_str(),area.left,area.top-24,RGB(76,81,84));
-    label(dc,L"0",area.left,area.bottom+4,RGB(76,81,84));
+    if(cpu_metric) {
+        const int slots=std::max(1,static_cast<int>(area.right-area.left-16)/190);
+        for(std::size_t i=0;i<cpu_series.size();++i){
+            SetTextColor(dc,cpu_series_color(i,cpu_temperature));
+            const auto slot=static_cast<int>(i);RECT legend{area.left+8+(slot%slots)*190,area.top+5+(slot/slots)*20,
+                area.left+190+(slot%slots)*190,area.top+25+(slot/slots)*20};
+            const auto text=cpu_series[i].title+(cpu_series[i].unverified?L" *":L"");
+            DrawTextW(dc,text.c_str(),-1,&legend,DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+        }
+        if(cpu_series.empty())label(dc,L"Нет показаний",area.left+20,area.top+30,RGB(120,119,116));
+    } else if(metric==3 || metric==4) {
+        const auto color=ink[metric];
+        const auto marker=CreateSolidBrush(color);
+        const RECT swatch{area.left+8,area.top+9,area.left+20,area.top+21};
+        FillRect(dc,&swatch,marker);DeleteObject(marker);
+        label(dc,metric==3?L"GPU":L"VRAM",area.left+26,area.top+5);
+    }
+    const auto cap=stat_decimal(max_y)+(metric==2?L" Mbps":(cpu_temperature?L" °C":L"%"));
+    chart_y_labels(dc,area,cap);
     const auto a=local_label(from),b=local_label(to);
     label(dc,a.c_str(),area.left,area.bottom+24);
     SIZE extent{};GetTextExtentPoint32W(dc,b.c_str(),static_cast<int>(b.size()),&extent);
@@ -1504,7 +1619,7 @@ void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
 
 void StatisticsPage::draw_system_details(HDC dc,unsigned metric) {
     if(metric>=4)return;
-    const int top=731;
+    const int top=850;
     const auto& held=frozen_views_[metric];
     const auto& info=held.paused?held.info:system_info_;
     const auto& samples=held.paused?held.samples:system_points_;
@@ -1535,31 +1650,24 @@ void StatisticsPage::draw_system_details(HDC dc,unsigned metric) {
     label(dc,one.c_str(),310,top,RGB(45,52,60));
     label(dc,two.c_str(),310,top+29,RGB(65,72,80));
     label(dc,three.c_str(),310,top+58,RGB(65,72,80));
-    if(metric==3){
-        const HBRUSH gpu=CreateSolidBrush(RGB(131,54,156));
-        const RECT gpu_mark{1035,top,1047,top+12};FillRect(dc,&gpu_mark,gpu);DeleteObject(gpu);
-        const HBRUSH vram=CreateSolidBrush(RGB(194,89,178));
-        const RECT vram_mark{1035,top+25,1047,top+37};FillRect(dc,&vram_mark,vram);DeleteObject(vram);
-        label(dc,L"GPU",1052,top-4);label(dc,L"VRAM",1052,top+21);
-    }
 }
 
 void StatisticsPage::refresh_pause_control() {
-    if(!pause_toggle_ || (!selected_disk_letter_ && selected_section_>=6))return;
-    const unsigned index=selected_disk_letter_
+    if(!pause_toggle_ || (!selected_core_ && !selected_disk_letter_ && selected_section_>=6))return;
+    const unsigned index=selected_core_?32U+static_cast<unsigned>(*selected_core_):selected_disk_letter_
         ?6U+static_cast<unsigned>(selected_disk_letter_-L'A'):selected_section_;
     SetWindowTextW(pause_toggle_,frozen_views_[index].paused?L"Продолжить":L"Пауза");
 }
 void StatisticsPage::toggle_section_pause() {
     const bool disk=selected_disk_letter_!=0;
-    if(!disk && selected_section_>=6)return;
-    const unsigned index=disk?6U+static_cast<unsigned>(selected_disk_letter_-L'A'):selected_section_;
+    if(!selected_core_ && !disk && selected_section_>=6)return;
+    const unsigned index=selected_core_?32U+static_cast<unsigned>(*selected_core_):disk?6U+static_cast<unsigned>(selected_disk_letter_-L'A'):selected_section_;
     auto& state=frozen_views_[index];
     if(state.paused) {
         state=FrozenView{};
     } else {
         state.paused=true;
-        if(disk || selected_section_<4) {
+        if(selected_core_ || disk || selected_section_<4) {
             state.samples=system_points_; // Immutable copy: future sampler ticks cannot move this chart.
             state.info=system_info_;
             state.to=system_view_end();
@@ -1589,14 +1697,22 @@ void StatisticsPage::draw(HDC dc) {
     draw_sidebar(dc);
     const std::array<const wchar_t*,7> titles{{L"ЦП",L"ПАМЯТЬ",L"СЕТЬ",L"ГРАФИЧЕСКИЙ ПРОЦЕССОР",
         L"ПОСЛЕДНЯЯ МИНУТА · AutoScore",L"ИСТОРИЯ · AutoScore",L"НАБЛЮДАЕМЫЙ АПТАЙМ"}};
-    if(selected_disk_letter_) {
+    if(selected_core_) {
+        label(dc,cpu_core_label(core_entries_[*selected_core_],core_entries_).c_str(),292,18,RGB(40,47,55));
+    } else if(selected_disk_letter_) {
         const auto label_text=metric_text::disk_name(selected_disk_letter_)+L" · АКТИВНОСТЬ, %";
         label(dc,label_text.c_str(),292,18,RGB(40,47,55));
     } else label(dc,titles[selected_section_],292,18,RGB(40,47,55));
     // Only one graph is visible; the original range, auto-scale and popout controls
     // remain above the graph and keep their existing settings and handlers.
     const auto now=live_view_end();
-    if(selected_disk_letter_) {
+    if(selected_core_) {
+        const auto& held=frozen_views_[32+*selected_core_];
+        const auto right=held.paused?held.to:system_view_end();
+        const auto begin=held.paused?held.from:right-chart_system_duration(system_range_);
+        const RECT area{380,190,1364,770};
+        draw_core_pair(dc,area,*selected_core_,begin,right,system_autoscale_,1.0,system_hover_,held.paused?&held.samples:nullptr);
+    } else if(selected_disk_letter_) {
         const auto disk_index=static_cast<unsigned>(selected_disk_letter_-L'A');
         const auto& held=frozen_views_[6U+disk_index];
         const auto range=chart_system_duration(system_range_);
@@ -1619,17 +1735,17 @@ void StatisticsPage::draw(HDC dc) {
         const auto begin=chart_window(held.paused,{held.from,held.to},{right-range,right}).from;
         const auto* samples=held.paused?&held.samples:nullptr;
         if(selected_section_==0) {
-            const RECT cpu{310,190,1364,372};
-            const RECT temperature{310,458,1364,640};
-            label(dc,L"Загрузка CPU",438,162,RGB(14,132,177));
-            label(dc,L"Температура CPU",438,430,RGB(211,93,59));
+            const RECT cpu{380,190,1364,430};
+            const RECT temperature{380,530,1364,770};
+            label(dc,L"Загрузка CPU",cpu.left,162,RGB(14,132,177));
+            label(dc,L"Температура CPU",temperature.left,502,RGB(211,93,59));
             draw_system_graph(dc,cpu,0,begin,right,system_autoscale_,1.0,system_hover_,samples);
             draw_system_graph(dc,temperature,31,begin,right,system_autoscale_,1.0,system_hover_,samples);
         } else if(selected_section_==3) {
-            const RECT gpu{310,190,1364,372};
-            const RECT vram{310,458,1364,640};
-            label(dc,L"Загрузка GPU",438,162,RGB(131,54,156));
-            label(dc,L"Использование VRAM",438,430,RGB(194,89,178));
+            const RECT gpu{380,190,1364,430};
+            const RECT vram{380,530,1364,770};
+            label(dc,L"Загрузка GPU",gpu.left,162,RGB(131,54,156));
+            label(dc,L"Использование VRAM",vram.left,502,RGB(194,89,178));
             draw_system_graph(dc,gpu,3,begin,right,system_autoscale_,1.0,system_hover_,samples);
             draw_system_graph(dc,vram,4,begin,right,system_autoscale_,1.0,system_hover_,samples);
         } else draw_system_graph(dc,one_minute,selected_section_,begin,right,
@@ -1656,6 +1772,15 @@ void StatisticsPage::mouse(int x,int y) {
     if(physical.right<=0 || physical.bottom<=0) return;
     x=MulDiv(x,page_width,physical.right);y=MulDiv(y,page_height,physical.bottom);
     system_hover_={x,y};
+    if(selected_core_){
+        const auto& held=frozen_views_[32+*selected_core_];const auto right=held.paused?held.to:system_view_end();
+        const auto begin=held.paused?held.from:right-chart_system_duration(system_range_);
+        const auto split=chart_pair_split(190,770);
+        const RECT cpu{380,190,1364,split.first_bottom},temperature{380,split.second_top,1364,770};
+        const auto metric=32U+2U*static_cast<unsigned>(*selected_core_);
+        show_system_hover(y>=temperature.top?metric+1:metric,system_hover_,y>=temperature.top?temperature:cpu,
+            begin,right,held.paused?&held.samples:nullptr);return;
+    }
     if(selected_disk_letter_) {
         const auto disk_index=static_cast<unsigned>(selected_disk_letter_-L'A');
         const auto& held=frozen_views_[6U+disk_index];
@@ -1673,14 +1798,14 @@ void StatisticsPage::mouse(int x,int y) {
         const auto begin=chart_window(held.paused,{held.from,held.to},{right-range,right}).from;
         const auto* samples=held.paused?&held.samples:nullptr;
         if(selected_section_==0) {
-            const RECT cpu{310,190,1364,372};
-            const RECT temperature{310,458,1364,640};
+            const RECT cpu{380,190,1364,430};
+            const RECT temperature{380,530,1364,770};
             if(y>=temperature.top && y<=temperature.bottom)
                 show_system_hover(31,system_hover_,temperature,begin,right,samples);
             else show_system_hover(0,system_hover_,cpu,begin,right,samples);
         } else if(selected_section_==3) {
-            const RECT gpu{310,190,1364,372};
-            const RECT vram{310,458,1364,640};
+            const RECT gpu{380,190,1364,430};
+            const RECT vram{380,530,1364,770};
             if(y>=vram.top && y<=vram.bottom)
                 show_system_hover(4,system_hover_,vram,begin,right,samples);
             else show_system_hover(3,system_hover_,gpu,begin,right,samples);
@@ -1834,7 +1959,7 @@ bool StatisticsPage::position_tooltip(POINT screen,int offset_x,int offset_y) {
 }
 void StatisticsPage::show_system_hover(unsigned metric,POINT cursor,const RECT& area,
     std::int64_t from,std::int64_t to,const std::deque<SystemPoint>* frozen) {
-    if(metric>=32 || cursor.x<area.left || cursor.x>area.right || cursor.y<area.top ||
+    if(metric>=smooth_system_axis_max_[0].size() || cursor.x<area.left || cursor.x>area.right || cursor.y<area.top ||
         cursor.y>area.bottom || to<=from || !tooltip_) {
         system_tip_active_=false;
         if(tooltip_ && hover_section_<0)ShowWindow(tooltip_,SW_HIDE);
@@ -1848,21 +1973,52 @@ void StatisticsPage::show_system_hover(unsigned metric,POINT cursor,const RECT& 
         static_cast<double>(to-from)/std::max<LONG>(1,area.right-area.left));
     const SystemPoint* closest=nullptr;
     const auto& samples=frozen?*frozen:system_points_;
+    const bool cpu_metric=metric==0 || metric>=31;
+    const auto cpu_series=cpu_metric?cpu_metric_series(metric,samples.empty()?CpuChartSample{}:samples.back().cpu):std::vector<CpuChartSeries>{};
     for(const auto& sample:samples) {
-        const auto reading=metric==31?sample.cpu_temperature:
+        const auto reading=cpu_metric?(std::any_of(cpu_series.begin(),cpu_series.end(),[&](const auto& series){return cpu_chart_value(series,sample.cpu,sample.values[0]).has_value();})?std::optional<double>{1.0}:std::nullopt):
             (metric<5?sample.values[metric]:sample.disks[metric-5]);
         if(sample.time<from || sample.time>to || !reading)continue;
         if(!closest || std::abs(sample.time-time)<std::abs(closest->time-time))closest=&sample;
     }
     if(!closest){system_tip_active_=false;ShowWindow(tooltip_,SW_HIDE);return;}
     const bool content_changed=!system_tip_active_ || system_tip_metric_!=metric ||
-        system_tip_sample_.time!=closest->time || system_tip_sample_.values!=closest->values || system_tip_sample_.disks!=closest->disks || system_tip_sample_.cpu_temperature!=closest->cpu_temperature;
+        system_tip_sample_.time!=closest->time || system_tip_sample_.values!=closest->values || system_tip_sample_.disks!=closest->disks || system_tip_sample_.cpu_temperature!=closest->cpu_temperature || system_tip_sample_.cpu!=closest->cpu;
     system_tip_active_=true;system_tip_metric_=metric;system_tip_sample_=*closest;
     POINT screen{};GetCursorPos(&screen);
     const bool newly_shown=position_tooltip(screen,16,18);
     if(content_changed || newly_shown)InvalidateRect(tooltip_,nullptr,FALSE);
 }
 void StatisticsPage::draw_system_hover(HDC dc,const RECT& bounds){
+    if(system_tip_metric_==0 || system_tip_metric_>=31){
+        FillRect(dc,&bounds,GetSysColorBrush(COLOR_INFOBK));
+        FrameRect(dc,&bounds,GetSysColorBrush(COLOR_BTNSHADOW));SetBkMode(dc,TRANSPARENT);
+        const auto& sample=system_tip_sample_;const bool temperature=cpu_temperature_metric(system_tip_metric_);
+        const auto series=cpu_metric_series(system_tip_metric_,sample.cpu);
+        RECT title{bounds.left+16,bounds.top+9,bounds.right-16,bounds.top+34};
+        SetTextColor(dc,RGB(40,43,47));
+        const auto name=sample.cpu.name.empty()?std::wstring(L"CPU"):sample.cpu.name;
+        DrawTextW(dc,name.c_str(),-1,&title,DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+        const bool dts_time=system_tip_metric_>=32 || sample.cpu.package_from_dts ||
+            (!series.empty() && series.front().kind!=CpuSeriesKind::package);
+        const auto measured_at=temperature && dts_time && sample.cpu.temperature_time_ms?*sample.cpu.temperature_time_ms:sample.time;
+        const auto time=L"Замер: "+local_sample_label(measured_at);
+        RECT when{bounds.left+16,bounds.top+36,bounds.right-16,bounds.top+60};
+        DrawTextW(dc,time.c_str(),-1,&when,DT_SINGLELINE|DT_NOPREFIX);
+        for(std::size_t i=0;i<series.size();++i){
+            const auto measured=cpu_chart_value(series[i],sample.cpu,sample.values[0]);
+            const auto value=measured?stat_decimal(*measured)+(temperature?L" °C":L"%"):std::wstring(L"—");
+            const auto text=series[i].title+(series[i].unverified?L" *":L"")+L": "+value;
+            SetTextColor(dc,cpu_series_color(i,temperature));
+            RECT row{bounds.left+16,bounds.top+66+static_cast<LONG>(i)*26,bounds.right-12,bounds.top+92+static_cast<LONG>(i)*26};
+            DrawTextW(dc,text.c_str(),-1,&row,DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+        }
+        if(std::any_of(series.begin(),series.end(),[](const auto& row){return row.unverified;})){
+            SetTextColor(dc,RGB(75,71,64));RECT note{bounds.left+16,bounds.bottom-48,bounds.right-12,bounds.bottom-12};
+            DrawTextW(dc,L"* Независимость аппаратного DTS не подтверждена; датчик может быть общим.",-1,&note,DT_WORDBREAK|DT_NOPREFIX);
+        }
+        return;
+    }
     const std::array<COLORREF,5> colors{{RGB(14,132,177),RGB(67,105,181),RGB(184,55,114),RGB(131,54,156),RGB(194,89,178)}};
     const std::array<const wchar_t*,5> names{{L"ЦП",L"Память",L"Сеть",L"GPU",L"VRAM"}};
     const HBRUSH paper=CreateSolidBrush(RGB(250,248,239));FillRect(dc,&bounds,paper);DeleteObject(paper);
@@ -2007,9 +2163,10 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
                 const auto top=18+static_cast<int>(row-sidebar_scroll_)*114;
                 if(y<top+105) {
                     if(const auto item=statistics_sidebar_item_at(
-                        row,static_cast<unsigned>(disk_letters_.size()))) {
+                        row,static_cast<unsigned>(disk_letters_.size()),static_cast<unsigned>(core_indices_.size()))) {
                         if(item->kind==StatisticsSidebarKind::section)
                             select_section(item->index);
+                        else if(item->kind==StatisticsSidebarKind::core)select_core(core_indices_[item->index]);
                         else select_disk(disk_letters_[item->index]);
                     }
                 }
@@ -2023,7 +2180,7 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
         RECT viewport{};GetClientRect(hwnd_,&viewport);
         const int x=viewport.right?MulDiv(screen.x,page_width,viewport.right):screen.x;
         if(x>=14 && x<=266) {
-            const unsigned limit=static_cast<unsigned>(disk_letters_.size());
+            const unsigned limit=static_cast<unsigned>(disk_letters_.size()+core_indices_.size());
             const int direction=GET_WHEEL_DELTA_WPARAM(wp)<0?1:-1;
             sidebar_scroll_=static_cast<unsigned>(std::clamp(
                 static_cast<int>(sidebar_scroll_)+direction,0,static_cast<int>(limit)));
@@ -2046,7 +2203,7 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
             axis_tick_=tick;
             const bool axis_animating=advance_axes(elapsed);
             const bool viewport_animating=advance_time_view(elapsed);
-            const bool live_page=selected_disk_letter_
+            const bool live_page=selected_core_?!frozen_views_[32+*selected_core_].paused:selected_disk_letter_
                 ?!frozen_views_[6U+static_cast<unsigned>(selected_disk_letter_-L'A')].paused
                 :(selected_section_<5 && !frozen_views_[selected_section_].paused);
             if(active_ && (axis_animating ||
@@ -2132,7 +2289,7 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
         if(HIWORD(wp)==BN_CLICKED && LOWORD(wp)==popout_table_id) {open_table();return 0;}
         if(LOWORD(wp)==system_period_id && HIWORD(wp)==CBN_SELCHANGE) {
             system_range_=static_cast<unsigned>(std::clamp<int>(
-                static_cast<int>(SendMessageW(system_period_,CB_GETCURSEL,0,0)),0,2));
+                static_cast<int>(SendMessageW(system_period_,CB_GETCURSEL,0,0)),0,3));
             ini_overlay_write(settings_,L"stats_system_range",static_cast<int>(system_range_));
             InvalidateRect(hwnd_,nullptr,FALSE);return 0;
         }

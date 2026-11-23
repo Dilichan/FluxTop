@@ -8,10 +8,16 @@
 
 namespace fluxtop {
 struct ChartTimeWindow { std::int64_t from{}, to{}; };
+struct ChartPairSplit { long first_bottom{},second_top{}; };
+constexpr ChartPairSplit chart_pair_split(long top,long bottom) noexcept {
+    const long middle=top+(bottom-top)/2;
+    const long gap=std::min(100L,std::max(0L,bottom-top)/3);
+    return {middle-gap/2,middle+(gap-gap/2)};
+}
 
 inline std::int64_t chart_system_duration(unsigned range) noexcept {
-    constexpr std::array<std::int64_t,3> durations{60000,300000,900000};
-    return durations[std::min<unsigned>(range,2U)];
+    constexpr std::array<std::int64_t,4> durations{60000,300000,900000,1800000};
+    return durations[std::min<unsigned>(range,3U)];
 }
 inline ChartTimeWindow chart_window(bool paused,ChartTimeWindow frozen,
     ChartTimeWindow live) noexcept {
