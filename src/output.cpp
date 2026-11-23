@@ -44,6 +44,22 @@ void measured(std::ostream& out, std::optional<double> value) {
     if (value && std::isfinite(*value) && *value >= 0.0) out << *value;
     else out << "null";
 }
+void cpu_execution(std::ostream& out,const CpuProcessExecution& execution) {
+    out<<"{\"status\":"<<json_escape(execution.status)
+        <<",\"begin_qpc\":\""<<execution.begin_qpc<<"\",\"end_qpc\":\""<<execution.end_qpc
+        <<"\",\"qpc_frequency\":"<<execution.frequency<<",\"logical_processors\":[";
+    for(std::size_t i=0;i<execution.logical.size();++i) {
+        if(i)out<<',';
+        const auto& cpu=execution.logical[i];
+        out<<"{\"group\":"<<cpu.group<<",\"number\":"<<cpu.number
+            <<",\"observed_runtime_ns\":";
+        if(execution.status=="ready" || execution.status=="partial")out<<cpu.runtime_ns;else out<<"null";
+        out<<",\"percent\":";
+        measured(out,cpu.percent);out<<",\"observed_percent\":";
+        measured(out,(execution.status=="ready" || execution.status=="partial")?std::optional<double>(cpu.observed_percent):std::nullopt);out<<'}';
+    }
+    out<<"]}";
+}
 // The physical ETW collector distinguishes ready, partial and unavailable;
 // do not treat an incomplete / denied trace as a measured zero.
 const char* disk_quality(std::string_view status) noexcept {
@@ -171,7 +187,11 @@ void write_jsonl(std::ostream& out, const Snapshot& s, unsigned top) {
         out << '}';
     }
     out << "]";
-    out << "},\"disk_io_status\":" << json_escape(s.disk_io_status)
+    out << "},\"cpu_execution\":{\"status\":"<<json_escape(s.cpu_execution_status)
+        <<",\"begin_qpc\":\""<<s.cpu_execution_begin_qpc<<"\",\"end_qpc\":\""<<s.cpu_execution_end_qpc
+        <<"\",\"qpc_frequency\":"<<s.cpu_execution_frequency<<",\"unknown_ticks\":"<<s.cpu_execution_unknown_ticks
+        <<",\"delivery_lag_ms\":"<<s.cpu_execution_lag_ms<<'}';
+    out << ",\"disk_io_status\":" << json_escape(s.disk_io_status)
         << ",\"disk_measurement_quality\":" << json_escape(disk_quality(s.disk_io_status))
         << ",\"logical_disks\":[";
     bool first_disk = true;
@@ -196,6 +216,7 @@ void write_jsonl(std::ostream& out, const Snapshot& s, unsigned top) {
             << ",\"creation_time_100ns\":";
         if (p.creation_time) out << '"' << *p.creation_time << '"'; else out << "null";
         out << ",\"cpu_percent\":"; nullable(out,p.cpu_percent);
+        out << ",\"cpu_execution\":";cpu_execution(out,p.cpu_execution);
         out << ",\"working_set_bytes\":"; nullable(out,p.working_set);
         out << ",\"private_bytes\":"; nullable(out,p.private_bytes);
         out << ",\"gpu_percent\":"; nullable(out,p.gpu_percent);

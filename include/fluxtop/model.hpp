@@ -3,6 +3,7 @@
 #include <array>
 #include "fluxtop/intel_dts.hpp"
 #include "fluxtop/cpu_logical.hpp"
+#include "fluxtop/cpu_execution.hpp"
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -32,6 +33,7 @@ struct AutoRank {
 };
 
 struct Process : RawProcess {
+    CpuProcessExecution cpu_execution; // v52: scheduler time; independent from cpu_percent/AutoScore.
     std::optional<double> cpu_percent;
     std::optional<double> gpu_percent;
     std::optional<double> presented_fps; // Optional per-PID frame presentation rate; not a resource sum.
@@ -126,6 +128,9 @@ struct Snapshot {
     IntelDtsSnapshot intel_core_temperatures; // Per-core cache for v50 UI/JSONL.
     std::vector<CpuLogicalUsage> cpu_logical_usage; // v51: per-logical load, null until baseline.
     std::string cpu_logical_status{"initializing"};
+    std::string cpu_execution_status{"initializing"};
+    std::uint64_t cpu_execution_begin_qpc{},cpu_execution_end_qpc{},cpu_execution_frequency{},cpu_execution_unknown_ticks{};
+    double cpu_execution_lag_ms{};
     bool cpu_temperature_board{}; // True if CPU value is an explicit motherboard/ACPI CPU zone.
     std::string cpu_temperature_source{"unavailable"}; // Provenance, never inferred from a numeric value.
     std::optional<double> total_rx_bytes_per_second, total_tx_bytes_per_second;

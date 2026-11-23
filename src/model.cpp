@@ -295,6 +295,7 @@ std::vector<Process> aggregate_application_processes(const std::vector<Process>&
         auto& combined=result[group_index];
         const auto& part=rows[i];
         combined.member_pids.push_back(part.pid);
+        merge_cpu_execution(combined.cpu_execution,part.cpu_execution,combined.member_pids.size()==1);
         add_positive(combined.cpu_percent,part.cpu_percent);
         add_bytes(combined.working_set,part.working_set);
         add_bytes(combined.private_bytes,part.private_bytes);

@@ -1,5 +1,6 @@
 #include "fluxtop/disk_io_collector.hpp"
 #include "fluxtop/disk_attribution.hpp"
+#include "fluxtop/cpu_etw_collector.hpp"
 #include "fluxtop/diagnostics.hpp"
 #include "fluxtop/windows.hpp"
 #include <windows.h>
@@ -62,11 +63,15 @@ void reclaim_old_sessions() {
         bool orphan=!owner.valid() && GetLastError()==ERROR_INVALID_PARAMETER;
         if(owner.valid()) {
             FILETIME created{},exited{},kernel{},user{};
-            if(GetProcessTimes(owner.get(),&created,&exited,&kernel,&user))
+            DWORD exit_code{};
+            if(GetExitCodeProcess(owner.get(),&exit_code) && exit_code!=STILL_ACTIVE)orphan=true;
+            else if(GetProcessTimes(owner.get(),&created,&exited,&kernel,&user))
                 orphan=filetime_ticks(created)!=birth;
         }
         if(orphan) {
-            auto props=info[i].info;
+            // Keep the trailing name storage: Wnode.BufferSize describes the
+            // full Properties object, not a short stack copy of its header.
+            auto& props=info[i].info;
             props.Wnode.Flags=WNODE_FLAG_TRACED_GUID;
             props.LogFileNameOffset=0;
             ControlTraceW(0,name,&props,EVENT_TRACE_CONTROL_STOP);
@@ -111,6 +116,7 @@ struct DiskIoCollector::Impl {
         std::uint64_t first_event{}; };
     TRACEHANDLE session{},consumer=INVALID_PROCESSTRACE_HANDLE;
     std::thread thread;
+    std::unique_ptr<CpuEtwCollector> cpu;
     std::mutex mutex;
     std::unordered_map<std::uint64_t,Inflight> irps; // FileIo, optional correlation.
     std::unordered_map<std::uint64_t,Inflight> disk_inits; // DiskIo Init; same layer as completion.
@@ -323,6 +329,13 @@ struct DiskIoCollector::Impl {
         return TRUE;
     }
     Impl() {
+        HANDLE raw_token{};
+        TOKEN_ELEVATION elevation{};DWORD token_bytes{};
+        if(!OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&raw_token)) {status="administrator-required";return;}
+        Handle elevation_token(raw_token);
+        if(!GetTokenInformation(raw_token,TokenElevation,&elevation,sizeof(elevation),&token_bytes) || !elevation.TokenIsElevated) {
+            status="administrator-required";return;
+        }
         extents=discover_volumes();drive_mask=GetLogicalDrives();
         GUID suffix{};
         FILETIME created{},exited{},kernel{},user{};
@@ -334,12 +347,20 @@ struct DiskIoCollector::Impl {
         auto& p=properties.trace;
         p.Wnode.BufferSize=sizeof(properties);p.Wnode.Flags=WNODE_FLAG_TRACED_GUID;
         p.Wnode.ClientContext=1;p.Wnode.Guid=suffix;
-        p.BufferSize=64;p.MinimumBuffers=2;p.MaximumBuffers=8;p.FlushTimer=1;
-        p.LogFileMode=EVENT_TRACE_REAL_TIME_MODE|EVENT_TRACE_SYSTEM_LOGGER_MODE|
-            EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING;
+        const auto processors=GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+        // CSwitch needs real originating-CPU context, not the legacy shared
+        // low-frequency buffer stream. Keep an explicit <=32 MiB pool budget.
+        const bool cpu_supported=processors>0 && processors<=512;
+        p.BufferSize=cpu_supported?16:64;
+        p.MinimumBuffers=cpu_supported?processors*2:2;
+        p.MaximumBuffers=cpu_supported?std::min<ULONG>(2048,std::max<ULONG>(128,processors*16)):8;
+        p.FlushTimer=1;
+        p.LogFileMode=EVENT_TRACE_REAL_TIME_MODE|EVENT_TRACE_SYSTEM_LOGGER_MODE;
+        if(!cpu_supported)p.LogFileMode|=EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING;
         p.EnableFlags=EVENT_TRACE_FLAG_DISK_IO|EVENT_TRACE_FLAG_DISK_IO_INIT|
             EVENT_TRACE_FLAG_DISK_FILE_IO|EVENT_TRACE_FLAG_FILE_IO|EVENT_TRACE_FLAG_FILE_IO_INIT|
             EVENT_TRACE_FLAG_THREAD;
+        if(cpu_supported)p.EnableFlags|=EVENT_TRACE_FLAG_PROCESS|EVENT_TRACE_FLAG_CSWITCH;
         p.LoggerNameOffset=offsetof(Properties,name);
         const ULONG rc=StartTraceW(&session,properties.name,&p);
         if(rc!=ERROR_SUCCESS) {
@@ -359,6 +380,12 @@ struct DiskIoCollector::Impl {
             diagnostics::write(diagnostics::Level::warning,"disk_io.session",
                 "OpenTrace failed win32="+std::to_string(code)+" status="+status);
             stop();return;
+        }
+        // Reuse this one kernel session. CPU gets a separate raw-QPC consumer;
+        // the established disk consumer keeps its original FILETIME conversion/correlation.
+        try {if(cpu_supported)cpu=std::make_unique<CpuEtwCollector>(properties.name);}
+        catch(const std::exception& error) {
+            diagnostics::write(diagnostics::Level::warning,"cpu_etw.start",error.what());
         }
         try {
             thread=std::thread([this]{
@@ -384,6 +411,7 @@ struct DiskIoCollector::Impl {
             if(thread.joinable())thread.join();
             consumer=INVALID_PROCESSTRACE_HANDLE;
         }
+        cpu.reset();
     }
     ~Impl(){stop();}
 };
@@ -391,6 +419,24 @@ DiskIoCollector::DiskIoCollector():impl_(std::make_unique<Impl>()){}
 DiskIoCollector::~DiskIoCollector()=default;
 void DiskIoCollector::collect(Snapshot& snapshot) {
     auto& self=*impl_;
+    snapshot.cpu_execution_begin_qpc=0;snapshot.cpu_execution_end_qpc=0;
+    snapshot.cpu_execution_frequency=0;snapshot.cpu_execution_unknown_ticks=0;snapshot.cpu_execution_lag_ms=0;
+    if(self.cpu) {
+        Impl::Properties query{};
+        query.trace.Wnode.BufferSize=sizeof(query);query.trace.LoggerNameOffset=offsetof(Impl::Properties,name);
+        query.trace.Wnode.Flags=WNODE_FLAG_TRACED_GUID;
+        const auto query_status=ControlTraceW(self.session,self.properties.name,&query.trace,EVENT_TRACE_CONTROL_QUERY);
+        if(query_status!=ERROR_SUCCESS || query.trace.EventsLost || query.trace.RealTimeBuffersLost || query.trace.LogBuffersLost) {
+            diagnostics::write(diagnostics::Level::warning,"cpu_etw.loss",
+                "query="+std::to_string(query_status)+" events="+std::to_string(query.trace.EventsLost)+
+                " realtime_buffers="+std::to_string(query.trace.RealTimeBuffersLost)+" log_buffers="+std::to_string(query.trace.LogBuffersLost));
+            self.cpu->events_lost();
+        }
+        self.cpu->collect(snapshot);
+    }else {
+        snapshot.cpu_execution_status=self.status=="administrator-required"?self.status:"unavailable";
+        for(auto& row:snapshot.processes){row.cpu_execution={};row.cpu_execution.status=snapshot.cpu_execution_status;}
+    }
     const auto now=std::chrono::steady_clock::now();
     const double seconds=std::chrono::duration<double>(now-self.previous).count();
     self.previous=now;
