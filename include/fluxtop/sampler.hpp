@@ -4,6 +4,7 @@
 #include "fluxtop/options.hpp"
 #include "fluxtop/privileges.hpp"
 #include "fluxtop/process_collector.hpp"
+#include "fluxtop/cpu_logical_collector.hpp"
 #include "fluxtop/network_collector.hpp"
 #include "fluxtop/disk_collector.hpp"
 #include "fluxtop/disk_io_collector.hpp"
@@ -25,6 +26,7 @@ public:
 private:
     Privileges privileges_;
     ProcessCollector processes_;
+    CpuLogicalCollector cpu_logical_;
     GpuCollector gpu_;
     SpikeTracker spikes_;
     NetworkCollector network_;

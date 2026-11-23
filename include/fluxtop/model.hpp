@@ -2,6 +2,7 @@
 
 #include <array>
 #include "fluxtop/intel_dts.hpp"
+#include "fluxtop/cpu_logical.hpp"
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -123,6 +124,8 @@ struct Snapshot {
     std::optional<std::uint64_t> total_ram_used, total_ram_capacity, total_gpu_memory, total_gpu_memory_capacity;
     std::optional<double> cpu_temperature_c, gpu_temperature_c;
     IntelDtsSnapshot intel_core_temperatures; // Per-core cache for v50 UI/JSONL.
+    std::vector<CpuLogicalUsage> cpu_logical_usage; // v51: per-logical load, null until baseline.
+    std::string cpu_logical_status{"initializing"};
     bool cpu_temperature_board{}; // True if CPU value is an explicit motherboard/ACPI CPU zone.
     std::string cpu_temperature_source{"unavailable"}; // Provenance, never inferred from a numeric value.
     std::optional<double> total_rx_bytes_per_second, total_tx_bytes_per_second;

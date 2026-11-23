@@ -141,7 +141,21 @@ void write_jsonl(std::ostream& out, const Snapshot& s, unsigned top) {
         << ",\"cpu_core_partial\":" << (cpu_cores.partial?"true":"false")
         << ",\"cpu_dts_status\":" << json_escape(cpu_cores.status)
         << ",\"cpu_core_sampled_tick\":" << cpu_cores.sampled_tick
-        << ",\"cpu_core_temperatures\":[";
+        << ",\"cpu_logical_status\":" << json_escape(s.cpu_logical_status)
+        << ",\"cpu_logical_usage\":[";
+    for(std::size_t i=0;i<s.cpu_logical_usage.size();++i) {
+        const auto& cpu=s.cpu_logical_usage[i];
+        if(i) out << ',';
+        out << "{\"processor_group\":" << cpu.group
+            << ",\"logical_processor\":" << cpu.number
+            << ",\"core_id\":" << cpu.core_id
+            << ",\"type\":" << json_escape(cpu.performance?"P":"E")
+            << ",\"usage_percent\":";
+        measured(out,cpu.percent);
+        out << '}';
+    }
+    out << "]";
+    out << ",\"cpu_core_temperatures\":[";
     for(std::size_t i=0;i<cpu_cores.cores.size();++i){
         const auto& core=cpu_cores.cores[i];
         if(i)out << ',';

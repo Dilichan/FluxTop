@@ -140,6 +140,8 @@ IntelDtsSnapshot intel_dts_topology_snapshot(){
     IntelDtsSnapshot sample;
     const auto topology=cpu_topology();
     sample.logical_processors=static_cast<unsigned>(topology.size());
+    for(const auto& logical:topology)
+        sample.logical_members.push_back({logical.group,logical.logical,logical.core,logical.performance});
     unsigned previous_core=~0U;
     for(const auto& logical:topology){
         if(logical.core==previous_core)continue;

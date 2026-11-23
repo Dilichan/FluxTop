@@ -29,6 +29,8 @@ Snapshot Sampler::collect() {
     const auto hwtemps = read_hardware_temperatures();
     snapshot.cpu_temperature_c = hwtemps.cpu_c;
     snapshot.intel_core_temperatures = hwtemps.intel_cores;
+    cpu_logical_.collect(snapshot.cpu_logical_usage,snapshot.cpu_logical_status,
+        snapshot.intel_core_temperatures.logical_members);
     snapshot.cpu_temperature_board = hwtemps.cpu_from_board;
     snapshot.cpu_temperature_source = hwtemps.cpu_source;
     if (!snapshot.gpu_temperature_c) snapshot.gpu_temperature_c = hwtemps.gpu_c;

@@ -14,9 +14,14 @@ struct IntelCoreTemperature {
     // E-core DTS may be shared or not individually addressable. No fabricated data.
     bool sensor_independent_unverified{};
 };
+struct IntelLogicalProcessor {
+    unsigned group{}, number{}, core_id{};
+    bool performance{};
+};
 struct IntelDtsSnapshot {
     std::optional<double> package_c;
     std::vector<IntelCoreTemperature> cores;
+    std::vector<IntelLogicalProcessor> logical_members; // One record per logical CPU; group-aware.
     std::uint64_t sampled_tick{};
     bool driver_ready{};
     unsigned physical_cores{}, logical_processors{}, available_cores{};
