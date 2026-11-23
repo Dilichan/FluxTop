@@ -9,11 +9,7 @@
 
 namespace fluxtop {
 Snapshot ProcessCollector::collect() {
-    Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
-    if (!snapshot.valid()) throw windows_error("CreateToolhelp32Snapshot");
-    PROCESSENTRY32W entry{};
-    entry.dwSize = sizeof(entry);
-    if (!Process32FirstW(snapshot.get(), &entry)) throw windows_error("Process32FirstW");
+    auto entries=enumerator_.collect(GetTickCount64());
     std::vector<RawProcess> raw;
     std::unordered_map<std::uint32_t, Path> next_paths;
     raw.reserve(512);
@@ -37,12 +33,11 @@ Snapshot ProcessCollector::collect() {
     result.self_pid = GetCurrentProcessId();
     result.logical_processors = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
     if (!result.logical_processors) throw windows_error("GetActiveProcessorCount");
-    do {
-        if (entry.th32ProcessID == 0) continue; // Idle is not an application.
+    for(auto& entry:entries) {
         RawProcess row;
-        row.pid = entry.th32ProcessID;
-        row.parent_pid = entry.th32ParentProcessID;
-        row.name = utf8(entry.szExeFile);
+        row.pid = entry.pid;
+        row.parent_pid = entry.parent_pid;
+        row.name = std::move(entry.name);
         Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, row.pid));
         if (process.valid()) {
             FILETIME created{}, exited{}, kernel{}, user{};
@@ -92,8 +87,7 @@ Snapshot ProcessCollector::collect() {
         }
         if (!row.cpu_ticks || !row.working_set) ++result.inaccessible;
         raw.push_back(std::move(row));
-    } while (Process32NextW(snapshot.get(), &entry));
-    if (GetLastError() != ERROR_NO_MORE_FILES) throw windows_error("Process32NextW");
+    }
     paths_ = std::move(next_paths);
     // Transfer process names and paths instead of copying every string again.
     result.processes = tracker_.update(std::move(raw), result.logical_processors);

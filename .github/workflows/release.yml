@@ -1,12 +1,15 @@
-name: Publish Windows EXE
+name: Prepare Windows release draft
 
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
         description: 'Existing tag, e.g. v0.2.0-preview.1'
+        required: true
+      acceptance_verified:
+        description: 'Local and clean Windows 10/11 acceptance completed for this tag'
+        type: boolean
+        default: false
         required: true
 
 permissions:
@@ -14,37 +17,36 @@ permissions:
 
 jobs:
   release:
+    if: ${{ inputs.acceptance_verified }}
     runs-on: windows-2022
     permissions:
       contents: write
     env:
-      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      RELEASE_TAG: ${{ inputs.tag }}
     defaults:
       run:
-        shell: cmd
+        shell: pwsh
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
+          ref: refs/tags/${{ inputs.tag }}
       - name: Validate tag and prepare release notes
-        run: cmake -DROOT=. "-DTAG=%RELEASE_TAG%" -DOUTPUT=build/release-notes.md -P tools/Get-ReleaseNotes.cmake
+        run: cmake -DROOT=. "-DTAG=$env:RELEASE_TAG" -DOUTPUT=build/release-notes.md -P tools/Get-ReleaseNotes.cmake
+      - name: Prepare pinned offline PawnIO installer
+        run: cmake -P tools/Prepare-PawnIO.cmake
       - name: Configure
-        run: cmake -S . -B build -A x64 "-DFLUXTOP_RELEASE_TAG:STRING=%RELEASE_TAG%"
+        run: cmake -S . -B build -A x64 "-DFLUXTOP_RELEASE_TAG:STRING=$env:RELEASE_TAG"
       - name: Build Release
         run: cmake --build --preset release
       - name: Test
         run: ctest --preset release --output-on-failure
       - name: Package verified assets
         run: cmake -DROOT=. -DBUILD_DIRECTORY=build -DOUTPUT_DIR=out/release -DCONFIG=Release -P tools/Package-Release.cmake
-      - name: Publish verified assets
+      - name: Create draft with verified assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "%RELEASE_TAG%"
-          "out/release/FluxTop.exe"
-          "out/release/SHA256SUMS.txt"
-          "out/release/LICENSE.txt"
-          --verify-tag
-          --title "FluxTop %RELEASE_TAG%"
-          --notes-file "build/release-notes.md"
-          ${{ contains(env.RELEASE_TAG, '-preview.') && '--prerelease' || '' }}
+        run: |
+          $flags = @('--verify-tag', '--draft', '--title', "FluxTop $env:RELEASE_TAG",
+                     '--notes-file', 'build/release-notes.md')
+          if ($env:RELEASE_TAG -match '-preview\.\d+$') { $flags += '--prerelease' }
+          gh release create $env:RELEASE_TAG out/release/FluxTop.exe out/release/SHA256SUMS.txt out/release/LICENSE.txt @flags

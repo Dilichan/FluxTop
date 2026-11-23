@@ -12,6 +12,8 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v7
+      - name: Prepare pinned offline PawnIO installer
+        run: cmake -P tools/Prepare-PawnIO.cmake
       - name: Configure
         run: cmake --preset windows
       - name: Build Release

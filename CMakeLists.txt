@@ -32,7 +32,7 @@ target_include_directories(fluxtop_history PUBLIC include)
 target_compile_features(fluxtop_history PUBLIC cxx_std_20)
 target_compile_definitions(fluxtop_history PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
 target_link_libraries(fluxtop_history PUBLIC fluxtop_core fluxtop_logging winsqlite3)
-add_executable(fluxtop src/main.cpp src/process_collector.cpp src/gpu_collector.cpp src/fps_collector.cpp src/privileges.cpp src/sampler.cpp src/overlay.cpp src/statistics_page.cpp src/statistics_history.cpp src/network_collector.cpp src/disk_collector.cpp src/disk_temperature.cpp src/disk_io_collector.cpp src/cpu_etw_collector.cpp src/autostart.cpp src/temperatures.cpp src/temperature_selection.cpp src/intel_dts.cpp src/cpu_logical_collector.cpp
+add_executable(fluxtop src/main.cpp src/process_collector.cpp src/process_enumerator.cpp src/gpu_collector.cpp src/fps_collector.cpp src/privileges.cpp src/sampler.cpp src/overlay.cpp src/statistics_page.cpp src/statistics_history.cpp src/network_collector.cpp src/disk_collector.cpp src/disk_temperature.cpp src/disk_io_collector.cpp src/cpu_etw_collector.cpp src/autostart.cpp src/temperatures.cpp src/temperature_selection.cpp src/intel_dts.cpp src/cpu_logical_collector.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/fluxtop.rc")
 target_link_libraries(fluxtop PRIVATE fluxtop_core fluxtop_icons fluxtop_history psapi pdh advapi32 d2d1 dwrite shell32 user32 gdi32 ole32 oleaut32 wbemuuid comctl32 tdh uuid)
 target_compile_definitions(fluxtop PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN
@@ -58,7 +58,7 @@ add_custom_command(OUTPUT "${launcher_resource}"
         "-DUNINSTALLER=$<TARGET_FILE:fluxtop_uninstaller>"
         "-DRELEASE_TAG=${FLUXTOP_RELEASE_TAG}" "-DTEMPLATE=${PROJECT_SOURCE_DIR}/src/launcher.rc.in"
         -P "${PROJECT_SOURCE_DIR}/tools/Generate-LauncherResource.cmake"
-    DEPENDS fluxtop fluxtop_uninstaller "${PROJECT_SOURCE_DIR}/assets/pawnio/PawnIO_setup.exe" "${PROJECT_SOURCE_DIR}/assets/branding/fluxtop.ico" "${PROJECT_SOURCE_DIR}/tools/Generate-LauncherResource.cmake" "${PROJECT_SOURCE_DIR}/src/launcher.rc.in"
+    DEPENDS fluxtop fluxtop_uninstaller "${PROJECT_SOURCE_DIR}/assets/pawnio/PawnIO_setup.exe" "${PROJECT_SOURCE_DIR}/assets/branding/fluxtop.ico" "${PROJECT_SOURCE_DIR}/tools/Generate-LauncherResource.cmake" "${PROJECT_SOURCE_DIR}/tools/PawnIO-Pin.cmake" "${PROJECT_SOURCE_DIR}/src/launcher.rc.in"
     VERBATIM)
 add_executable(fluxtop_launcher WIN32 src/launcher.cpp src/installation.cpp src/pawnio_bundle.cpp "${launcher_resource}")
 target_include_directories(fluxtop_launcher PRIVATE include)
@@ -131,6 +131,12 @@ if(BUILD_TESTING)
     add_executable(fluxtop_tests tests/core_tests.cpp)
     target_link_libraries(fluxtop_tests PRIVATE fluxtop_core)
     add_test(NAME core COMMAND fluxtop_tests)
+    add_executable(fluxtop_process_enumerator_tests tests/process_enumerator_tests.cpp src/process_enumerator.cpp)
+    target_include_directories(fluxtop_process_enumerator_tests PRIVATE include)
+    target_compile_features(fluxtop_process_enumerator_tests PRIVATE cxx_std_20)
+    target_compile_definitions(fluxtop_process_enumerator_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(fluxtop_process_enumerator_tests PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/W4;/WX;/permissive-;/utf-8;/EHsc>)
+    add_test(NAME process_enumeration COMMAND fluxtop_process_enumerator_tests)
     add_test(NAME update_consent_policy COMMAND fluxtop_native_policy_tests "${PROJECT_SOURCE_DIR}" "update_consent_policy")
     add_executable(fluxtop_release_tests tests/release_tests.cpp)
     target_link_libraries(fluxtop_release_tests PRIVATE fluxtop_release_update)
@@ -285,7 +291,7 @@ if(BUILD_TESTING)
     add_test(NAME etw_recovery_policy COMMAND fluxtop_etw_recovery_tests --policy)
     set_tests_properties(etw_recovery PROPERTIES TIMEOUT 75 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
     add_executable(fluxtop_collector_stability_tests tests/collector_stability_tests.cpp
-        src/process_collector.cpp src/gpu_collector.cpp src/fps_collector.cpp src/privileges.cpp src/sampler.cpp
+        src/process_collector.cpp src/process_enumerator.cpp src/gpu_collector.cpp src/fps_collector.cpp src/privileges.cpp src/sampler.cpp
         src/network_collector.cpp src/disk_collector.cpp src/disk_temperature.cpp src/disk_io_collector.cpp
         src/cpu_etw_collector.cpp src/temperatures.cpp src/temperature_selection.cpp src/intel_dts.cpp src/cpu_logical_collector.cpp)
     target_link_libraries(fluxtop_collector_stability_tests PRIVATE fluxtop_core fluxtop_history psapi pdh advapi32 ole32 oleaut32 wbemuuid tdh ws2_32)
