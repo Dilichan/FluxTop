@@ -139,7 +139,7 @@ int wmain(int argc,wchar_t** argv) {
                 VirtualFree(bytes,0,MEM_RELEASE);
             });
             unsigned seen{},seen_a{},seen_b{};bool disk=false;double peak_cpu=0;
-            const auto actual_start=process_runtime_ns();std::uint64_t observed_ns{};
+            const auto actual_start=process_runtime_ns();std::uint64_t observed_ns{},last_end{};
             std::ofstream evidence(directory/(L"cycle-"+std::to_wstring(cycle)+L".txt"));
             for(unsigned sample=0;sample<14;++sample) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(700));
@@ -161,6 +161,7 @@ int wmain(int argc,wchar_t** argv) {
                 }
                 const auto& execution=row.cpu_execution;
                 if(execution.frequency && execution.end_qpc>execution.begin_qpc) {
+                    need(execution.begin_qpc>=last_end,"ETW measurement intervals must never overlap");last_end=execution.end_qpc;
                     std::uint64_t total_ns{};
                     for(const auto& cpu:execution.logical)total_ns+=cpu.runtime_ns;
                     const double interval=static_cast<double>(execution.end_qpc-execution.begin_qpc)/static_cast<double>(execution.frequency);
@@ -168,7 +169,13 @@ int wmain(int argc,wchar_t** argv) {
                     observed_ns+=total_ns;
                     evidence<<"observed_cpu_percent="<<usage<<" interval_seconds="<<interval
                         <<" actual_cpu_ns="<<process_runtime_ns()-actual_start<<'\n';
-                    need(usage<=(cycle==1?500:250),"fixture CPU time must not be counted multiple times");
+                    // This PID includes the two tracing consumers, disk writer
+                    // and main thread, not just the two pinned workers. Short
+                    // delivery windows can legitimately exceed 250 percent.
+                    // The independent process clock bounds cumulative runtime;
+                    // it detects double accounting without assuming idle readers.
+                    need(static_cast<double>(observed_ns)<=1.1*static_cast<double>(process_runtime_ns()-actual_start)+250'000'000.0,
+                        "ETW time must not exceed independent cumulative process CPU time");
                     peak_cpu=std::max(peak_cpu,usage);
                 }
                 disk=disk || row.disk_write_bytes_per_second.value_or(0)>0;

@@ -11,19 +11,36 @@ int wmain(int argc,wchar_t** argv) {
     TOKEN_ELEVATION state{};
     DWORD bytes=0;
     const bool read=GetTokenInformation(token,TokenElevation,&state,sizeof(state),&bytes)!=FALSE;
-    CloseHandle(token);
-    if(!read) return 4;
+    if(!read){CloseHandle(token);return 4;}
+    HANDLE limited=nullptr;
     if(state.TokenIsElevated) {
-        std::cout << "[PASS] Elevated fixture: monitor smoke verifies sampling\n";
-        return 0;
+        // Linked tokens obtained without SeTcb can be identification-only.
+        // Duplicate the current user's unelevated desktop token instead.
+        DWORD shell_pid{};GetWindowThreadProcessId(GetShellWindow(),&shell_pid);
+        HANDLE shell=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,shell_pid),shell_token{};
+        if(!shell || !OpenProcessToken(shell,TOKEN_QUERY|TOKEN_DUPLICATE,&shell_token)){
+            if(shell)CloseHandle(shell);CloseHandle(token);std::cerr<<"Unelevated desktop token unavailable\n";return 77;
+        }
+        BYTE own_user[1024]{},desktop_user[1024]{};TOKEN_ELEVATION desktop_state{};
+        const bool same=GetTokenInformation(token,TokenUser,own_user,sizeof(own_user),&bytes) &&
+            GetTokenInformation(shell_token,TokenUser,desktop_user,sizeof(desktop_user),&bytes) &&
+            EqualSid(reinterpret_cast<TOKEN_USER*>(own_user)->User.Sid,reinterpret_cast<TOKEN_USER*>(desktop_user)->User.Sid) &&
+            GetTokenInformation(shell_token,TokenElevation,&desktop_state,sizeof(desktop_state),&bytes) && !desktop_state.TokenIsElevated;
+        const bool duplicated=same && DuplicateTokenEx(shell_token,TOKEN_ALL_ACCESS,nullptr,SecurityImpersonation,TokenPrimary,&limited);
+        CloseHandle(shell_token);CloseHandle(shell);
+        if(!duplicated){CloseHandle(token);std::cerr<<"Current user's standard token unavailable\n";return 77;}
     }
+    CloseHandle(token);
     const std::wstring app=argv[1];
     std::wstring cmd=L"\""+app+L"\" --samples 1 --interval-ms 1000 --no-gpu --no-network --jsonl";
     STARTUPINFOW startup{};
     startup.cb=sizeof(startup);
     PROCESS_INFORMATION process{};
-    if(!CreateProcessW(app.c_str(),cmd.data(),nullptr,nullptr,FALSE,
-        CREATE_NO_WINDOW,nullptr,nullptr,&startup,&process)) return 5;
+    const BOOL started=limited?CreateProcessWithTokenW(limited,0,app.c_str(),cmd.data(),CREATE_NO_WINDOW,nullptr,nullptr,&startup,&process):
+        CreateProcessW(app.c_str(),cmd.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,nullptr,&startup,&process);
+    const auto start_error=started?ERROR_SUCCESS:GetLastError();
+    if(limited)CloseHandle(limited);
+    if(!started){std::cerr<<"Cannot start standard-user fixture: "<<start_error<<'\n';return 5;}
     CloseHandle(process.hThread);
     const DWORD waited=WaitForSingleObject(process.hProcess,4000);
     if(waited!=WAIT_OBJECT_0) {

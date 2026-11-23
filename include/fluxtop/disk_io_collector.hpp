@@ -1,5 +1,6 @@
 #pragma once
 #include "fluxtop/model.hpp"
+#include "fluxtop/etw_recovery.hpp"
 #include <memory>
 
 namespace fluxtop {
@@ -14,5 +15,6 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+    EtwRecovery recovery_;
 };
 }

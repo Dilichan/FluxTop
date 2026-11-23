@@ -352,8 +352,10 @@ struct DiskIoCollector::Impl {
         // low-frequency buffer stream. Keep an explicit <=32 MiB pool budget.
         const bool cpu_supported=processors>0 && processors<=512;
         p.BufferSize=cpu_supported?16:64;
-        p.MinimumBuffers=cpu_supported?processors*2:2;
-        p.MaximumBuffers=cpu_supported?std::min<ULONG>(2048,std::max<ULONG>(128,processors*16)):8;
+        // Reserve burst headroom up front: high-IRQL scheduler events cannot
+        // always obtain on-demand buffers. The requested pool remains <=32 MiB.
+        p.MinimumBuffers=cpu_supported?std::max<ULONG>(processors*2,256):2;
+        p.MaximumBuffers=cpu_supported?2048:8;
         p.FlushTimer=1;
         p.LogFileMode=EVENT_TRACE_REAL_TIME_MODE|EVENT_TRACE_SYSTEM_LOGGER_MODE;
         if(!cpu_supported)p.LogFileMode|=EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING;
@@ -418,25 +420,47 @@ struct DiskIoCollector::Impl {
 DiskIoCollector::DiskIoCollector():impl_(std::make_unique<Impl>()){}
 DiskIoCollector::~DiskIoCollector()=default;
 void DiskIoCollector::collect(Snapshot& snapshot) {
+    const auto recovery_now=EtwRecovery::Clock::now();
+    if(recovery_.due(recovery_now)){
+        // Destroy/join both consumers and stop only our session before replacing it.
+        impl_.reset();impl_=std::make_unique<Impl>();recovery_.restarted(recovery_now);
+        diagnostics::write(diagnostics::Level::info,"disk_io.recovery","restarted shared CPU/disk session");
+    }
     auto& self=*impl_;
+    for(auto& row:snapshot.processes){
+        row.disk_read_bytes_per_second.reset();row.disk_write_bytes_per_second.reset();row.disk_pressure_percent.reset();
+        row.disk_volume_bytes_per_second.fill(std::nullopt);row.disk_volume_pressure_percent.fill(std::nullopt);
+    }
     snapshot.cpu_execution_begin_qpc=0;snapshot.cpu_execution_end_qpc=0;
     snapshot.cpu_execution_frequency=0;snapshot.cpu_execution_unknown_ticks=0;snapshot.cpu_execution_lag_ms=0;
-    if(self.cpu) {
+    bool trace_failed=false;
+    if(self.session) {
         Impl::Properties query{};
         query.trace.Wnode.BufferSize=sizeof(query);query.trace.LoggerNameOffset=offsetof(Impl::Properties,name);
         query.trace.Wnode.Flags=WNODE_FLAG_TRACED_GUID;
         const auto query_status=ControlTraceW(self.session,self.properties.name,&query.trace,EVENT_TRACE_CONTROL_QUERY);
         if(query_status!=ERROR_SUCCESS || query.trace.EventsLost || query.trace.RealTimeBuffersLost || query.trace.LogBuffersLost) {
+            trace_failed=true;self.failed=true;
             diagnostics::write(diagnostics::Level::warning,"cpu_etw.loss",
                 "query="+std::to_string(query_status)+" events="+std::to_string(query.trace.EventsLost)+
                 " realtime_buffers="+std::to_string(query.trace.RealTimeBuffersLost)+" log_buffers="+std::to_string(query.trace.LogBuffersLost));
-            self.cpu->events_lost();
+            if(self.cpu)self.cpu->events_lost();
         }
+    }
+    if(self.cpu) {
         self.cpu->collect(snapshot);
     }else {
         snapshot.cpu_execution_status=self.status=="administrator-required"?self.status:"unavailable";
         for(auto& row:snapshot.processes){row.cpu_execution={};row.cpu_execution.status=snapshot.cpu_execution_status;}
     }
+    const auto& quality=snapshot.cpu_execution_status;
+    const bool cpu_failed=quality=="incomplete" || quality=="stale" || quality=="out-of-order" ||
+        quality=="switch-discontinuity" || quality=="thread-lifetime-discontinuity" ||
+        quality=="overlapping-thread-execution" || quality=="state-capacity-exceeded" || quality=="identity-clock-changed" ||
+        quality=="topology-changed" || quality=="processor-unavailable" || quality=="runtime-overflow";
+    if((trace_failed || self.failed || cpu_failed || self.status=="unavailable") && self.status!="administrator-required"){
+        if(recovery_.schedule(recovery_now))diagnostics::write(diagnostics::Level::warning,"disk_io.recovery","scheduled fresh trace after failure; invalid windows remain unavailable");
+    }else recovery_.healthy(recovery_now);
     const auto now=std::chrono::steady_clock::now();
     const double seconds=std::chrono::duration<double>(now-self.previous).count();
     self.previous=now;

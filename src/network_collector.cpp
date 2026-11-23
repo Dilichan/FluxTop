@@ -1,5 +1,6 @@
 #include "fluxtop/network_collector.hpp"
 #include "fluxtop/windows.hpp"
+#include "fluxtop/diagnostics.hpp"
 #include <windows.h>
 #include <evntrace.h>
 #include <evntcons.h>
@@ -37,7 +38,9 @@ void stop_orphaned_sessions() {
         bool orphan = !owner.valid() && GetLastError() == ERROR_INVALID_PARAMETER;
         if (owner.valid()) {
             FILETIME created{}, exited{}, kernel{}, user{};
-            if (GetProcessTimes(owner.get(), &created, &exited, &kernel, &user)) orphan = filetime_ticks(created) != creation;
+            DWORD exit_code{};
+            if(GetExitCodeProcess(owner.get(),&exit_code) && exit_code!=STILL_ACTIVE)orphan=true;
+            else if (GetProcessTimes(owner.get(), &created, &exited, &kernel, &user)) orphan = filetime_ticks(created) != creation;
         }
         if (orphan) {
             p.Wnode.Flags = WNODE_FLAG_TRACED_GUID; p.LogFileNameOffset = 0;
@@ -137,10 +140,26 @@ struct NetworkCollector::Impl {
     }
     ~Impl() { stop(); }
 };
-NetworkCollector::NetworkCollector(bool enabled) : impl_(std::make_unique<Impl>(enabled)) {}
+NetworkCollector::NetworkCollector(bool enabled) : impl_(std::make_unique<Impl>(enabled)),enabled_(enabled) {}
 NetworkCollector::~NetworkCollector() = default;
 void NetworkCollector::collect(Snapshot& snapshot) {
+    const auto recovery_now=EtwRecovery::Clock::now();
+    if(enabled_ && recovery_.due(recovery_now)){
+        impl_.reset();impl_=std::make_unique<Impl>(true);recovery_.restarted(recovery_now);
+        diagnostics::write(diagnostics::Level::info,"network.recovery","restarted owned network session");
+    }
     auto& self = *impl_;
+    snapshot.total_rx_bytes_per_second.reset();snapshot.total_tx_bytes_per_second.reset();
+    for(auto& row:snapshot.processes){row.rx_bytes_per_second.reset();row.tx_bytes_per_second.reset();}
+    if(self.session){
+        Impl::Properties query{};query.value.Wnode.BufferSize=sizeof(query);query.value.Wnode.Flags=WNODE_FLAG_TRACED_GUID;
+        query.value.LoggerNameOffset=offsetof(Impl::Properties,name);
+        const auto result=ControlTraceW(self.session,self.properties.name,&query.value,EVENT_TRACE_CONTROL_QUERY);
+        if(result!=ERROR_SUCCESS || query.value.EventsLost || query.value.RealTimeBuffersLost || query.value.LogBuffersLost)self.failed=true;
+    }
+    if(enabled_ && (self.failed || self.status=="unavailable")){
+        if(recovery_.schedule(recovery_now))diagnostics::write(diagnostics::Level::warning,"network.recovery","scheduled fresh trace after failure");
+    }else recovery_.healthy(recovery_now);
     std::unordered_map<std::uint32_t, Traffic> traffic;
     Traffic total;
     const auto now = std::chrono::steady_clock::now();

@@ -102,3 +102,5 @@ ctest --preset release --output-on-failure
 [Руководство пользователя](docs/USER_GUIDE.md) · [Архитектура](docs/ARCHITECTURE.md) · [Требования](docs/REQUIREMENTS.md) · [Стек](docs/STACK.md) · [История и SQLite](docs/HISTORY.md) · [Статистика](docs/STATISTICS.md) · [Запуск и обновления](docs/UPDATING.md) · [Публикация релизов](docs/PUBLISHING.md) · [План развития](docs/ROADMAP.md) · [Правила разработки](CONTRIBUTING.md)
 
 Лицензия — **[MIT](LICENSE)**. Ошибки и предложения: [GitHub Issues](https://github.com/Dilichan/FluxTop/issues).
+
+Постоянные тесты, команды повторных прогонов и сценарии Windows: [испытания стабильности](docs/STABILITY.md).

@@ -3,6 +3,7 @@
 #include "fluxtop/release_update.hpp"
 #include "fluxtop/installation.hpp"
 #include "fluxtop/pawnio_bundle.hpp"
+#include "fluxtop/launcher_lock.hpp"
 #include <shellapi.h>
 #include <shlobj.h>
 #include <array>
@@ -152,14 +153,19 @@ int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
             " install_only="+std::to_string(install_only)+" uninstall="+std::to_string(uninstall));
         if (directory.empty()) directory=data_directory();
         std::filesystem::create_directories(directory);
+        // Startup's grace period must not monopolize the publication lock.
+        if (autostart && !prepare) Sleep(30000);
         // Keep download/activation and local-cache publication serialized across launches.
-        fluxtop::Handle startup(CreateMutexW(nullptr,FALSE,prepare ? nullptr : L"Local\\FluxTop.Bootstrap.v1"));
+        const auto lock_name=fluxtop::launcher_lock_name(directory,custom_directory);
+        fluxtop::Handle startup(CreateMutexW(nullptr,FALSE,lock_name.c_str()));
         if (!startup.valid()) throw fluxtop::windows_error("Create startup lock");
         const auto wait=WaitForSingleObject(startup.get(),3000);
-        if (wait==WAIT_TIMEOUT) return 0;
+        if (wait==WAIT_TIMEOUT) {
+            fluxtop::diagnostics::write(fluxtop::diagnostics::Level::warning,"launcher.busy","bootstrap lock timed out; no installation or launch performed");
+            return ERROR_BUSY;
+        }
         if (wait!=WAIT_OBJECT_0 && wait!=WAIT_ABANDONED) throw fluxtop::windows_error("Wait for startup lock");
         struct Unlock { HANDLE value; ~Unlock(){ ReleaseMutex(value); } } unlock{startup.get()};
-        if (autostart && !prepare) Sleep(30000);
         wchar_t tag[128]{};
         if (!LoadStringW(module,203,tag,static_cast<int>(std::size(tag)))) throw std::runtime_error("Release version missing");
         const auto self=executable();

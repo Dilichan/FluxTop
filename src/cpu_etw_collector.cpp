@@ -39,7 +39,7 @@ struct CpuEtwCollector::Impl {
     std::string status{"unavailable"};
     unsigned group_count{};
     std::uint64_t wall_origin{},qpc_origin{};
-    bool clock_valid=true;
+    std::atomic<bool> clock_valid{true};
     bool logged_schema=false;
     bool logged_failure=false;
     bool logged_cswitch=false;
@@ -253,6 +253,7 @@ void CpuEtwCollector::collect(Snapshot& snapshot) {
         s.request=true;
     }
     if(s.lost){unavailable("incomplete");return;}
+    if(!s.clock_valid){unavailable("identity-clock-changed");return;}
     if(GetActiveProcessorCount(ALL_PROCESSOR_GROUPS)!=s.topology.size() || GetActiveProcessorGroupCount()!=s.group_count) {
         s.lost=true;unavailable("topology-changed");return;
     }
