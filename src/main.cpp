@@ -33,6 +33,19 @@ public:
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
+    // Apply before creating any windows. FluxTop needs no legacy global hooks
+    // in its own process and Windows can keep those DLLs out of its UI threads.
+    PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY extensions{};
+    extensions.DisableExtensionPoints=1;
+    if(!SetProcessMitigationPolicy(ProcessExtensionPointDisablePolicy,&extensions,sizeof(extensions))) {
+        const DWORD code=GetLastError();
+        extensions={};
+        if(!GetProcessMitigationPolicy(GetCurrentProcess(),ProcessExtensionPointDisablePolicy,&extensions,sizeof(extensions)) ||
+            !extensions.DisableExtensionPoints) {
+            fluxtop::diagnostics::write(fluxtop::diagnostics::Level::warning,"process.extension_points",
+                "legacy extension point mitigation unavailable win32="+std::to_string(code));
+        }
+    }
     fluxtop::diagnostics::write(fluxtop::diagnostics::Level::info,"process.start","monitor main entry");
     try {
         std::vector<std::string> storage;

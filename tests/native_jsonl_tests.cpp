@@ -41,7 +41,7 @@ std::string capture(const std::filesystem::path& program,const std::filesystem::
     std::string output;char buffer[4096];DWORD count{};
     const auto deadline=GetTickCount64()+30000ULL;
     DWORD waited=WAIT_TIMEOUT;
-    bool overflow=false,pipe_error=false;
+    bool overflow=false,pipe_error=false,extension_points_disabled=false;
     // Poll pipe availability: blocking ReadFile must not bypass the child deadline.
     while(GetTickCount64()<deadline) {
         DWORD available=0;
@@ -56,6 +56,12 @@ std::string capture(const std::filesystem::path& program,const std::filesystem::
             break;
         }
         if(available) {
+            // The first real JSONL bytes prove the production entry point ran.
+            if(output.empty()) {
+                PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY policy{};
+                extension_points_disabled=GetProcessMitigationPolicy(proc.hProcess,
+                    ProcessExtensionPointDisablePolicy,&policy,sizeof(policy)) && policy.DisableExtensionPoints;
+            }
             const DWORD to_read=std::min<DWORD>(available,static_cast<DWORD>(sizeof(buffer)));
             if(!ReadFile(reader,buffer,to_read,&count,nullptr)) {pipe_error=true;break;}
             output.append(buffer,count);
@@ -92,6 +98,7 @@ std::string capture(const std::filesystem::path& program,const std::filesystem::
         if(!output.empty())problem<<" stdout_prefix="<<output.substr(0,512);
         throw std::runtime_error(problem.str());
     }
+    require(extension_points_disabled,"Monitor must disable legacy in-process extension points at startup");
     return output;
 }
 }
