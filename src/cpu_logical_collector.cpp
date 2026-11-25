@@ -13,7 +13,7 @@ void CpuLogicalCollector::reset() noexcept {
     have_baseline_=false;
     previous_tick_=0;
 }
-bool CpuLogicalCollector::configure(const std::vector<IntelLogicalProcessor>& topology) {
+bool CpuLogicalCollector::configure(const std::vector<LogicalCpuLocation>& topology) {
     reset();
     if(topology.empty())return false;
     if(PdhOpenQueryW(nullptr,0,&query_)!=ERROR_SUCCESS){reset();return false;}
@@ -32,7 +32,7 @@ bool CpuLogicalCollector::configure(const std::vector<IntelLogicalProcessor>& to
     return true;
 }
 void CpuLogicalCollector::collect(std::vector<CpuLogicalUsage>& values,std::string& status,
-    const std::vector<IntelLogicalProcessor>& topology) {
+    const std::vector<LogicalCpuLocation>& topology) {
     values.clear();
     if(topology.empty()){reset();status="topology-unavailable";return;}
     bool changed=counters_.size()!=topology.size();

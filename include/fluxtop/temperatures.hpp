@@ -3,12 +3,11 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <cstdint>
 #include "fluxtop/temperature_selection.hpp"
-#include "fluxtop/intel_dts.hpp"
+#include "fluxtop/cpu_topology.hpp"
 namespace fluxtop {
 struct HardwareTemperatures {
-    IntelDtsSnapshot intel_cores; // Cached source data for v50, independent of selected CPU package provider.
+    CpuTopologySnapshot intel_cores; // Cached source data for v50, independent of selected CPU package provider.
     std::optional<double> cpu_c, gpu_c;
     bool cpu_from_board{}; // Explicit CPU socket/board zone, NOT processor die/package.
     std::string cpu_source{"unavailable"}; // Diagnostic provenance, not a process metric.
@@ -28,5 +27,5 @@ int cpu_temperature_sensor_priority(std::wstring_view identifier, std::wstring_v
 int motherboard_cpu_sensor_priority(std::wstring_view identifier, std::wstring_view name) noexcept;
 // HWiNFO shared memory; falls back to supported WMI hardware-monitor providers.
 HardwareTemperatures read_hwinfo_temperatures();
-HardwareTemperatures read_hardware_temperatures();
+HardwareTemperatures read_hardware_temperatures(CpuTemperatureSelector& selector);
 } // namespace fluxtop

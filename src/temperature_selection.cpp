@@ -1,6 +1,5 @@
 #include "fluxtop/temperature_selection.hpp"
 #include <cmath>
-#include <limits>
 
 namespace fluxtop {
 namespace {
@@ -34,14 +33,22 @@ bool cpu_temperature_candidate_valid(const CpuTemperatureCandidate& sample,
         sample.sampled_tick!=0 && now>=sample.sampled_tick &&
         now-sample.sampled_tick<=ttl_ms;
 }
-CpuTemperatureSelection CpuTemperatureSelector::select(const CpuTemperatureCandidate* samples,
-                                                        std::size_t count,std::uint64_t now) noexcept {
+bool cpu_temperature_needs_wmi(std::span<const CpuTemperatureCandidate> primary,std::uint64_t now,
+                              std::uint64_t preferred_started_at) noexcept {
+    constexpr std::uint64_t startup_grace_ms=2000;
+    if(preferred_started_at && now>=preferred_started_at && now-preferred_started_at<startup_grace_ms)return false;
+    const int best_wmi=cpu_temperature_rank(CpuTemperatureProvider::libre_wmi,CpuTemperatureKind::die);
+    for(const auto& candidate:primary)
+        if(cpu_temperature_candidate_valid(candidate,now) && cpu_temperature_rank(candidate.provider,candidate.kind)>best_wmi)
+            return false;
+    return true;
+}
+CpuTemperatureSelection CpuTemperatureSelector::select(std::span<const CpuTemperatureCandidate> samples,
+                                                        std::uint64_t now) noexcept {
     CpuTemperatureSelection result;
-    if(!samples)count=0;
     const CpuTemperatureCandidate* best=nullptr;
     const CpuTemperatureCandidate* active=nullptr;
-    for(std::size_t i=0;i<count;++i){
-        const auto& sample=samples[i];
+    for(const auto& sample:samples){
         if(!cpu_temperature_candidate_valid(sample,now))continue;
         if(!best || cpu_temperature_rank(sample.provider,sample.kind)>
             cpu_temperature_rank(best->provider,best->kind))best=&sample;

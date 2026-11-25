@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <iterator>
+#include <set>
 
 namespace {
 std::string read(const std::filesystem::path& path) {
@@ -40,9 +41,34 @@ void ordered(const std::string& source,std::string_view first,std::string_view s
     if(a==std::string::npos||b==std::string::npos||a>=b)
         throw std::runtime_error("Source order contract violated: "+std::string(first));
 }
+void check_includes(const std::filesystem::path& root,const std::filesystem::path& file,
+    const std::regex& forbidden,std::set<std::filesystem::path>& visited) {
+    if(!visited.insert(file).second)return;
+    static const std::regex include(R"inc(^[ \t]*#[ \t]*include[ \t]*[<"]([^>"]+)[>"])inc",
+        std::regex_constants::multiline);
+    const auto source=read(root/file);
+    for(std::sregex_iterator it(source.begin(),source.end(),include),end;it!=end;++it) {
+        const auto dependency=(*it)[1].str();
+        if(std::regex_search(dependency,forbidden))
+            throw std::runtime_error(file.generic_string()+" depends on forbidden header "+dependency);
+        const auto target=dependency.starts_with("fluxtop/")?std::filesystem::path("include")/dependency:
+            file.parent_path()/dependency;
+        if(std::filesystem::is_regular_file(root/target))check_includes(root,target.lexically_normal(),forbidden,visited);
+    }
+}
 void run(const std::filesystem::path& root,const std::string& policy) {
     const auto overlay=read(root/"src/overlay.cpp");
-    if(policy=="update_consent_policy") {
+    if(policy=="architecture_boundaries") {
+        const std::string collectors=R"((^|/)(sampler\.hpp|[^/]*collector\.hpp|cpu_topology_reader\.hpp|intel_dts\.hpp|temperatures\.hpp|disk_temperature\.hpp)$)";
+        const std::string platform=R"((^|/)(pdh(msg)?|evntrace|evntcons|tdh|d3dkmthk|wbemidl|winioctl|winsqlite3|sqlite3)\.h$)";
+        const std::regex ui(collectors+"|"+platform,std::regex_constants::icase);
+        const std::regex core(collectors+"|"+platform+R"(|(^|/)(windows|windowsx|commctrl|d2d1|dwrite)\.h$)",std::regex_constants::icase);
+        std::set<std::filesystem::path> visited;
+        for(const auto* file:{"include/fluxtop/model.hpp","include/fluxtop/sampling_worker.hpp",
+            "src/model.cpp","src/output.cpp","src/temperature_selection.cpp"})check_includes(root,file,core,visited);
+        visited.clear();
+        for(const auto* file:{"src/overlay.cpp","src/statistics_page.cpp"})check_includes(root,file,ui,visited);
+    } else if(policy=="update_consent_policy") {
         const auto launcher=read(root/"src/launcher.cpp");
         const auto resource=read(root/"src/launcher.rc.in");
         absent(launcher,{"if (!prepare && fluxtop::try_release_update("});
@@ -68,7 +94,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         need(collector,{"status != 0 && status != 7","status == 6","PresentMonAPI2Loader.dll",
             "std::optional<double> best;"});
         absent(collector,{"status != 0 && status != 8"});
-        need(sampler,{"fps_.collect(snapshot.processes, fps_targets_)"});
+        need(sampler,{"fps_->collect(snapshot.processes, fps_targets_)","if(fps_targets_.empty())fps_.reset()"});
     } else if(policy=="statistics_policy") {
         const auto history=read(root/"src/history.cpp");
         const auto math=read(root/"include/fluxtop/history_math.hpp");

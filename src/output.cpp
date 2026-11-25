@@ -148,7 +148,7 @@ void write_jsonl(std::ostream& out, const Snapshot& s, unsigned top) {
     out << ",\"cpu_temperature_board\":" << ((valid_cpu && s.cpu_temperature_board)
         ? "true" : "false");
     // v50: additional fields, preserving legacy cpu_temperature_c/source fields.
-    const auto& cpu_cores=s.intel_core_temperatures;
+    const auto& cpu_cores=s.cpu_topology;
     out << ",\"cpu_core_max_c\":"; measured(out,cpu_cores.core_max_c);
     out << ",\"cpu_core_average_c\":"; measured(out,cpu_cores.core_average_c);
     out << ",\"cpu_physical_core_count\":" << cpu_cores.physical_cores

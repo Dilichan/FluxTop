@@ -13,7 +13,7 @@ Snapshot sample(std::int64_t at){
     s.total_gpu_memory=25;s.total_gpu_memory_capacity=100;
     s.total_rx_bytes_per_second=125000;s.total_tx_bytes_per_second=125000;
     s.disks={{L'C',35,45}};
-    s.intel_core_temperatures.cores={{0,0,0,true,61,2,false}};
+    s.cpu_topology.cores={{0,0,0,true,61,2,false}};
     s.cpu_logical_usage={{0,0,0,true,40},{0,1,0,true,60}};return s;
 }
 }

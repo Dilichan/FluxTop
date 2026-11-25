@@ -7,7 +7,8 @@
 #include "fluxtop/statistics_page.hpp"
 #include "fluxtop/app_icons.hpp"
 #include "fluxtop/autostart.hpp"
-#include "fluxtop/sampler.hpp"
+#include "fluxtop/history.hpp"
+#include "fluxtop/sampling_worker.hpp"
 #include "fluxtop/windows.hpp"
 #include "fluxtop/metric_text.hpp"
 #include "fluxtop/overlay_ini.hpp"
@@ -331,7 +332,7 @@ void Overlay::load_settings() {
         options_.top = static_cast<unsigned>(std::clamp(read(L"top", 10), 1, 100));
     }
     if (!options_.sort_explicit) options_.sort = static_cast<Sort>(std::clamp(read(L"sort", 0), 0, 7));
-    if (!options_.gpu && (options_.sort == Sort::gpu || options_.sort == Sort::vram)) options_.sort = Sort::cpu;
+    if (!options_.collectors.gpu && (options_.sort == Sort::gpu || options_.sort == Sort::vram)) options_.sort = Sort::cpu;
 }
 void Overlay::save_settings() noexcept {
     if (settings_.empty() || !hwnd_) return;
@@ -381,13 +382,13 @@ std::vector<wchar_t> Overlay::enabled_disk_letters() const {
     return result;
 }
 void Overlay::cpu_settings_changed(){
-    if(snapshot_)cpu_columns_=cpu_view_columns(cpu_view_,snapshot_->intel_core_temperatures);
+    if(snapshot_)cpu_columns_=cpu_view_columns(cpu_view_,snapshot_->cpu_topology);
     if(statistics_)statistics_->set_cpu_view(cpu_view_);
     clear_row_images();update_view();save_settings();fit_table();InvalidateRect(hwnd_,nullptr,FALSE);
 }
 void Overlay::refresh_cpu_controls(bool force){
     if(!cpu_label_ || !snapshot_)return;
-    const auto& topology=snapshot_->intel_core_temperatures;
+    const auto& topology=snapshot_->cpu_topology;
     std::vector<CpuViewId> detected;for(const auto& core:topology.cores)detected.push_back({core.group,core.core_id});
     if(!force && detected==cpu_topology_ids_)return;
     cpu_topology_ids_=std::move(detected);
@@ -711,7 +712,7 @@ void Overlay::apply_client() {
     if (top >= 1 && top <= 100) options_.top = static_cast<unsigned>(top);
     if (selected_font >= 5 && selected_font <= 42) options_.font_size = static_cast<unsigned>(selected_font);
     const auto new_sort = sort_ui_values[static_cast<std::size_t>(selected_sort)];
-    if (options_.gpu || (new_sort != Sort::gpu && new_sort != Sort::vram)) options_.sort = new_sort;
+    if (options_.collectors.gpu || (new_sort != Sort::gpu && new_sort != Sort::vram)) options_.sort = new_sort;
     else SendDlgItemMessageW(client_, sort_control, CB_SETCURSEL, static_cast<WPARAM>(sort_ui_index(options_.sort)), 0);
     if (seconds >= 1 && seconds <= 10 && seconds*1000 != options_.interval_ms) {
         options_.interval_ms = static_cast<unsigned>(seconds*1000); worker_.set_interval(options_.interval_ms);
@@ -809,7 +810,7 @@ void Overlay::receive() {
     if (received_snapshot && snapshot_) {
         graph_history_->append(*snapshot_,GetTickCount64(),std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
-        const auto updated_cpu_columns=cpu_view_columns(cpu_view_,snapshot_->intel_core_temperatures);
+        const auto updated_cpu_columns=cpu_view_columns(cpu_view_,snapshot_->cpu_topology);
         if(updated_cpu_columns!=cpu_columns_){cpu_columns_=updated_cpu_columns;clear_row_images();if(hwnd_)fit_table();}
         refresh_cpu_controls();
         std::vector<wchar_t> detected;
@@ -917,7 +918,7 @@ void Overlay::update_view() {
             network_rate(p.rx_bytes_per_second,p.tx_bytes_per_second),
             p.disk_read_bytes_per_second,p.disk_write_bytes_per_second,
             p.disk_volume_bytes_per_second,loads,{}});
-        for(const auto& column:cpu_columns_)next.back().logical_cpu.push_back(cpu_application_core_load(p.cpu_execution,column.id,s.intel_core_temperatures));
+        for(const auto& column:cpu_columns_)next.back().logical_cpu.push_back(cpu_application_core_load(p.cpu_execution,column.id,s.cpu_topology));
     }
     // A single PresentMon target: the actual foreground window, regardless of table sorting.
     std::vector<std::uint32_t> fps_targets;

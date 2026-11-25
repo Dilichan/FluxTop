@@ -107,7 +107,6 @@ void FpsCollector::collect(std::vector<Process>& processes,
         return;
     }
     try {
-        if (!connect()) return;
         std::unordered_map<std::uint32_t, Process*> processes_by_pid;
         processes_by_pid.reserve(processes.size());
         for (auto& row : processes) processes_by_pid.emplace(row.pid, &row);
@@ -122,6 +121,12 @@ void FpsCollector::collect(std::vector<Process>& processes,
                 it != processes_by_pid.end() && it->second->creation_time && it->second->has_baseline)
                 desired.emplace(pid, it->second);
         }
+        if(desired.empty()) {
+            if(session_) { disconnect(); next_connect_attempt_=0; }
+            retry_after_.clear();
+            return;
+        }
+        if(!connect())return;
         for (auto it = tracked_.begin(); it != tracked_.end();) {
             const auto wanted = desired.find(it->first);
             if (wanted == desired.end() || it->second != wanted->second->creation_time) {

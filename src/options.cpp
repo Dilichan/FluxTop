@@ -11,8 +11,8 @@ Options parse_options(std::span<const std::string_view> args) {
         const auto arg = args[i];
         if (arg == "--help" || arg == "-h") options.help = true;
         else if (arg == "--version") options.version = true;
-        else if (arg == "--no-gpu") options.gpu = false;
-        else if (arg == "--no-network") options.network = false;
+        else if (arg == "--no-gpu") options.collectors.gpu = false;
+        else if (arg == "--no-network") options.collectors.network = false;
         else if (arg == "--jsonl") options.jsonl = true;
         else if (arg == "--overlay") options.overlay = true;
         else if (arg == "--tray") options.tray = true;
@@ -48,7 +48,7 @@ Options parse_options(std::span<const std::string_view> args) {
             }
         } else throw std::invalid_argument("Unknown option: " + std::string(arg));
     }
-    if (!options.gpu && (options.sort == Sort::gpu || options.sort == Sort::vram))
+    if (!options.collectors.gpu && (options.sort == Sort::gpu || options.sort == Sort::vram))
         throw std::invalid_argument("GPU sorting requires the GPU collector");
     if (options.overlay && options.jsonl) throw std::invalid_argument("Overlay and JSONL are separate modes");
     if (options.tray && !options.overlay) throw std::invalid_argument("--tray requires --overlay");

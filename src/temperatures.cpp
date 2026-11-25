@@ -4,8 +4,8 @@
 #include "fluxtop/diagnostics.hpp"
 #include <wbemidl.h>
 #include <wrl/client.h>
-#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cwctype>
 #include <thread>
 #include <windows.h>
@@ -230,8 +230,8 @@ std::optional<double> wmi_number(IWbemClassObject* obj, const wchar_t* property)
     VariantClear(&value);
     return result;
 }
-struct CpuReading { double celsius{}; bool board{}; unsigned source{}; ULONGLONG sampled_tick{}; };
-std::optional<CpuReading> read_wmi_cpu_namespace(IWbemLocator* locator, const wchar_t* name, unsigned source) {
+std::optional<CpuTemperatureCandidate> read_wmi_cpu_namespace(IWbemLocator* locator, const wchar_t* name,
+    CpuTemperatureProvider provider) {
     ScopedBstr scope(name), language(L"WQL");
     ScopedBstr sql(L"SELECT Name, Identifier, Value FROM Sensor WHERE SensorType='Temperature'");
     if (!scope.value || !language.value || !sql.value) return std::nullopt;
@@ -263,14 +263,14 @@ std::optional<CpuReading> read_wmi_cpu_namespace(IWbemLocator* locator, const wc
         const int board_priority=motherboard_cpu_sensor_priority(*identifier,*label);
         if (board_priority>best_board_priority) { best_board_priority=board_priority; best_board=*temp; }
     }
-    if(best) return CpuReading{*best,false,source};
-    if(best_board) return CpuReading{*best_board,true,source};
+    if(best) return CpuTemperatureCandidate{provider,CpuTemperatureKind::die,best};
+    if(best_board) return CpuTemperatureCandidate{provider,CpuTemperatureKind::board,best_board};
     return std::nullopt;
 }
 
 // ACPI zones are firmware-defined; accept only zones whose identifiers explicitly
 // reference CPU/processor. Unknown TZ00/TZ01 and platform zones are not CPU sensors.
-std::optional<CpuReading> read_acpi_cpu_zone(IWbemLocator* locator) {
+std::optional<CpuTemperatureCandidate> read_acpi_cpu_zone(IWbemLocator* locator) {
     ScopedBstr scope(L"ROOT\\WMI"), language(L"WQL");
     ScopedBstr sql(L"SELECT InstanceName, CurrentTemperature FROM MSAcpi_ThermalZoneTemperature");
     if(!scope.value || !language.value || !sql.value) return std::nullopt;
@@ -295,11 +295,11 @@ std::optional<CpuReading> read_acpi_cpu_zone(IWbemLocator* locator) {
         if(!acpi_cpu_zone_candidate(label))continue;
         const double celsius=*raw_temp/10.0-273.15; // ACPI stores 0.1 kelvin.
         if(cpu_temperature_valid(celsius))
-            return CpuReading{celsius,true,3};
+            return CpuTemperatureCandidate{CpuTemperatureProvider::acpi,CpuTemperatureKind::acpi,celsius};
     }
     return std::nullopt;
 }
-std::optional<CpuReading> read_wmi_cpu() {
+std::optional<CpuTemperatureCandidate> read_wmi_cpu() {
     const HRESULT init=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
     if (FAILED(init)) return std::nullopt;
     struct Uninit { ~Uninit() { CoUninitialize(); } } uninit;
@@ -307,10 +307,10 @@ std::optional<CpuReading> read_wmi_cpu() {
     if (FAILED(CoCreateInstance(CLSID_WbemLocator,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&locator))))
         return std::nullopt;
     // Prefer CPU die/package regardless of provider. Board CPU zone is fallback.
-    const auto libre=read_wmi_cpu_namespace(locator.Get(),L"ROOT\\LibreHardwareMonitor",1);
-    if(libre && !libre->board) return libre;
-    const auto open=read_wmi_cpu_namespace(locator.Get(),L"ROOT\\OpenHardwareMonitor",2);
-    if(open && !open->board) return open;
+    const auto libre=read_wmi_cpu_namespace(locator.Get(),L"ROOT\\LibreHardwareMonitor",CpuTemperatureProvider::libre_wmi);
+    if(libre && libre->kind==CpuTemperatureKind::die) return libre;
+    const auto open=read_wmi_cpu_namespace(locator.Get(),L"ROOT\\OpenHardwareMonitor",CpuTemperatureProvider::open_wmi);
+    if(open && open->kind==CpuTemperatureKind::die) return open;
     if(libre) return libre;
     if(open) return open;
     return read_acpi_cpu_zone(locator.Get());
@@ -320,66 +320,58 @@ std::optional<CpuReading> read_wmi_cpu() {
 // A cached value expires after 20 seconds, so stopped providers cannot leave a frozen temperature.
 class WmiCpuCache {
 public:
-    WmiCpuCache() : worker_([this](std::stop_token stop){ loop(stop); }) {}
-    std::optional<CpuReading> latest() const {
-        const auto sample=last_ms_.load(std::memory_order_acquire);
-        if (!sample || GetTickCount64()-sample>20000) return std::nullopt;
-        const auto value=celsius_.load(std::memory_order_relaxed);
-        if (!std::isfinite(value)) return std::nullopt;
-        return CpuReading{value,board_.load(std::memory_order_relaxed),source_.load(std::memory_order_relaxed),sample};
+    std::optional<CpuTemperatureCandidate> latest(bool needed) {
+        std::lock_guard lock(mutex_);
+        if(needed && !worker_.joinable())worker_=std::jthread([this](std::stop_token stop){loop(stop);});
+        if(needed!=needed_) {
+            needed_=needed;
+            ++revision_;
+            wake_.notify_all();
+        }
+        return latest_;
     }
 private:
     void loop(std::stop_token stop) {
         using namespace std::chrono_literals;
-        while (!stop.stop_requested()) {
-            const auto value=read_wmi_cpu();
-            if (value) {
-                celsius_.store(value->celsius,std::memory_order_relaxed);
-                board_.store(value->board,std::memory_order_relaxed);
-                source_.store(value->source,std::memory_order_relaxed);
-                last_ms_.store(GetTickCount64(),std::memory_order_release);
-            } else last_ms_.store(0,std::memory_order_release);
-            const unsigned ticks=value ? 10U : 40U; // 5s when active, 20s probing fallback.
-            for (unsigned i=0; i<ticks && !stop.stop_requested(); ++i)
-                std::this_thread::sleep_for(500ms);
+        std::unique_lock lock(mutex_);
+        while(wake_.wait(lock,stop,[this]{return needed_;}) && !stop.stop_requested()) {
+            const auto revision=revision_;
+            lock.unlock();
+            auto value=read_wmi_cpu();
+            if(value)value->sampled_tick=GetTickCount64();
+            lock.lock();
+            latest_=value;
+            // Retry missing namespaces slowly; changes in demand wake the worker.
+            wake_.wait_for(lock,stop,value?5s:20s,[&]{return revision_!=revision;});
         }
     }
-    std::atomic<double> celsius_{0.0};
-    std::atomic<bool> board_{false};
-    std::atomic<unsigned> source_{0};
-    std::atomic<ULONGLONG> last_ms_{0};
+    std::mutex mutex_;
+    std::condition_variable_any wake_;
+    std::optional<CpuTemperatureCandidate> latest_;
+    bool needed_{};
+    unsigned revision_{};
     std::jthread worker_;
 };
 } // namespace
 
 // FluxTop temperature arbitration v49: the sampler consumes cached values only.
 // One native Intel DTS reader and one WMI worker; no driver calls from UI.
-HardwareTemperatures read_hardware_temperatures() {
-    static WmiCpuCache cpu_wmi; // Warm fallback, even while Intel DTS is working.
-    static CpuTemperatureSelector selector;
+HardwareTemperatures read_hardware_temperatures(CpuTemperatureSelector& selector) {
+    static WmiCpuCache cpu_wmi;
     auto result=read_hwinfo_temperatures();
-    const auto dts=read_intel_dts();
-    result.intel_cores=dts;
-    const auto wmi=cpu_wmi.latest();
+    result.intel_cores=read_intel_dts();
+    const auto& dts=result.intel_cores;
     const auto now=static_cast<std::uint64_t>(GetTickCount64());
-    std::array<CpuTemperatureCandidate,3> candidates{};
-    std::size_t count=0;
-    if(dts.package_c){
-        candidates[count++]={CpuTemperatureProvider::intel_dts,CpuTemperatureKind::package,
-            dts.package_c,dts.sampled_tick};
-    }
-    if(result.cpu_c){
-        candidates[count++]={CpuTemperatureProvider::hwinfo,result.cpu_kind,
-            result.cpu_c,result.cpu_sampled_tick};
-    }
-    if(wmi){
-        candidates[count++]={wmi->source==1?CpuTemperatureProvider::libre_wmi:
-            wmi->source==2?CpuTemperatureProvider::open_wmi:CpuTemperatureProvider::acpi,
-            wmi->source==3?CpuTemperatureKind::acpi:
-                wmi->board?CpuTemperatureKind::board:CpuTemperatureKind::die,
-            wmi->celsius,wmi->sampled_tick};
-    }
-    const auto chosen=selector.select(candidates.data(),count,now);
+    std::array candidates{
+        CpuTemperatureCandidate{CpuTemperatureProvider::intel_dts,CpuTemperatureKind::package,dts.package_c,dts.sampled_tick},
+        CpuTemperatureCandidate{CpuTemperatureProvider::hwinfo,result.cpu_kind,result.cpu_c,result.cpu_sampled_tick},
+        CpuTemperatureCandidate{} // WMI fallback.
+    };
+    const auto preferred_started_at=dts.status=="initializing"?dts.sampled_tick:0;
+    const auto primary=std::span{candidates}.first(candidates.size()-1);
+    const auto needs_wmi=cpu_temperature_needs_wmi(primary,now,preferred_started_at);
+    if(const auto wmi=cpu_wmi.latest(needs_wmi))candidates.back()=*wmi;
+    const auto chosen=selector.select(candidates,GetTickCount64());
     result.cpu_c=chosen.celsius;
     result.cpu_kind=chosen.kind;
     result.cpu_sampled_tick=chosen.sampled_tick;

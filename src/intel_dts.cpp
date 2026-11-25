@@ -1,4 +1,5 @@
 #include "fluxtop/intel_dts.hpp"
+#include "fluxtop/cpu_topology_reader.hpp"
 #include <windows.h>
 #include <intrin.h>
 #include <algorithm>
@@ -15,7 +16,7 @@
 
 namespace fluxtop {
 // A missing core is represented by nullopt. Never include it in aggregates.
-void intel_dts_finalize(IntelDtsSnapshot& sample) noexcept {
+void intel_dts_finalize(CpuTopologySnapshot& sample) noexcept {
     sample.physical_cores=static_cast<unsigned>(sample.cores.size());
     sample.available_cores=0;
     sample.core_max_c.reset();
@@ -34,7 +35,7 @@ void intel_dts_finalize(IntelDtsSnapshot& sample) noexcept {
     sample.partial=sample.physical_cores==0 ||
         sample.available_cores<sample.physical_cores || !sample.package_c;
 }
-void intel_dts_invalidate(IntelDtsSnapshot& sample) noexcept {
+void intel_dts_invalidate(CpuTopologySnapshot& sample) noexcept {
     sample.package_c.reset();
     for(auto& core:sample.cores) core.celsius.reset();
     sample.driver_ready=false;
@@ -56,7 +57,6 @@ constexpr std::uint64_t temperature_target=0x1A2;
 constexpr std::uint64_t package_thermal_status=0x1B1;
 constexpr std::uint64_t thermal_status=0x19C;
 constexpr std::uint64_t max_age_ms=30000;
-struct LogicalCore { WORD group{}; KAFFINITY mask{}; unsigned logical{}; unsigned core{}; unsigned siblings{}; bool performance{}; };
 struct WinHandle {
     HANDLE h{INVALID_HANDLE_VALUE};
     ~WinHandle(){if(h!=INVALID_HANDLE_VALUE)CloseHandle(h);}
@@ -95,89 +95,13 @@ bool read_msr(HANDLE handle,std::uint64_t index,std::uint64_t& value){
     return DeviceIoControl(handle,execute_function,input.data(),static_cast<DWORD>(input.size()),
         &value,sizeof(value),&returned,nullptr)!=FALSE && returned==sizeof(value);
 }
-bool intel_processor(){
-    int data[4]{};
-    __cpuid(data,0);
-    return static_cast<unsigned>(data[1])==0x756e6547U &&
-        static_cast<unsigned>(data[3])==0x49656e69U &&
-        static_cast<unsigned>(data[2])==0x6c65746eU;
+bool supports_current_cpu() noexcept {
+    const auto vendor=read_cpu_vendor();
+    return intel_dts_supports_vendor({vendor.data(),vendor.size()});
 }
-std::vector<LogicalCore> cpu_topology(){
-    DWORD bytes=0;
-    GetLogicalProcessorInformationEx(RelationProcessorCore,nullptr,&bytes);
-    if(!bytes || bytes>1024*1024)return {};
-    std::vector<std::uint8_t> blob(bytes);
-    if(!GetLogicalProcessorInformationEx(RelationProcessorCore,
-        reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(blob.data()),&bytes))return {};
-    std::vector<LogicalCore> result;
-    BYTE maximum_class=0;
-    for(DWORD pos=0;pos+sizeof(ULONG)*2<=bytes;) {
-        const auto* item=reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(blob.data()+pos);
-        if(item->Size<sizeof(ULONG)*2 || item->Size>bytes-pos)break;
-        if(item->Relationship==RelationProcessorCore)maximum_class=std::max(maximum_class,item->Processor.EfficiencyClass);
-        pos+=item->Size;
-    }
-    unsigned core_id=0;
-    for(DWORD pos=0;pos+sizeof(ULONG)*2<=bytes;){
-        const auto* item=reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(blob.data()+pos);
-        if(item->Size<sizeof(ULONG)*2 || item->Size>bytes-pos)break;
-        if(item->Relationship==RelationProcessorCore){
-            unsigned siblings=0;
-            for(WORD gi=0;gi<item->Processor.GroupCount;++gi) {
-                const KAFFINITY mask=item->Processor.GroupMask[gi].Mask;
-                for(unsigned bit=0;bit<sizeof(KAFFINITY)*8;++bit)
-                    if(mask&(static_cast<KAFFINITY>(1)<<bit))++siblings;
-            }
-            for(WORD gi=0;gi<item->Processor.GroupCount;++gi){
-                const GROUP_AFFINITY ga=item->Processor.GroupMask[gi];
-                for(unsigned bit=0;bit<sizeof(KAFFINITY)*8;++bit){
-                    KAFFINITY mask=static_cast<KAFFINITY>(1)<<bit;
-                    if(ga.Mask&mask)result.push_back({ga.Group,mask,bit,core_id,
-                        siblings,item->Processor.EfficiencyClass==maximum_class});
-                }
-            }
-            ++core_id;
-        }
-        pos+=item->Size;
-    }
-    return result;
-}
-} // namespace
-IntelDtsSnapshot intel_dts_topology_snapshot(){
-    IntelDtsSnapshot sample;
-    int limits[4]{};__cpuid(limits,static_cast<int>(0x80000000U));
-    if(static_cast<unsigned>(limits[0])>=0x80000004U) {
-        char name[49]{};
-        for(unsigned leaf=0;leaf<3;++leaf){int part[4]{};__cpuid(part,static_cast<int>(0x80000002U+leaf));
-            std::memcpy(name+leaf*16,part,16);}
-        for(const char c:std::string_view(name))sample.cpu_name+=static_cast<wchar_t>(static_cast<unsigned char>(c));
-        const auto first=sample.cpu_name.find_first_not_of(L' ');
-        if(first!=sample.cpu_name.npos)sample.cpu_name.erase(0,first);
-    }
-    const auto topology=cpu_topology();
-    sample.logical_processors=static_cast<unsigned>(topology.size());
-    for(const auto& logical:topology)
-        sample.logical_members.push_back({logical.group,logical.logical,logical.core,logical.performance});
-    unsigned previous_core=~0U;
-    for(const auto& logical:topology){
-        if(logical.core==previous_core)continue;
-        previous_core=logical.core;
-        sample.cores.push_back({logical.group,logical.logical,logical.core,
-            logical.performance,std::nullopt,logical.siblings,true});
-    }
-    sample.status=sample.cores.empty()?"topology-unavailable":"driver-unavailable";
-    sample.sampled_tick=GetTickCount64();
-    intel_dts_finalize(sample);
-    return sample;
-}
-namespace {
-IntelDtsSnapshot poll(){
-    IntelDtsSnapshot sample=intel_dts_topology_snapshot();
+CpuTopologySnapshot poll(){
+    CpuTopologySnapshot sample=read_cpu_topology();
     if(sample.physical_cores==0)return sample;
-    if(!intel_processor()){
-        sample.status="unsupported-cpu";
-        return sample;
-    }
     WinHandle device;
     device.h=CreateFileW(L"\\\\?\\GLOBALROOT\\Device\\PawnIO",GENERIC_READ|GENERIC_WRITE,
         FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
@@ -191,25 +115,14 @@ IntelDtsSnapshot poll(){
     }
     sample.driver_ready=true;
     sample.status="partial";
-    auto topology=cpu_topology();
-    if(topology.empty()){
-        sample.status="topology-unavailable";
-        return sample;
-    }
     // Package reading uses one representative logical processor. Each physical
     // core reads its own register using the first logical processor in that core.
     GROUP_AFFINITY prior{};
     bool package_read=false;
-    unsigned previous_core=~0U;
-    std::size_t core_index=0;
-    for(const auto& logical:topology){
-        if(logical.core==previous_core)continue;
-        previous_core=logical.core;
-        if(core_index>=sample.cores.size())break;
-        auto& current=sample.cores[core_index++];
+    for(auto& current:sample.cores){
         GROUP_AFFINITY target{};
-        target.Group=logical.group;
-        target.Mask=logical.mask;
+        target.Group=static_cast<WORD>(current.group);
+        target.Mask=static_cast<KAFFINITY>(1)<<current.logical;
         if(!SetThreadGroupAffinity(GetCurrentThread(),&target,&prior))continue;
         int cpuid[4]{};
         __cpuidex(cpuid,0x1A,0);
@@ -227,7 +140,7 @@ IntelDtsSnapshot poll(){
         // Core type 0x20 means Atom/E-core, 0x40 Core/P-core; Windows
         // EfficiencyClass is a fallback only on CPUs not exposing CPUID 0x1A.
         const bool hybrid_known=core_type==0x20 || core_type==0x40;
-        current.performance=hybrid_known?performance:logical.performance;
+        if(hybrid_known)current.performance=performance;
         current.celsius=target_ok && core_ok?intel_dts_decode(tj,core_raw):std::nullopt;
         current.sensor_independent_unverified=core_type==0x20;
     }
@@ -238,12 +151,25 @@ IntelDtsSnapshot poll(){
 }
 class CachedIntelDts {
 public:
-    CachedIntelDts():last_(intel_dts_topology_snapshot()),
-        worker_([this](std::stop_token stop){run(stop);}){}
-    IntelDtsSnapshot read() noexcept {
+    CachedIntelDts():last_(read_cpu_topology()),supported_(supports_current_cpu()) {
+        if(supported_) {
+            if(last_.physical_cores)last_.status="initializing";
+            worker_=std::jthread([this](std::stop_token stop){run(stop);});
+        }
+        else last_.status="unsupported-cpu";
+    }
+    CpuTopologySnapshot read() noexcept {
         std::lock_guard guard(mutex_);
-        auto result=last_;
         const auto now=GetTickCount64();
+        if(!supported_) {
+            // Keep the shared Windows topology current without a DTS polling thread.
+            if(now-last_.sampled_tick>=10'000) {
+                last_=read_cpu_topology();
+                last_.status="unsupported-cpu";
+            }
+            return last_;
+        }
+        auto result=last_;
         if(!result.sampled_tick || now<result.sampled_tick || now-result.sampled_tick>max_age_ms){
             intel_dts_invalidate(result);
             result.status="stale";
@@ -260,11 +186,12 @@ private:
         }
     }
     std::mutex mutex_;
-    IntelDtsSnapshot last_;
+    CpuTopologySnapshot last_;
+    bool supported_;
     std::jthread worker_;
 };
 } // namespace
-IntelDtsSnapshot read_intel_dts() noexcept {
+CpuTopologySnapshot read_intel_dts() noexcept {
     static CachedIntelDts cache;
     return cache.read();
 }

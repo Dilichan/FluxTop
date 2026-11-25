@@ -1,11 +1,17 @@
 #include "fluxtop/intel_dts.hpp"
+#include "fluxtop/cpu_topology_reader.hpp"
+#include <algorithm>
 #include <iostream>
 #include <cmath>
+#include <set>
 int main(){
     using namespace fluxtop;
+    static_assert(intel_dts_supports_vendor("GenuineIntel"));
+    static_assert(!intel_dts_supports_vendor("AuthenticAMD"));
+    static_assert(!intel_dts_supports_vendor(""));
     int failures=0;
     auto check=[&](bool ok,const char* what){if(!ok){std::cerr<<what<<'\n';++failures;}};
-    IntelDtsSnapshot sample;
+    CpuTopologySnapshot sample;
     sample.logical_processors=5;
     sample.package_c=68.0;
     sample.cores={
@@ -32,13 +38,24 @@ int main(){
     check(sample.available_cores==2,"equal temperatures do not mean duplicate sensor");
     check(sample.cores[2].sensor_independent_unverified && !sample.cores[0].sensor_independent_unverified,
         "E-core independence qualification preserved");
-    auto topology=intel_dts_topology_snapshot();
+    auto topology=read_cpu_topology();
     check(topology.physical_cores>0 && topology.logical_processors>=topology.physical_cores,
         "Windows topology exists without opening PawnIO");
     check(topology.cores.size()==topology.physical_cores,
         "one distinct entry per physical core without driver");
     check(topology.available_cores==0 && !topology.package_c && topology.partial,
         "topology snapshot does not fabricate temperatures");
+    std::set<std::pair<unsigned,unsigned>> logical_ids;
+    for(const auto& logical:topology.logical_members) {
+        check(logical_ids.emplace(logical.group,logical.number).second && logical.number<64,
+            "logical processors have unique group-local identities");
+    }
+    for(const auto& core:topology.cores) {
+        const auto siblings=std::count_if(topology.logical_members.begin(),topology.logical_members.end(),
+            [&](const auto& logical){return logical.core_id==core.core_id;});
+        check(siblings==core.logical_siblings && logical_ids.contains({core.group,core.logical}),
+            "physical core and temperature reader use the same representative and sibling count");
+    }
     intel_dts_invalidate(sample);
     check(sample.physical_cores==3 && sample.logical_processors==5 &&
         sample.available_cores==0 && sample.partial,

@@ -52,7 +52,7 @@ void save_cpu_view(const CpuViewSettings& settings,const CpuSettingWrite& write)
     }
     write(L"cpu_view_core_columns",text);
 }
-std::vector<CpuViewColumn> cpu_view_columns(const CpuViewSettings& settings,const IntelDtsSnapshot& topology){
+std::vector<CpuViewColumn> cpu_view_columns(const CpuViewSettings& settings,const CpuTopologySnapshot& topology){
     std::vector<CpuViewColumn> result;
     for(const auto& column:settings.columns)if(column.visible && result.size()<CpuViewSettings::column_limit &&
         std::any_of(topology.cores.begin(),topology.cores.end(),[&](const auto& cpu){return column.id==CpuViewId{cpu.group,cpu.core_id};}))result.push_back(column);
@@ -63,7 +63,7 @@ std::optional<double> cpu_application_load(const CpuProcessExecution& execution,
     for(const auto& cpu:execution.logical)if(id==CpuViewId{cpu.group,cpu.number})return cpu_logical_percent(cpu.percent.value_or(-1));
     return {};
 }
-std::wstring cpu_core_label(const IntelCoreTemperature& core,std::span<const IntelCoreTemperature> topology){
+std::wstring cpu_core_label(const CpuCoreTemperature& core,std::span<const CpuCoreTemperature> topology){
     unsigned ordinal=0;
     for(const auto& entry:topology){
         if(entry.performance==core.performance)++ordinal;
@@ -72,7 +72,7 @@ std::wstring cpu_core_label(const IntelCoreTemperature& core,std::span<const Int
     return std::wstring(core.performance?L"P-Core ":L"E-Core ")+std::to_wstring(ordinal);
 }
 CpuChartSample cpu_chart_sample(const Snapshot& snapshot,std::uint64_t collection_tick,std::optional<std::int64_t> collection_time_ms){
-    CpuChartSample sample;const auto& cores=snapshot.intel_core_temperatures;
+    CpuChartSample sample;const auto& cores=snapshot.cpu_topology;
     sample.name=cores.cpu_name;sample.logical=snapshot.cpu_logical_usage;sample.cores=cores.cores;
     // Use the same selected CPU sensor as the sidebar and system details.
     sample.package=snapshot.cpu_temperature_c?snapshot.cpu_temperature_c:cores.package_c;
@@ -106,7 +106,7 @@ std::vector<CpuChartSeries> cpu_core_chart_series(const CpuChartSample& sample,C
     }
     return result;
 }
-std::optional<double> cpu_application_core_load(const CpuProcessExecution& execution,CpuViewId id,const IntelDtsSnapshot& topology){
+std::optional<double> cpu_application_core_load(const CpuProcessExecution& execution,CpuViewId id,const CpuTopologySnapshot& topology){
     unsigned expected{};for(const auto& core:topology.cores)if(id==CpuViewId{core.group,core.core_id})expected=core.logical_siblings;
     double sum=0;unsigned count=0;
     for(const auto& cpu:topology.logical_members)if(cpu.group==id.group && cpu.core_id==id.number){

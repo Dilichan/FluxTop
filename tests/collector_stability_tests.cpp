@@ -48,7 +48,7 @@ int wmain(int argc,wchar_t** argv){try{
     DWORD baseline{};std::uint64_t previous_time{};bool own_cpu=false,cpu_etw=false,disk=false,network=false;
     {Workload load(root/L"workload.bin");
     for(unsigned cycle=0;cycle<3;++cycle){
-        {fluxtop::Sampler sampler(true,true,true);sampler.set_fps_targets({GetCurrentProcessId()});
+        {fluxtop::Sampler sampler({.fps=true});sampler.set_fps_targets({GetCurrentProcessId()});
             for(unsigned i=0;i<samples;++i){std::this_thread::sleep_for(500ms);const auto s=sampler.collect();
                 need(s.elevated.value_or(false),"all collectors run elevated");need(!s.processes.empty() && s.logical_processors>0,"process list and CPU topology");
                 need(s.timestamp_ms>static_cast<std::int64_t>(previous_time),"measurement timestamps advance");previous_time=static_cast<std::uint64_t>(s.timestamp_ms);
@@ -65,12 +65,24 @@ int wmain(int argc,wchar_t** argv){try{
                 network=network || s.network_status=="ready";
                 std::ostringstream json;fluxtop::write_jsonl(json,s,100);need(json.str().find("\"processes\"")!=std::string::npos,"live JSONL remains serializable");
                 if(i==samples-1){unsigned fps_known{};for(const auto& p:s.processes)if(p.presented_fps)++fps_known;
-                    std::cout<<"cycle="<<cycle<<" cpu_etw="<<s.cpu_execution_status<<" disk="<<s.disk_io_status<<" network="<<s.network_status<<" gpu="<<s.gpu_status<<" temperature="<<s.cpu_temperature_source<<" dts="<<s.intel_core_temperatures.status<<" cores_available="<<s.intel_core_temperatures.available_cores<<" fps_known="<<fps_known<<" working_set="<<s.self_working_set.value_or(0)<<" handles="<<s.self_handles.value_or(0)<<'\n';}
+                    std::cout<<"cycle="<<cycle<<" cpu_etw="<<s.cpu_execution_status<<" disk="<<s.disk_io_status<<" network="<<s.network_status<<" gpu="<<s.gpu_status<<" temperature="<<s.cpu_temperature_source<<" dts="<<s.cpu_topology.status<<" cores_available="<<s.cpu_topology.available_cores<<" fps_known="<<fps_known<<" working_set="<<s.self_working_set.value_or(0)<<" handles="<<s.self_handles.value_or(0)<<'\n';}
             }}
         std::this_thread::sleep_for(200ms);DWORD handles{};need(GetProcessHandleCount(GetCurrentProcess(),&handles)!=FALSE,"handle count");
         if(cycle==0)baseline=handles;else need(handles<=baseline+8,"collector restart leaks handles");
     }
     need(!load.failed,"owned network/disk workload failed");need(own_cpu && cpu_etw && disk && network,"CPU, disk and network must become operational together");}
+    {
+        fluxtop::Sampler sampler({.gpu=false,.network=false});
+        sampler.set_fps_targets({GetCurrentProcessId()});
+        const auto snapshot=sampler.collect();
+        need(snapshot.gpu_status=="disabled" && !snapshot.total_gpu_percent && !snapshot.total_gpu_memory,
+            "disabled GPU block has no utilization or memory readings");
+        need(snapshot.network_status=="disabled" && !snapshot.total_rx_bytes_per_second && !snapshot.total_tx_bytes_per_second,
+            "disabled network block has no traffic readings");
+        need(!snapshot.processes.empty() && snapshot.total_ram_used && snapshot.history_error.empty(),
+            "process collection and history continue with optional blocks disabled");
+        for(const auto& row:snapshot.processes)need(!row.presented_fps,"console sampler does not collect FPS");
+    }
     std::filesystem::remove_all(root);
     std::cout<<"Joint collector lifecycle passed; unavailable optional GPU/FPS/sensor providers remain explicit\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

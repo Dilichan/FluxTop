@@ -1,14 +1,11 @@
-#include "fluxtop/gpu_collector.hpp"
 #include "fluxtop/diagnostics.hpp"
 #include "fluxtop/options.hpp"
 #include "fluxtop/overlay.hpp"
 #include "fluxtop/output.hpp"
-#include "fluxtop/process_collector.hpp"
 #include "fluxtop/privileges.hpp"
 #include "fluxtop/windows.hpp"
 #include "fluxtop/sampler.hpp"
 
-#include <psapi.h>
 #include <chrono>
 #include <iostream>
 #include <locale>
@@ -79,7 +76,7 @@ int wmain(int argc, wchar_t** argv) {
         fluxtop::Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
         if (!event.valid()) throw fluxtop::windows_error("CreateEventW");
         StopHandler handler(event.get());
-        fluxtop::Sampler sampler(options.gpu, options.network);
+        fluxtop::Sampler sampler(options.collection_plan());
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(options.interval_ms);
         unsigned emitted = 0;
         while (!options.samples || emitted < options.samples) {

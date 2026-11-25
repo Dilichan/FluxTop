@@ -8,8 +8,8 @@
 using namespace fluxtop;
 namespace {
 void need(bool value,const char* reason){if(!value)throw std::runtime_error(reason);}
-IntelDtsSnapshot topology(){
-    IntelDtsSnapshot t;t.cpu_name=L"Synthetic physical CPU";
+CpuTopologySnapshot topology(){
+    CpuTopologySnapshot t;t.cpu_name=L"Synthetic physical CPU";
     t.cores={{0,0,0,true,61.0,2,false},{0,2,1,false,48.0,1,true},{1,0,2,true,std::nullopt,2,false}};
     t.logical_members={{0,0,0,true},{0,1,0,true},{0,2,1,false},{1,0,2,true},{1,1,2,true}};
     t.package_c=65;t.core_max_c=61;t.core_average_c=54.5;return t;
@@ -36,8 +36,8 @@ void settings(const std::filesystem::path& root){
     std::filesystem::remove(file);
 }
 void physical_metrics(){
-    Snapshot snapshot;snapshot.intel_core_temperatures=topology();snapshot.total_cpu_percent=20;snapshot.timestamp_ms=10000;
-    snapshot.intel_core_temperatures.sampled_tick=700;
+    Snapshot snapshot;snapshot.cpu_topology=topology();snapshot.total_cpu_percent=20;snapshot.timestamp_ms=10000;
+    snapshot.cpu_topology.sampled_tick=700;
     snapshot.cpu_logical_usage={{0,0,0,true,80},{0,1,0,true,40},{0,2,1,false,25},{1,0,2,true,std::nullopt},{1,1,2,true,10}};
     auto sample=cpu_chart_sample(snapshot,1000,10300);const auto frozen=sample;
     need(sample.temperature_time_ms==10000,"DTS timestamp excludes UI delivery delay");
@@ -53,7 +53,7 @@ void physical_metrics(){
     const auto selected_sample=cpu_chart_sample(selected_sensor);
     need(cpu_chart_value(restored[0],selected_sample,{})==49 && !selected_sample.package_from_dts,
         "overview and sidebar must show the same selected CPU temperature rather than a different DTS sensor");
-    selected_sensor.cpu_temperature_c.reset();selected_sensor.intel_core_temperatures.package_c.reset();
+    selected_sensor.cpu_temperature_c.reset();selected_sensor.cpu_topology.package_c.reset();
     need(!cpu_chart_value(restored[0],cpu_chart_sample(selected_sensor),{}),
         "missing temperature stays unavailable instead of a fabricated zero");
     const auto p=cpu_core_chart_series(sample,{0,0},false),e=cpu_core_chart_series(sample,{0,1},false),t=cpu_core_chart_series(sample,{0,1},true);

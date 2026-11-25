@@ -716,7 +716,7 @@ int main() {
     check(!fluxtop::gpu_instance_pid(L"pid_12x_luid"), "invalid PID boundary rejected");
     const std::string_view args[]{"--samples", "2", "--top", "0", "--sort", "ram", "--no-gpu"};
     const auto options = fluxtop::parse_options(args);
-    check(options.samples == 2 && options.top == 0 && !options.gpu && options.sort == fluxtop::Sort::ram, "valid options");
+    check(options.samples == 2 && options.top == 0 && !options.collection_plan().gpu && options.sort == fluxtop::Sort::ram, "valid options");
     rejects({"--samples", "-1"});
     rejects({"--samples", "42949672960"});
     rejects({"--samples", "1x"});
@@ -733,7 +733,9 @@ int main() {
     rejects({"--overlay", "--jsonl"});
     rejects({"--tray"});
     const std::string_view trayArgs[]{"--overlay", "--tray", "--no-network"};
-    check(fluxtop::parse_options(trayArgs).tray && !fluxtop::parse_options(trayArgs).network, "tray startup and disabled network options");
+    const auto tray=fluxtop::parse_options(trayArgs);
+    check(tray.tray && !tray.collection_plan().network && tray.collection_plan().fps && !options.collection_plan().fps,
+        "overlay and console share a collection plan with independent foreground FPS and network switches");
     rejects({"--overlay", "--top", "0"});
     rejects({"--overlay", "--top", "101"});
     for (const auto count : {"1", "7", "100"}) {

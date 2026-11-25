@@ -24,14 +24,14 @@ using CpuSettingRead=std::function<std::wstring(const std::wstring&)>;
 using CpuSettingWrite=std::function<void(const std::wstring&,const std::wstring&)>;
 CpuViewSettings load_cpu_view(const CpuSettingRead& read);
 void save_cpu_view(const CpuViewSettings& settings,const CpuSettingWrite& write);
-std::vector<CpuViewColumn> cpu_view_columns(const CpuViewSettings& settings,const IntelDtsSnapshot& topology);
+std::vector<CpuViewColumn> cpu_view_columns(const CpuViewSettings& settings,const CpuTopologySnapshot& topology);
 std::optional<double> cpu_application_load(const CpuProcessExecution& execution,CpuViewId id);
-std::optional<double> cpu_application_core_load(const CpuProcessExecution& execution,CpuViewId id,const IntelDtsSnapshot& topology);
-std::wstring cpu_core_label(const IntelCoreTemperature& core,std::span<const IntelCoreTemperature> topology);
+std::optional<double> cpu_application_core_load(const CpuProcessExecution& execution,CpuViewId id,const CpuTopologySnapshot& topology);
+std::wstring cpu_core_label(const CpuCoreTemperature& core,std::span<const CpuCoreTemperature> topology);
 struct CpuChartSample {
     std::wstring name;
     std::vector<CpuLogicalUsage> logical;
-    std::vector<IntelCoreTemperature> cores;
+    std::vector<CpuCoreTemperature> cores;
     std::optional<double> package,maximum,average;
     std::optional<std::int64_t> temperature_time_ms;
     bool package_from_dts{};

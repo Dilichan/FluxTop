@@ -850,7 +850,7 @@ void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Pro
         }
     }
     core_indices_.clear();
-    for(const auto& core:system.intel_core_temperatures.cores){
+    for(const auto& core:system.cpu_topology.cores){
         auto found=std::find_if(core_entries_.begin(),core_entries_.end(),[&](const auto& entry){return entry.group==core.group && entry.core_id==core.core_id;});
         if(found==core_entries_.end() && core_entries_.size()<512){core_entries_.push_back(core);found=std::prev(core_entries_.end());}
         if(found!=core_entries_.end()){*found=core;core_indices_.push_back(static_cast<std::size_t>(found-core_entries_.begin()));}

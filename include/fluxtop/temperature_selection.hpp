@@ -1,7 +1,7 @@
 #pragma once
-#include <array>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string_view>
 
 namespace fluxtop {
@@ -24,9 +24,12 @@ struct CpuTemperatureSelection {
 int cpu_temperature_rank(CpuTemperatureProvider provider,CpuTemperatureKind kind) noexcept;
 bool cpu_temperature_candidate_valid(const CpuTemperatureCandidate& sample,
                                      std::uint64_t now,std::uint64_t ttl_ms=20000) noexcept;
+// WMI can sleep while another source supplies a reading it cannot outrank.
+bool cpu_temperature_needs_wmi(std::span<const CpuTemperatureCandidate> primary,
+                               std::uint64_t now,std::uint64_t preferred_started_at=0) noexcept;
 class CpuTemperatureSelector {
 public:
-    CpuTemperatureSelection select(const CpuTemperatureCandidate* samples,std::size_t count,
+    CpuTemperatureSelection select(std::span<const CpuTemperatureCandidate> samples,
                                    std::uint64_t now) noexcept;
 private:
     std::optional<CpuTemperatureProvider> active_provider_;

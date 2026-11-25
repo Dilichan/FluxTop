@@ -1,7 +1,7 @@
 #pragma once
 
 #include <array>
-#include "fluxtop/intel_dts.hpp"
+#include "fluxtop/cpu_topology.hpp"
 #include "fluxtop/cpu_logical.hpp"
 #include "fluxtop/cpu_execution.hpp"
 #include <cstdint>
@@ -125,7 +125,7 @@ struct Snapshot {
     std::optional<double> total_cpu_percent, total_gpu_percent;
     std::optional<std::uint64_t> total_ram_used, total_ram_capacity, total_gpu_memory, total_gpu_memory_capacity;
     std::optional<double> cpu_temperature_c, gpu_temperature_c;
-    IntelDtsSnapshot intel_core_temperatures; // Per-core cache for v50 UI/JSONL.
+    CpuTopologySnapshot cpu_topology; // Per-core cache for v50 UI/JSONL.
     std::vector<CpuLogicalUsage> cpu_logical_usage; // v51: per-logical load, null until baseline.
     std::string cpu_logical_status{"initializing"};
     std::string cpu_execution_status{"initializing"};

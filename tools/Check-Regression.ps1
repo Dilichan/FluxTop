@@ -45,7 +45,7 @@ foreach($case in $junit.testsuite.testcase){
 # The mandatory behavioural subset must exist, not merely have a matching *policy* name.
 $required = @('core','regression_contracts','history','statistics','disk_attribution',
     'temperature_detection','disk_pipeline','autoscore_visibility','chart_controls','jsonl_extended','measurement_labels','integration_pipeline','gpu_memory_fallback','application_display_name','jsonl_contract','smoke','overlay_smoke',
-    'temperature_source_selection','intel_dts_decode','intel_dts_cores','cpu_logical','cpu_execution','cpu_view','system_graph_history','control_wheel',
+    'architecture_boundaries','temperature_source_selection','intel_dts_decode','intel_dts_cores','cpu_logical','cpu_execution','cpu_view','system_graph_history','control_wheel',
     'build_dependencies','admin_required','cpu_etw_live','etw_recovery','etw_recovery_policy','launcher_stability','collector_stability','history_crash','sensor_recovery','process_enumeration',
     'pawnio_bundle','pawnio_stage_security','pawnio_install_policy','portable','installation_fixture','native_uninstall_fixture','release_update')
 $list = & $ctest --test-dir $build -C Release -N

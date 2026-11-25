@@ -188,7 +188,7 @@ private:
     unsigned selected_section_{0}; // CPU, RAM, network, GPU, AutoScore, history, uptime
     wchar_t selected_disk_letter_{};
     std::optional<std::size_t> selected_core_;
-    std::vector<IntelCoreTemperature> core_entries_;
+    std::vector<CpuCoreTemperature> core_entries_;
     std::vector<std::size_t> core_indices_;
     std::vector<wchar_t> disk_letters_;
     unsigned sidebar_scroll_{};
