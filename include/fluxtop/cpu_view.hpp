@@ -12,7 +12,6 @@ struct CpuViewId {
 struct CpuViewColumn {
     CpuViewId id;
     bool visible{};
-    unsigned width{14}; // Existing overlay geometry uses font-size units.
     bool operator==(const CpuViewColumn&)const=default;
 };
 struct CpuViewSettings {
@@ -26,7 +25,6 @@ using CpuSettingWrite=std::function<void(const std::wstring&,const std::wstring&
 CpuViewSettings load_cpu_view(const CpuSettingRead& read);
 void save_cpu_view(const CpuViewSettings& settings,const CpuSettingWrite& write);
 std::vector<CpuViewColumn> cpu_view_columns(const CpuViewSettings& settings,const IntelDtsSnapshot& topology);
-std::vector<std::pair<float,float>> cpu_column_layout(float first,float font,float gap,std::span<const CpuViewColumn> columns);
 std::optional<double> cpu_application_load(const CpuProcessExecution& execution,CpuViewId id);
 std::optional<double> cpu_application_core_load(const CpuProcessExecution& execution,CpuViewId id,const IntelDtsSnapshot& topology);
 std::wstring cpu_core_label(const IntelCoreTemperature& core,std::span<const IntelCoreTemperature> topology);

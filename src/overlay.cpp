@@ -54,6 +54,12 @@ constexpr std::size_t sort_ui_index(Sort value) noexcept {
 static_assert(sort_ui_index(Sort::automatic) == 0 && sort_ui_index(Sort::cpu) == 1 &&
     sort_ui_index(Sort::gpu) == 3 && sort_ui_index(Sort::network) == 7);
 constexpr int load_band(double x) { return x < 50.0 ? 0 : x < 70.0 ? 1 : 2; }
+D2D1_COLOR_F overlay_load_color(std::optional<double> load) {
+    if(!load || !std::isfinite(*load) || *load<0.0)return D2D1::ColorF(1,1,1,1);
+    return load_band(*load)==0?D2D1::ColorF(0.25f,0.92f,0.35f,1)
+        :load_band(*load)==1?D2D1::ColorF(1.0f,0.80f,0.13f,1)
+        :D2D1::ColorF(1.0f,0.22f,0.22f,1);
+}
 constexpr int temperature_band(double x) { return x < 65.0 ? 0 : x <= 80.0 ? 1 : 2; }
 static_assert(load_band(49.9) == 0 && load_band(50.0) == 1 && load_band(70.0) == 2);
 static_assert(temperature_band(64.9) == 0 && temperature_band(65.0) == 1
@@ -110,9 +116,8 @@ struct Row {
     std::wstring name, cpu, ram, gpu, vram, network;
     std::optional<double> disk_read,disk_write;
     std::array<std::optional<double>,26> disk_volumes{};
-    // Each visible numeric cell has its own utilization and burst color.
+    // Utilization is stored per cell for load colors.
     std::array<std::optional<double>,4> loads{}; // CPU / RAM / GPU / GPU RAM
-    std::array<bool,6> bursts{};                 // CPU / RAM / GPU / GPU RAM / Rx / Tx
     std::vector<std::optional<double>> logical_cpu;
     bool operator==(const Row&) const = default;
 };
@@ -140,7 +145,6 @@ private:
     void apply_client();
     void refresh_disk_controls();
     std::vector<wchar_t> enabled_disk_letters() const;
-    float disk_left(std::size_t ordinal) const;
     void cpu_settings_changed();
     void refresh_cpu_controls(bool force=false);
     void client_stats();
@@ -156,37 +160,35 @@ private:
     // Animation ticks repaint only the moving row area; ordinary updates repaint everything.
     void paint(bool animation_only = false);
     void draw_text(std::wstring_view value, D2D1_RECT_F rect, IDWriteTextFormat* font,
-        bool highlight = false, bool burst = false, std::optional<double> load = std::nullopt,
-        float opacity = 1.0f);
+        std::optional<double> load = std::nullopt);
     void draw_header_metric(unsigned column, const std::wstring& reading, std::optional<double> load,
-        std::optional<double> temperature, D2D1_RECT_F rect, bool cpu_board = false);
-    void draw_network_text(const Row& row, D2D1_RECT_F rect, float opacity = 1.0f);
+        std::optional<double> temperature, D2D1_RECT_F rect);
     void draw_cached_row_text(const Row& row, unsigned column, std::wstring_view value,
         D2D1_RECT_F rect, IDWriteTextFormat* font, bool highlight = false,
         std::optional<double> load = std::nullopt, ID2D1RenderTarget* destination = nullptr,
         ID2D1SolidColorBrush* destination_brush = nullptr);
+    void draw_base_row(const Row& row,const OverlayColumnPositions& geometry,float y,
+        ID2D1RenderTarget* destination=nullptr,ID2D1SolidColorBrush* ink=nullptr);
     ID2D1Bitmap* cached_row_bitmap(const Row& row, const OverlayColumnPositions& geometry,
         std::size_t& built_this_frame);
     void clear_row_images() noexcept;
-    std::array<D2D1_RECT_F,6> columns(float y, float height) const;
     float text_size() const { return static_cast<float>(options_.font_size); }
     float row_height() const { return text_size() * 1.6f; }
-    bool has_enabled_disks() const { return !enabled_disk_letters().empty(); }
+    bool has_enabled_disks() const {
+        return std::any_of(available_disk_letters_.begin(),available_disk_letters_.end(),
+            [this](wchar_t letter){return (selected_disks_mask_ & (1U<<(letter-L'A')))!=0;});
+    }
     bool summary_only() const { return summary_ || (!metrics_ && !has_enabled_disks() && !disk_total_enabled_ && cpu_columns_.empty()); }
     unsigned active_metrics() const { return metrics_ ? metrics_ : ((has_enabled_disks() || disk_total_enabled_ || !cpu_columns_.empty())?0U:all_metrics); }
     unsigned ranking_metrics() const {
         // Display switches only affect columns; AutoScore always uses every available metric.
         return auto_score_all_metrics;
     }
-    float table_width() const {
-        const auto base=calculate_overlay_columns(text_size(),active_metrics(),summary_only(),show_icons_).total_width;
-        const auto n=enabled_disk_letters().size()+(disk_total_enabled_?1U:0U);
-        float width=base + (n ? text_size()*(overlay_layout.column_gap+
-            static_cast<float>(n)*overlay_layout.disk_width+
-            static_cast<float>(n-1)*overlay_layout.column_gap) : 0.0f);
-        for(const auto& column:cpu_columns_)width+=text_size()*(overlay_layout.column_gap+static_cast<float>(column.width));
-        return width;
+    OverlayTableGeometry table_geometry(std::size_t disk_count) const {
+        return calculate_overlay_table(text_size(),active_metrics(),summary_only(),show_icons_,
+            disk_count+(disk_total_enabled_?1U:0U),cpu_columns_.size());
     }
+    float table_width() const { return table_geometry(enabled_disk_letters().size()).total_width; }
     float dip(int px) const { return static_cast<float>(px) * 96.0f / static_cast<float>(dpi_); }
     int pixels(float value) const { return static_cast<int>(value * static_cast<float>(dpi_) / 96.0f + .5f); }
     std::size_t visible_rows(float height) const {
@@ -200,7 +202,7 @@ private:
     std::shared_ptr<SystemGraphHistory> graph_history_=std::make_shared<SystemGraphHistory>();
     CpuViewSettings cpu_view_;
     std::vector<CpuViewColumn> cpu_columns_;
-    HWND cpu_label_{};
+    HWND cpu_label_{},cpu_temperature_label_{};
     std::vector<std::pair<HWND,std::size_t>> cpu_checks_;
     std::vector<CpuViewId> cpu_topology_ids_;
     HICON icon_{}, large_icon_{};
@@ -223,7 +225,9 @@ private:
     bool summary_ = false;
     bool header_colors_ = true, row_colors_ = true;
     bool animation_enabled_ = true;
+    bool dragging_ = false;
     int x_ = CW_USEDEFAULT, y_ = CW_USEDEFAULT;
+    int right_anchor_ = CW_USEDEFAULT;
     std::wstring settings_;
     std::size_t scroll_{};
     std::uint64_t disk_delivery_ui_samples_{}; // Diagnostics, not rendering state.
@@ -307,6 +311,7 @@ void Overlay::load_settings() {
     cpu_view_=load_cpu_view([this](const auto& key){return ini_overlay_read_text(settings_,key);});
     const auto read = [&](const wchar_t* key, int fallback) { return ini_overlay_read_int(settings_,key,fallback); };
     x_ = read(L"x", CW_USEDEFAULT); y_ = read(L"y", CW_USEDEFAULT);
+    right_anchor_ = read(L"anchor_right", CW_USEDEFAULT);
     if (read(L"layout_version", 0) >= 2) opacity_ = static_cast<unsigned>(std::clamp(read(L"opacity", 100), 1, 100));
     const auto saved_metrics = static_cast<unsigned>(read(L"metrics", default_metrics));
     selected_disks_mask_ = static_cast<unsigned>(read(L"disk_columns",0)) & ((1U<<26)-1U);
@@ -336,6 +341,7 @@ void Overlay::save_settings() noexcept {
         RECT rect{}; if (!GetWindowRect(hwnd_, &rect)) return;
         const auto save = [&](const wchar_t* key, int value) { ini_overlay_write(settings_,key,value); };
         save(L"layout_version", 3); save(L"x", rect.left); save(L"y", rect.top);
+        save(L"anchor_right", right_anchor_ == CW_USEDEFAULT ? rect.right : right_anchor_);
         save(L"font_size", static_cast<int>(options_.font_size)); save(L"top", static_cast<int>(options_.top));
         save(L"sort", static_cast<int>(options_.sort)); save(L"opacity", static_cast<int>(opacity_)); save(L"icons", show_icons_ ? 1 : 0);
         save(L"metrics", static_cast<int>(metrics_)); save(L"summary_only", summary_ ? 1 : 0);
@@ -374,11 +380,6 @@ std::vector<wchar_t> Overlay::enabled_disk_letters() const {
         if(selected_disks_mask_ & (1U<<(letter-L'A')))result.push_back(letter);
     return result;
 }
-float Overlay::disk_left(std::size_t ordinal) const {
-    const auto base=calculate_overlay_columns(text_size(),active_metrics(),summary_only(),show_icons_).total_width;
-    return base-overlay_layout.right_padding+text_size()*(overlay_layout.column_gap+
-        static_cast<float>(ordinal)*(overlay_layout.disk_width+overlay_layout.column_gap));
-}
 void Overlay::cpu_settings_changed(){
     if(snapshot_)cpu_columns_=cpu_view_columns(cpu_view_,snapshot_->intel_core_temperatures);
     if(statistics_)statistics_->set_cpu_view(cpu_view_);
@@ -390,8 +391,8 @@ void Overlay::refresh_cpu_controls(bool force){
     std::vector<CpuViewId> detected;for(const auto& core:topology.cores)detected.push_back({core.group,core.core_id});
     if(!force && detected==cpu_topology_ids_)return;
     cpu_topology_ids_=std::move(detected);
-    for(const auto id:cpu_topology_ids_)if(cpu_view_.columns.size()<512 && std::none_of(cpu_view_.columns.begin(),cpu_view_.columns.end(),[&](const auto& c){return c.id==id;}))
-        cpu_view_.columns.push_back({id,false,14});
+    for(const auto id:cpu_topology_ids_)if(cpu_view_.columns.size()<CpuViewSettings::column_limit && std::none_of(cpu_view_.columns.begin(),cpu_view_.columns.end(),[&](const auto& c){return c.id==id;}))
+        cpu_view_.columns.push_back({id});
     for(const auto& [window,index]:cpu_checks_){
         (void)index;controls_.erase(std::remove_if(controls_.begin(),controls_.end(),[window](const auto& child){return child.window==window;}),controls_.end());
         DestroyWindow(window);
@@ -447,7 +448,9 @@ void Overlay::refresh_disk_controls() {
     // The same responsive checkbox grid also determines the settings height.
     const int rows=static_cast<int>((available_disk_letters_.size()+1U+4U)/5U);
     const int cpu_y=486+rows*32;
-    const int cpu_aggregate_y=cpu_y+28+static_cast<int>((cpu_checks_.size()+4)/5)*32;
+    constexpr int heading_spacing=28;
+    const int temperature_y=cpu_y+heading_spacing+static_cast<int>((cpu_checks_.size()+4)/5)*32;
+    const int cpu_aggregate_y=temperature_y+heading_spacing;
     const int summary_y=cpu_aggregate_y+36;
     const int header_y=summary_y+33;
     const int animation_y=header_y+36;
@@ -463,7 +466,8 @@ void Overlay::refresh_disk_controls() {
         }
     };
     position(cpu_label_,cpu_y);
-    for(std::size_t i=0;i<cpu_checks_.size();++i)position(cpu_checks_[i].first,cpu_y+28+static_cast<int>(i/5)*32);
+    for(std::size_t i=0;i<cpu_checks_.size();++i)position(cpu_checks_[i].first,cpu_y+heading_spacing+static_cast<int>(i/5)*32);
+    position(cpu_temperature_label_,temperature_y);
     position(GetDlgItem(client_,cpu_package_control),cpu_aggregate_y);position(GetDlgItem(client_,cpu_max_control),cpu_aggregate_y);
     position(GetDlgItem(client_,cpu_average_control),cpu_aggregate_y);
     position(GetDlgItem(client_,summary_control),summary_y);
@@ -494,17 +498,17 @@ void Overlay::fonts() {
     number_font_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
 }
 void Overlay::fit_table() {
-    RECT rect{}; GetWindowRect(hwnd_, &rect);
+    RECT rect{}; if (!GetWindowRect(hwnd_, &rect)) return;
     MONITORINFO monitor{sizeof(monitor)};
     if (!GetMonitorInfoW(MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST), &monitor)) return;
     const auto& area = monitor.rcWork; const int margin = pixels(8);
     const int width = std::min(pixels(table_width()), static_cast<int>(area.right-area.left-margin*2));
     const int requested_height = static_cast<int>(std::ceil((row_height() * static_cast<float>(summary_only() ? 1 : options_.top+1) + 4) * static_cast<float>(dpi_) / 96.0f));
     const int height = std::min(requested_height, static_cast<int>(area.bottom-area.top-margin*2));
-    const int preferred_x=static_cast<int>(rect.right)-width;
-    const int x=std::clamp(preferred_x,static_cast<int>(area.left+margin),
-        static_cast<int>(area.right-margin-width));
+    const int right = dragging_ || right_anchor_ == CW_USEDEFAULT ? rect.right : right_anchor_;
+    const int x = overlay_fitted_left(right, width, area.left, area.right, margin);
     const int y = std::clamp(static_cast<int>(rect.top), static_cast<int>(area.top+margin), static_cast<int>(area.bottom-margin-height));
+    if (right_anchor_ == CW_USEDEFAULT && !dragging_) right_anchor_ = x + width;
     SetWindowPos(hwnd_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
 }
 void Overlay::add_tray() {
@@ -638,6 +642,7 @@ void Overlay::init_client() {
     statistics_->activate(false);
     if(snapshot_)statistics_->on_snapshot(snapshot_->timestamp_ms,grouped_processes_,options_.interval_ms,*snapshot_);
     cpu_label_=control(L"STATIC",L"Ядра CPU:",0,0,22,520,540,24);
+    cpu_temperature_label_=control(L"STATIC",L"Температуры ЦП:",0,0,22,692,540,24);
     for(const auto [id,label,enabled]:{std::tuple{cpu_package_control,L"CPU Package",cpu_view_.package},std::tuple{cpu_max_control,L"Core Max",cpu_view_.maximum},std::tuple{cpu_average_control,L"Core Average",cpu_view_.average}}){
         const auto box=control(L"BUTTON",label,BS_AUTOCHECKBOX|WS_TABSTOP,id,22+static_cast<int>(id-cpu_package_control)*190,720,180,26);
         SendMessageW(box,BM_SETCHECK,enabled?BST_CHECKED:BST_UNCHECKED,0);
@@ -905,19 +910,18 @@ void Overlay::update_view() {
             loads[j] = auto_metric_load_percent(p,static_cast<AutoMetric>(j+1),
                 s.total_ram_capacity,s.total_gpu_memory_capacity);
         // No blink/flash effects in the overlay. AutoScore still uses burst data for ranking.
-        std::array<bool,6> bursts{};
         // All display values use the same verified-subset fields as the
         // existing load colors, AutoScore, live statistics and history.
         next.push_back({p.pid,p.creation_time,std::move(name),percent(p.cpu_percent),
             memory(p.working_set),percent(p.gpu_percent),memory(p.dedicated_gpu_bytes),
             network_rate(p.rx_bytes_per_second,p.tx_bytes_per_second),
             p.disk_read_bytes_per_second,p.disk_write_bytes_per_second,
-            p.disk_volume_bytes_per_second,loads,bursts,{}});
+            p.disk_volume_bytes_per_second,loads,{}});
         for(const auto& column:cpu_columns_)next.back().logical_cpu.push_back(cpu_application_core_load(p.cpu_execution,column.id,s.intel_core_temperatures));
     }
     // A single PresentMon target: the actual foreground window, regardless of table sorting.
     std::vector<std::uint32_t> fps_targets;
-    if (visible_ && !summary_only() && foreground_pid_) fps_targets.push_back(foreground_pid_);
+    if (visible_ && foreground_pid_) fps_targets.push_back(foreground_pid_);
     worker_.set_fps_targets(std::move(fps_targets));
     if (visible_ && show_icons_ && !summary_only()) {
         if (!icons_) icons_ = std::make_unique<AppIconCache>(history_path(), [this] {
@@ -1045,22 +1049,11 @@ void Overlay::surface() {
     target_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 }
 void Overlay::draw_text(std::wstring_view value, D2D1_RECT_F rect, IDWriteTextFormat* font,
-    bool highlight, bool burst, std::optional<double> load, float opacity) {
-    if(opacity<=0.005f) return;
-    opacity=std::clamp(opacity,0.0f,1.0f);
+    std::optional<double> load) {
     auto shadow=rect;shadow.left+=1;shadow.right+=1;shadow.top+=1;shadow.bottom+=1;
-    brush_->SetColor(D2D1::ColorF(0,0,0,.8f*opacity));
+    brush_->SetColor(D2D1::ColorF(0,0,0,.8f));
     target_->DrawText(value.data(),static_cast<UINT32>(value.size()),font,shadow,brush_.Get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    D2D1_COLOR_F color=D2D1::ColorF(1,1,1,opacity);
-    if(row_colors_ && highlight) {
-        if(burst) color=D2D1::ColorF(1.0f,0.53f,0.12f,opacity);
-        else if(load && std::isfinite(*load) && *load>=0.0) {
-            color=load_band(*load)==0?D2D1::ColorF(0.25f,0.92f,0.35f,opacity)
-                :load_band(*load)==1?D2D1::ColorF(1.0f,0.80f,0.13f,opacity)
-                :D2D1::ColorF(1.0f,0.22f,0.22f,opacity);
-        }
-    }
-    brush_->SetColor(color);
+    brush_->SetColor(overlay_load_color(load));
     target_->DrawText(value.data(),static_cast<UINT32>(value.size()),font,rect,brush_.Get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
@@ -1103,13 +1096,7 @@ void Overlay::draw_cached_row_text(const Row& row, unsigned column, std::wstring
     }
     ink->SetColor(D2D1::ColorF(0,0,0,0.8f));
     renderer->DrawTextLayout(D2D1::Point2F(rect.left+1,rect.top+1),layout.Get(),ink,D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    D2D1_COLOR_F color = D2D1::ColorF(1,1,1,1);
-    if (row_colors_ && highlight && load && std::isfinite(*load) && *load >= 0.0) {
-        color = load_band(*load)==0 ? D2D1::ColorF(0.25f,0.92f,0.35f,1)
-            : load_band(*load)==1 ? D2D1::ColorF(1.0f,0.80f,0.13f,1)
-            : D2D1::ColorF(1.0f,0.22f,0.22f,1);
-    }
-    ink->SetColor(color);
+    ink->SetColor(overlay_load_color(row_colors_ && highlight?load:std::nullopt));
     renderer->DrawTextLayout(D2D1::Point2F(rect.left,rect.top),layout.Get(),ink,D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
@@ -1118,6 +1105,21 @@ void Overlay::clear_row_images() noexcept {
     row_image_bytes_=0;
 }
 
+void Overlay::draw_base_row(const Row& row,const OverlayColumnPositions& geometry,float y,
+    ID2D1RenderTarget* destination,ID2D1SolidColorBrush* ink) {
+    const float bottom=y+row_height();
+    const auto cell=[&](std::size_t index) {
+        return D2D1::RectF(geometry.left[index],y,geometry.right[index],bottom);
+    };
+    draw_cached_row_text(row,0,row.name,cell(0),body_font_.Get(),false,std::nullopt,destination,ink);
+    const std::array<std::wstring_view,5> values{row.cpu,row.ram,row.gpu,row.vram,row.network};
+    for(std::size_t metric=0;metric<values.size();++metric) {
+        if(geometry.right[metric+1]<=geometry.left[metric+1])continue;
+        const bool highlight=metric<row.loads.size();
+        draw_cached_row_text(row,static_cast<unsigned>(metric+1),values[metric],cell(metric+1),
+            number_font_.Get(),highlight,highlight?row.loads[metric]:std::optional<double>{},destination,ink);
+    }
+}
 // Rasterize the text of a moving row once; the icon already has its own D2D bitmap cache.
 // A fixed memory limit and 6 new images per frame avoid startup spikes at 100 rows.
 ID2D1Bitmap* Overlay::cached_row_bitmap(const Row& row,
@@ -1145,19 +1147,7 @@ ID2D1Bitmap* Overlay::cached_row_bitmap(const Row& row,
     offscreen->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     offscreen->BeginDraw();
     offscreen->Clear(D2D1::ColorF(0,0,0,0));
-    const auto cell=[&](std::size_t index) {
-        return D2D1::RectF(geometry.left[index],0,geometry.right[index],row_height());
-    };
-    draw_cached_row_text(row,0,row.name,cell(0),body_font_.Get(),false,std::nullopt,
-        offscreen.Get(),ink.Get());
-    const std::array<std::wstring_view,5> values{
-        row.cpu,row.ram,row.gpu,row.vram,row.network};
-    for(std::size_t metric=0;metric<values.size();++metric) {
-        if(!(active_metrics() & (1U<<metric))) continue;
-        draw_cached_row_text(row,static_cast<unsigned>(metric+1),values[metric],
-            cell(metric+1),number_font_.Get(),metric<4,
-            metric<4 ? row.loads[metric] : std::optional<double>{},offscreen.Get(),ink.Get());
-    }
+    draw_base_row(row,geometry,0,offscreen.Get(),ink.Get());
     if(FAILED(offscreen->EndDraw())) return nullptr;
     ComPtr<ID2D1Bitmap> bitmap;
     if(FAILED(offscreen->GetBitmap(&bitmap))) return nullptr;
@@ -1174,34 +1164,8 @@ ID2D1Bitmap* Overlay::cached_row_bitmap(const Row& row,
     ++built_this_frame;
     return position->second.bitmap.Get();
 }
-void Overlay::draw_network_text(const Row& row, D2D1_RECT_F rect, float opacity) {
-    draw_text(row.network,rect,number_font_.Get(),false,false,std::nullopt,opacity);
-    // No defined link-capacity percentage for Rx/Tx. They stay white unless
-    // the individual direction has a significant positive-rate burst.
-    if (!row_colors_ || (!row.bursts[4] && !row.bursts[5])) return;
-    const auto separator = row.network.find(L" / ");
-    if (separator == std::wstring::npos) return;
-    ComPtr<IDWriteTextLayout> layout;
-    if (FAILED(write_factory_->CreateTextLayout(row.network.c_str(),static_cast<UINT32>(row.network.size()),
-        number_font_.Get(),rect.right-rect.left,rect.bottom-rect.top,&layout))) return;
-    for (std::size_t direction=0;direction<2;++direction) {
-        if (!row.bursts[4+direction]) continue;
-        const std::size_t first = direction == 0 ? 0 : separator + 3;
-        const std::size_t end = direction == 0 ? separator : row.network.find(L' ',first);
-        const std::size_t limit = end == std::wstring::npos ? row.network.size() : end;
-        if (limit <= first) continue;
-        DWRITE_HIT_TEST_METRICS hit{};
-        UINT32 count{};
-        if (FAILED(layout->HitTestTextRange(static_cast<UINT32>(first),static_cast<UINT32>(limit-first),
-            0,0,&hit,1,&count)) || count != 1 || hit.width <= 0) continue;
-        target_->PushAxisAlignedClip(D2D1::RectF(rect.left+hit.left,rect.top+hit.top,
-            rect.left+hit.left+hit.width,rect.top+hit.top+hit.height),D2D1_ANTIALIAS_MODE_ALIASED);
-        draw_text(row.network,rect,number_font_.Get(),true,true,std::nullopt,opacity);
-        target_->PopAxisAlignedClip();
-    }
-}
 void Overlay::draw_header_metric(unsigned column, const std::wstring& reading, std::optional<double> load,
-    std::optional<double> temperature, D2D1_RECT_F rect, bool cpu_board) {
+    std::optional<double> temperature, D2D1_RECT_F rect) {
     std::wstring line = metric_names[column];
     line += L" ";
     const auto from = line.size();
@@ -1213,12 +1177,6 @@ void Overlay::draw_header_metric(unsigned column, const std::wstring& reading, s
         temp_from = line.size();
         line += temperature && std::isfinite(*temperature) ? decimal(*temperature,0) + L"°C" : L"—";
         if (temperature && std::isfinite(*temperature)) temp_length = line.size() - temp_from;
-        if (temperature && std::isfinite(*temperature) && column==0) {
-            const auto source=snapshot_?snapshot_->cpu_temperature_source:std::string{};
-            if (source.find("acpi")!=std::string::npos) line += L" ACPI";
-            else if (cpu_board) line += L" MB";
-            else if (!source.empty() && source!="unavailable") line += L" DIE";
-        }
     }
     draw_text(line,rect,number_font_.Get());
     if (!header_colors_) return;
@@ -1243,10 +1201,7 @@ void Overlay::draw_header_metric(unsigned column, const std::wstring& reading, s
         }
     };
     if (load && std::isfinite(*load) && *load >= 0) {
-        const auto color = *load < 50 ? D2D1::ColorF(0.25f,0.92f,0.35f,1.0f)
-            : *load < 70 ? D2D1::ColorF(1.0f,0.80f,0.13f,1.0f)
-            : D2D1::ColorF(1.0f,0.22f,0.22f,1.0f);
-        tint(from,digits,color);
+        tint(from,digits,overlay_load_color(load));
     }
     if (temp_length) {
         const auto color = *temperature < 65 ? D2D1::ColorF(0.25f,0.92f,0.35f,1.0f)
@@ -1254,14 +1209,6 @@ void Overlay::draw_header_metric(unsigned column, const std::wstring& reading, s
             : D2D1::ColorF(1.0f,0.22f,0.22f,1.0f);
         tint(temp_from,temp_length,color);
     }
-}
-std::array<D2D1_RECT_F,6> Overlay::columns(float y, float height) const {
-    const auto layout = calculate_overlay_columns(text_size(), active_metrics(), summary_only(), show_icons_);
-    std::array<D2D1_RECT_F,6> rects{};
-    for (std::size_t index = 0; index < rects.size(); ++index) {
-        rects[index] = D2D1::RectF(layout.left[index], y, layout.right[index], y + height);
-    }
-    return rects;
 }
 void Overlay::paint(bool animation_only) {
     if (!visible_ || !hwnd_) return;
@@ -1315,31 +1262,26 @@ void Overlay::paint(bool animation_only) {
         partial_body=false;
         target_->Clear(background);
     }
-    const auto scale=std::min(1.0f,dip(bitmap_size_.cx)/table_width());
-    target_->SetTransform(D2D1::Matrix3x2F::Scale(scale,1));
     // Column positions are immutable within one frame; don't recompute per row.
-    const auto geometry=calculate_overlay_columns(text_size(),active_metrics(),summary_only(),show_icons_);
-    const float height=row_height();
     const auto selected_disk_letters=enabled_disk_letters();
-    // Extend the disk-column strip once per frame, never allocate per CPU cell.
-    const auto cpu_geometry=cpu_column_layout(disk_left(selected_disk_letters.size()+(disk_total_enabled_?1U:0U)),
-        text_size(),overlay_layout.column_gap,cpu_columns_);
-    const auto row_cells=[&](float y) {
-        std::array<D2D1_RECT_F,6> cells{}; // Application + five resource metrics.
-        for(std::size_t column=0;column<cells.size();++column)
-            cells[column]=D2D1::RectF(geometry.left[column],y,geometry.right[column],y+height);
-        return cells;
+    const auto table=table_geometry(selected_disk_letters.size());
+    const auto& geometry=table.base;
+    const auto scale=std::min(1.0f,dip(bitmap_size_.cx)/table.total_width);
+    target_->SetTransform(D2D1::Matrix3x2F::Scale(scale,1));
+    const float height=row_height();
+    const auto dynamic_cell=[&](const OverlayColumnRun& run,std::size_t index,float y) {
+        return D2D1::RectF(run.left(index),y,run.right(index),y+height);
     };
     if(!animation_only) {
-    auto header = row_cells(1);
-    header[0].left = 2; // The heading starts at the table edge, above the icon column.
-    if (!summary_only()) {
-        std::wstring title = L"Приложение  FPS: ";
-        if (foreground_fps_)
-            title += std::to_wstring(static_cast<unsigned>(std::lround(*foreground_fps_)));
-        else title += L"—"; // Never guess frames when the source is unavailable.
-        draw_text(title,header[0],body_font_.Get());
-    }
+    std::array<D2D1_RECT_F,6> header{};
+    for(std::size_t i=0;i<header.size();++i)
+        header[i]=D2D1::RectF(geometry.left[i],1,geometry.right[i],1+height);
+    header[0].left = overlay_layout.left_padding; // Above the icon column.
+    std::wstring fps_heading = summary_only()?L"FPS: ":L"Приложение  FPS: ";
+    if (foreground_fps_)
+        fps_heading += std::to_wstring(static_cast<unsigned>(std::lround(*foreground_fps_)));
+    else fps_heading += L"—"; // Never guess frames when the source is unavailable.
+    draw_text(fps_heading,header[0],body_font_.Get());
     std::array<std::wstring,5> totals{L"—",L"—",L"—",L"—",L"— / —"};
     if (snapshot_) {
         const auto& s = *snapshot_;
@@ -1366,26 +1308,21 @@ void Overlay::paint(bool animation_only) {
     }
     for (std::size_t i=1;i<header.size();++i) {
         const unsigned metric=static_cast<unsigned>(i-1);
-        if (!(active_metrics() & (1U<<metric))) continue;
+        if (geometry.right[i]<=geometry.left[i]) continue;
         draw_header_metric(metric,totals[metric],load[metric],
-            metric==0U ? cpu_temperature : metric==2U ? gpu_temperature : std::optional<double>{},header[i],
-            metric==0U && snapshot_ && snapshot_->cpu_temperature_board);
+            metric==0U ? cpu_temperature : metric==2U ? gpu_temperature : std::optional<double>{},header[i]);
     }
     if(disk_total_enabled_) {
-        const float x=disk_left(0);
-        const auto rect=D2D1::RectF(x,1,x+overlay_layout.disk_width*text_size(),1+height);
-        draw_text(L"Disks",rect,number_font_.Get());
+        draw_text(L"Disks",dynamic_cell(table.disks,0,1),number_font_.Get());
     }
     if(snapshot_) {
-        const auto letters=enabled_disk_letters();
-        for(std::size_t i=0;i<letters.size();++i) {
+        for(std::size_t i=0;i<selected_disk_letters.size();++i) {
             const auto found=std::find_if(snapshot_->disks.begin(),snapshot_->disks.end(),
-                [&](const DiskActivity& d){return d.letter==letters[i];});
+                [&](const DiskActivity& d){return d.letter==selected_disk_letters[i];});
             const auto reading=found==snapshot_->disks.end()?std::optional<double>{}:found->active_percent;
-            const auto x=disk_left(i+(disk_total_enabled_?1U:0U));
-            const auto area=D2D1::RectF(x,1,x+overlay_layout.disk_width*text_size(),1+height);
-            const std::wstring title=metric_text::disk_name(letters[i])+L" "+metric_text::disk_activity(reading);
-            draw_text(title,area,number_font_.Get(),header_colors_,false,reading);
+            const auto area=dynamic_cell(table.disks,i+(disk_total_enabled_?1U:0U),1);
+            const std::wstring title=metric_text::disk_name(selected_disk_letters[i])+L" "+metric_text::disk_activity(reading);
+            draw_text(title,area,number_font_.Get(),header_colors_?reading:std::nullopt);
         }
     }
     const auto core_readings=snapshot_ && !cpu_columns_.empty()?cpu_chart_sample(*snapshot_):CpuChartSample{};
@@ -1393,18 +1330,17 @@ void Overlay::paint(bool animation_only) {
         const auto& column=cpu_columns_[i];std::optional<double> reading;
         reading=cpu_chart_value({CpuSeriesKind::core_load,column.id,L"",false},core_readings,{});
         const auto temperature=cpu_chart_value({CpuSeriesKind::core,column.id,L"",false},core_readings,{});
-        const float x=cpu_geometry[i].first;
         const auto core=std::find_if(core_readings.cores.begin(),core_readings.cores.end(),[&](const auto& item){return column.id==CpuViewId{item.group,item.core_id};});
         const auto name=core==core_readings.cores.end()?std::wstring(L"Core ")+std::to_wstring(column.id.number+1):cpu_core_label(*core,core_readings.cores);
         draw_text(name+L" "+percent(reading)+L" "+metric_text::temperature(temperature),
-            D2D1::RectF(x,1,cpu_geometry[i].second,1+height),number_font_.Get(),header_colors_,false,reading);
+            dynamic_cell(table.cores,i,1),number_font_.Get(),header_colors_?reading:std::nullopt);
     }
     } // Header values and layout stay untouched during animation-only frames.
     // The header never moves or gets covered by transitioning rows.
-    target_->PushAxisAlignedClip(D2D1::RectF(0,row_height()+1,table_width(),
+    target_->PushAxisAlignedClip(D2D1::RectF(0,row_height()+1,table.total_width,
         dip(bitmap_size_.cy)),D2D1_ANTIALIAS_MODE_ALIASED);
     if(partial_body)
-        target_->PushAxisAlignedClip(D2D1::RectF(0,dirty_top,table_width(),dirty_bottom),
+        target_->PushAxisAlignedClip(D2D1::RectF(0,dirty_top,table.total_width,dirty_bottom),
             D2D1_ANTIALIAS_MODE_ALIASED);
     std::size_t row_bitmap_builds=0;
     for (std::size_t i=0;i<count && i+scroll_<rows_.size();++i) {
@@ -1425,7 +1361,6 @@ void Overlay::paint(bool animation_only) {
         const float y=1+(slot+1.0f)*row_height();
         // Do not issue hundreds of DirectWrite draws for untouched static rows.
         if(partial_body && (y+row_height()+2<dirty_top || y-2>dirty_bottom))continue;
-        const auto cells=row_cells(y);
         if (show_icons_ && icons_) if (const auto icon = icons_->get(row.pid,row.created)) {
             auto found=icon_bitmaps_.find(row.pid);
             if (found==icon_bitmaps_.end() || found->second.created!=row.created || found->second.source!=icon) {
@@ -1446,7 +1381,8 @@ void Overlay::paint(bool animation_only) {
             }
             found->second.used=++icon_bitmap_clock_;
             const float side=text_size()*1.3f, top=y+(row_height()-side)/2;
-            target_->DrawBitmap(found->second.bitmap.Get(),D2D1::RectF(2,top,2+side,top+side),opacity);
+            const float left=overlay_layout.left_padding;
+            target_->DrawBitmap(found->second.bitmap.Get(),D2D1::RectF(left,top,left+side,top+side),opacity);
         }
         // During reordering, move already-rasterized text. Stationary rows outside
         // the dirty Y-band have already been skipped; no repeated text shaping.
@@ -1457,19 +1393,7 @@ void Overlay::paint(bool animation_only) {
                 1.0f,D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
         } else {
             // Low-memory / no-animation fallback uses the existing layout cache.
-            draw_cached_row_text(row,0,row.name,cells[0],body_font_.Get());
-            const auto paint_values=[&](const Row& displayed) {
-                const std::array<std::wstring_view,5> values{
-                    displayed.cpu,displayed.ram,displayed.gpu,displayed.vram,displayed.network};
-                for(std::size_t metric=0;metric<metric_names.size();++metric) {
-                    if(!(active_metrics() & (1U<<metric))) continue;
-                    if(metric==4U) draw_cached_row_text(row,static_cast<unsigned>(metric+1),
-                        values[metric],cells[metric+1],number_font_.Get());
-                    else draw_cached_row_text(row,static_cast<unsigned>(metric+1),
-                        values[metric],cells[metric+1],number_font_.Get(),true,displayed.loads[metric]);
-                }
-            };
-            paint_values(row);
+            draw_base_row(row,geometry,y);
         }
         // Disk columns are read/write throughput attributed to this application,
         // unlike the system-wide PDH percentages shown in the header.
@@ -1480,21 +1404,16 @@ void Overlay::paint(bool animation_only) {
         if(disk_total_enabled_) {
             std::optional<double> total;
             if(row.disk_read && row.disk_write)total=*row.disk_read+*row.disk_write;
-            const float x=disk_left(0);
-            draw_text(disk_text(total),D2D1::RectF(x,y,
-                x+overlay_layout.disk_width*text_size(),y+height),number_font_.Get());
+            draw_text(disk_text(total),dynamic_cell(table.disks,0,y),number_font_.Get());
         }
         for(std::size_t d=0;d<selected_disk_letters.size();++d) {
-            const float x=disk_left(d+(disk_total_enabled_?1U:0U));
             const auto index=static_cast<unsigned>(selected_disk_letters[d]-L'A');
-            draw_text(disk_text(row.disk_volumes[index]),D2D1::RectF(x,y,
-                x+overlay_layout.disk_width*text_size(),y+height),number_font_.Get());
+            draw_text(disk_text(row.disk_volumes[index]),dynamic_cell(table.disks,d+(disk_total_enabled_?1U:0U),y),number_font_.Get());
         }
         for(std::size_t c=0;c<cpu_columns_.size();++c){
             const auto reading=c<row.logical_cpu.size()?row.logical_cpu[c]:std::optional<double>{};
-            const float x=cpu_geometry[c].first;
-            draw_text(percent(reading),D2D1::RectF(x,y,cpu_geometry[c].second,y+height),
-                number_font_.Get(),row_colors_,false,reading);
+            draw_text(percent(reading),dynamic_cell(table.cores,c,y),
+                number_font_.Get(),row_colors_?reading:std::nullopt);
         }
     }
     if(partial_body)target_->PopAxisAlignedClip();
@@ -1681,7 +1600,7 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         KillTimer(window,settings_timer); apply_client(); DestroyWindow(window); return 0;
     case WM_DESTROY:
         statistics_.reset(); tabs_=nullptr; client_=nullptr; controls_.clear();
-        cpu_label_=nullptr;cpu_checks_.clear();cpu_topology_ids_.clear();
+        cpu_label_=nullptr;cpu_temperature_label_=nullptr;cpu_checks_.clear();cpu_topology_ids_.clear();
         disk_checks_.fill(nullptr);disk_total_check_=nullptr;shortcuts_label_=nullptr;
         if (client_font_) { DeleteObject(client_font_); client_font_=nullptr; } activity(); return 0;
     }
@@ -1750,7 +1669,14 @@ LRESULT Overlay::message(UINT msg,WPARAM wp,LPARAM lp) {
         SetWindowPos(hwnd_,nullptr,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE); fit_table(); return 0;
     }
     case WM_DISPLAYCHANGE: fit_table(); return 0;
-    case WM_EXITSIZEMOVE: save_settings(); return 0;
+    case WM_ENTERSIZEMOVE: dragging_ = true; return 0;
+    case WM_EXITSIZEMOVE: {
+        dragging_ = false;
+        RECT rect{};
+        if (GetWindowRect(hwnd_, &rect)) right_anchor_ = rect.right;
+        save_settings();
+        return 0;
+    }
     case WM_NCHITTEST: return moving_ ? HTCAPTION : HTTRANSPARENT;
     case WM_MOUSEWHEEL: {
         if (moving_) {

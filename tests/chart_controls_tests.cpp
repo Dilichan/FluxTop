@@ -15,6 +15,33 @@ int main() {
             check(split.first_bottom+24+18<split.second_top-28,
                 "Upper chart dates must clear the lower chart caption after resizing");
         }
+        const auto cpu=chart_system_panels(2),gpu=chart_system_panels(5),core=chart_system_panels(41);
+        check(cpu.primary.metric==0 && cpu.secondary && cpu.secondary->metric==31 &&
+            gpu.primary.metric==3 && gpu.secondary && gpu.secondary->metric==4 &&
+            core.primary.metric==50 && core.secondary && core.secondary->metric==51,
+            "CPU, GPU and physical cores use the same paired chart template");
+        check(chart_system_panels(3).primary.metric==1 && !chart_system_panels(3).secondary &&
+            chart_system_panels(4).primary.metric==2 && !chart_system_panels(4).secondary &&
+            chart_system_panels(31).primary.metric==30 && !chart_system_panels(31).secondary,
+            "RAM, network and disks use the single chart template");
+        for(long width=400;width<=1400;++width) {
+            const auto layout=chart_detached_layout(width,300);
+            for(std::size_t i=0;i<layout.controls.size();++i) {
+                const auto& a=layout.controls[i];
+                check(a.left>=0 && a.right<=width && a.bottom<layout.title_top &&
+                    a.top>=0 && a.right>a.left && a.bottom>a.top,"All detached controls must fit above the chart title");
+                for(std::size_t j=i+1;j<layout.controls.size();++j) {
+                    const auto& b=layout.controls[j];
+                    check(a.right<=b.left || b.right<=a.left || a.bottom<=b.top || b.bottom<=a.top,
+                        "Detached buttons and checkboxes never overlap while resizing");
+                }
+            }
+            check(layout.plot.top>layout.title_top && layout.plot.bottom>layout.plot.top,
+                "Toolbar wrapping leaves room for the chart");
+        }
+        const auto narrow=chart_detached_layout(440,320),wide=chart_detached_layout(640,640);
+        check(narrow.controls[2].top>narrow.controls[0].top && narrow.plot.top>wide.plot.top &&
+            wide.controls[2].top==wide.controls[0].top,"Pause wraps along with the toolbar and moves the plot down");
         check(chart_system_duration(0)==60000 && chart_system_duration(1)==300000 &&
             chart_system_duration(2)==900000 && chart_system_duration(3)==1800000 && chart_system_duration(99)==1800000,
             "System graph presets must share their 1/5/15/30-minute timing");
@@ -46,6 +73,12 @@ int main() {
         check(resumed.from==62000 && resumed.to==122000 &&
             chart_window(true,{1000,61000},{62000,122000}).to==61000,
             "Resuming one view must not advance other paused views");
+        const auto paused_period=chart_window(true,{1000,301000},{301000,361000});
+        const auto live_period=chart_window(false,{1000,301000},{301000,361000});
+        check(chart_popup_pan_limit(paused_period,2.0)==75000.0 &&
+            chart_popup_pan_limit(live_period,2.0)==15000.0 &&
+            chart_popup_window(paused_period,2.0,75000.0).to==301000,
+            "A paused popup pans to the end of its frozen period after the live period shrinks");
         const auto short_range=chart_popup_window({0,500},128.0,0.0);
         check(short_range.to>short_range.from,
             "Very short windows must preserve a nonzero duration");

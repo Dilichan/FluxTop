@@ -59,10 +59,10 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         const auto model=read(root/"src/model.cpp");
         const auto sampler=read(root/"src/sampler.cpp");
         need(layout,{"std::array<float, 5> metric_widths","std::array<const wchar_t*, 5> metric_names"});
-        need(overlay,{"std::wstring title = L\"","foreground_fps_","draw_text(title,header[0]",
+        need(overlay,{"summary_only()?L\"FPS: ","foreground_fps_","draw_text(fps_heading,header[0]",
             "constexpr unsigned all_metrics = 31;","GetWindowThreadProcessId(active_window, &foreground_pid_)",
-            "fps_targets.push_back(foreground_pid_)","update_view(); // Update FPS target and header in every sorting mode.",
-            "else title += L\""});
+            "if (visible_ && foreground_pid_) fps_targets.push_back(foreground_pid_)","update_view(); // Update FPS target and header in every sorting mode.",
+            "else fps_heading += L\""});
         absent(overlay,{"displayed.fps","std::move(fps),loads,bursts","metric_visual_to_storage"});
         absent(model,{"max_gpu(combined.presented_fps,part.presented_fps)"});
         need(collector,{"status != 0 && status != 7","status == 6","PresentMonAPI2Loader.dll",
@@ -109,7 +109,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         need(overlay,{"using metric_text::decimal;","using metric_text::memory;",
             "using metric_text::network_rate;","utf8_to_wide(value,true)",
             "ini_overlay_read_int(settings_", "ini_overlay_write(settings_"});
-        need(popup,{"popup_auto_scale_keys","ini_overlay_read(settings_", "ini_overlay_write(page->settings_"});
+        need(popup,{"popup_auto_scale_keys","ini_overlay_read(settings_", "ini_overlay_write(settings_"});
         absent(page,{"GetPrivateProfileIntW(","WritePrivateProfileStringW(","RegisterClassExW("});
         absent(overlay,{"GetPrivateProfileIntW(","WritePrivateProfileStringW(","RegisterClassExW("});
         absent(popup,{"GetPrivateProfileIntW(","WritePrivateProfileStringW(","RegisterClassExW("});
@@ -153,7 +153,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             ++shared_calls;
         if(shared_calls!=5U)
             throw std::runtime_error("Expected five shared chart renderer call sites including physical core cards");
-        need(popup,{"popup->fill_toggle", "popup_auto_id+1", "page->show_system_hover(popup->kind>=6?popup->kind-1:popup->kind-2",
+        need(popup,{"popup->fill_toggle", "popup_auto_id+1", "page->hover_system_charts(popup->kind",
             "frozen_system,true", "WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN",
             "if(popup->kind<2 || popup->dragging)InvalidateRect(window,nullptr,FALSE);"});
         need(header,{"PaintBuffer tooltip_buffer_;", "bool position_tooltip(POINT screen,int offset_x,int offset_y);"});
@@ -161,14 +161,15 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         // renderer as the GPU/VRAM mini-chart, without polling hardware in UI.
         need(page,{"second_cpu_temperature_line",
             "if(section==0 && second_cpu_temperature_line.size()>1)",
-            "plots.push_back({std::move(second_cpu_temperature_line),RGB(235,75,43)})",
+            "plots.push_back({std::move(second_cpu_temperature_line),cpu_temperature_color})",
             "extend_fresh_left_edge(second_cpu_temperature_line",
             "draw_chart_core(dc,style,plots,bars)"});
         need(header,{"std::deque<FrozenView> frozen_views_{32}"});
-        need(page,{"const bool disk=selected_disk_letter_!=0;", "refresh_pause_control();",
-            "held.paused?&held.samples:nullptr", "open_popup(selected_disk_letter_"});
-        need(popup,{"popup_auto_scale_key(unsigned kind)", "popup.kind>=6?popup.kind-1:popup.kind-2",
-            "popup->kind>=6?popup->kind-1:popup->kind-2"});
+        need(page,{"toggle_chart_pause(kind,frozen_views_[kind],pause_toggle_)", "refresh_pause_control();",
+            "held.paused?&held.samples:nullptr", "open_popup(selected_chart_kind())",
+            "const auto& info=held.paused?held.info:system_info_", "system_tip_info_.ram_capacity"});
+        need(popup,{"popup_auto_scale_key(unsigned kind)", "layout_detached_controls(window,",
+            "popup->auto_toggle,popup->fill_toggle,popup->pause_toggle"});
         absent(page,{"Системная метрика, не нагрузка отдельного PID"});
         need(page,{"bool StatisticsPage::position_tooltip(",
             "SWP_NOACTIVATE|SWP_NOZORDER|(visible?0U:SWP_SHOWWINDOW)",
@@ -177,28 +178,30 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN"});
         need(page,{"FluxTop.SystemDashboard.Stage1","graph_history_->append(system,GetTickCount64(),now_ms())",
             "stats_selected_section","case WM_LBUTTONUP:","system_popout_id"});
-        need(popup,{"popup.kind>=2","draw_system_graph(dc,graph,popup.kind>=6?popup.kind-1:popup.kind-2",
+        need(popup,{"popup.kind>=2","draw_system_charts(dc,graph,popup.kind",
             "popup_auto_scale_keys"});
         need(page,{"popup_auto_scale_keys","stats_popup_auto_cpu"});
         need(page,{"void StatisticsPage::refresh_auto_axis(unsigned index,bool immediate)",
             "refresh_auto_axis(0,false);","refresh_auto_axis(1,false);",
             "refresh_auto_axis(index,true);","if(history_axis_refit_pending_) {",
             "if(first_history_data)history_axis_refit_pending_=true;",
-            "held.zoom=chart_effective_zoom(auto_scale_[index]","auto_vertical_zoom(held.apps,held.from,held.to),1.0);","history_axis_refit_pending_=true;"});
+            "held.zoom=chart_effective_zoom(auto_scale_[index]","auto_vertical_zoom(held.apps,held.range.from,held.range.to),1.0);","history_axis_refit_pending_=true;"});
         need(page,{"popout_live_id","popout_history_id","rebuild_live_series()",
             "animation_duration_ms_","GetTickCount64()-animation_started_","IntersectClipRect",
             "stats_limit_id","stats_history_top","stats_uptime_top","animate_message",
             "SetTimer(hwnd_,animate_message,33,nullptr)","nullptr,nullptr,GetModuleHandleW(nullptr),this);",
             "target_auto_zoom_[index]","axis_initialized_[index]","popup.axis_dirty=true",
-            "const auto now=live_view_end();"});
+            "const auto end=kind==0?live_view_end():system_view_end();"});
         need(popup,{"WM_MOUSEWHEEL","WM_LBUTTONDOWN","WM_LBUTTONDBLCLK","draw_graph(",
             "paint_popup(","1050,820,nullptr,nullptr,GetModuleHandleW(nullptr),&popup)",
-            "popup.kind==0?live_view_end():window_to_"});
+            "toggle_chart_pause(popup->kind,popup->held,popup->pause_toggle)",
+            "chart_popup_window(chart_range(popup.kind,popup.held)","chart_popup_pan_limit(base,popup->zoom_x)"});
         need(overlay,{"grouped_processes_,options_.interval_ms",
             "if (wp==SIZE_MINIMIZED) return 0;"});
         absent(overlay,{"PostMessageW(window,WM_CLOSE,0,0)"});
-        need(page,{"draw_core_pair(dc,area,*selected_core_", "select_core(core_indices_[item->index]);"});
-        need(popup,{"draw_core_pair(dc,graph,popup.kind-32", "if(popup->kind>=32)"});
+        need(page,{"draw_system_charts(dc,selected_system_chart_area(kind)", "select_core(core_indices_[item->index]);",
+            "hover_system_charts(kind,{x,y},selected_system_chart_area(kind)", "system_chart_bounds(area,panels.secondary.has_value())"});
+        absent(popup,{"draw_system_graph(","chart_pair_split("});
     } else if(policy=="statistics_tooltip_axis_policy") {
         const auto page=read(root/"src/statistics_page.cpp");
         const auto header=read(root/"include/fluxtop/statistics_page.hpp");
@@ -217,8 +220,8 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         one_of(page,{"stat_network(process->rx_bytes_per_second,process->tx_bytes_per_second)",
             "stat_network(p.rx_bytes_per_second,p.tx_bytes_per_second)"});
         need(header,{"target_auto_zoom_"});
-        need(popup,{"draw_metric_tooltip(dc,bubble,app,score,sample_at)",
-            "sample_at=pts[j].first","bubble_width*198.0/420.0",
+        need(popup,{"draw_metric_tooltip(dc,bubble,apps[hit->app],hit->score,hit->sample_at)",
+            "auto_score_hit(apps,graph,popup.cursor", "bubble_width*198.0/420.0",
             "popup.target_auto_zoom=auto_vertical_zoom(apps,from,to)"});
     } else if(policy=="statistics_table_popout_policy") {
         const auto page=read(root/"src/statistics_page.cpp");
@@ -256,7 +259,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "save(L\"overlay_animation\", animation_enabled_ ? 1 : 0)",
             "animation_control, 22, 704, 536, 26","case animation_control:",
             "if(pinned) from=i==0?0.0f:std::max(1.0f,from);",
-            "target_->PushAxisAlignedClip(D2D1::RectF(0,row_height()+1,table_width(),",
+            "target_->PushAxisAlignedClip(D2D1::RectF(0,row_height()+1,table.total_width,",
             "constexpr UINT overlay_animation_timer_ms = 40;",
             "SetTimer(hwnd_,overlay_animation_timer,overlay_animation_timer_ms,nullptr)",
             "order_changed","struct CachedRowTextLayouts {","cache_capacity = std::clamp",
@@ -266,7 +269,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "row_animation_last_painted_progress_","paint(true)","if(!animation_only) {",
             "target_->PushAxisAlignedClip(D2D1::RectF(0,row_height()+1,",
             "A colored CPU/GPU heading has two ranges, but only needs one text layout.",
-            "const auto geometry=calculate_overlay_columns(","if (!animation_enabled_) {",
+            "const auto table=table_geometry(","if (!animation_enabled_) {",
             "const bool finished=!row_animation_active_ || elapsed>=row_animation_duration_ms_;",
             "if(finished) {","KillTimer(hwnd_,overlay_animation_timer);",
             "const float opacity=1.0f; // Never fade newly appearing rows or their icons.",
@@ -274,7 +277,9 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "row_image_budget_bytes = 6U*1024U*1024U","max_builds_per_frame = 6",
             "clear_row_images(); // No animation textures or extra RAM in idle.",
             "row_images_.clear();","CreateCompatibleRenderTarget(",
-            "offscreen->GetBitmap(&bitmap)","target_->DrawBitmap(row_bitmap,"});
+            "offscreen->GetBitmap(&bitmap)","target_->DrawBitmap(row_bitmap,",
+            "draw_base_row(row,geometry,0,offscreen.Get(),ink.Get())","draw_base_row(row,geometry,y)",
+            "header_colors_?reading:std::nullopt","row_colors_?reading:std::nullopt"});
         absent(overlay,{"paint_values(*previous,1.0f-progress)",
             "auto_metric_has_burst(p,static_cast<AutoMetric>(j+1))",
             "true,true,displayed.loads[metric],alpha","options_.interval_ms*0.65",
@@ -311,8 +316,10 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         regex_need(overlay,"L\"Авто\\s*[—-]",false);
         need(overlay,{"disk_checkbox_control = 300","std::array<HWND,26> disk_checks_{};",
             "disk_checkbox_control+ordinal","const int cpu_y=486+rows*32;","const int summary_y=cpu_aggregate_y+36;",
+            "position(cpu_temperature_label_,temperature_y)","const int cpu_aggregate_y=temperature_y+heading_spacing;",
             "SendMessageW(disk_checks_[i],BM_GETCHECK,0,0)",
-            "const int preferred_x=static_cast<int>(rect.right)-width;"});
+            "right_anchor_ = read(L\"anchor_right\"", "save(L\"anchor_right\"",
+            "overlay_fitted_left(right, width, area.left, area.right, margin)"});
         absent(overlay,{"LBS_MULTIPLESEL","LB_GETSEL","LB_SETSEL",
             "Диски (% активности всей системы, не по приложениям):"});
         const auto disk_page=read(root/"src/statistics_page.cpp");

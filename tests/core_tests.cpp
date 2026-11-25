@@ -623,12 +623,43 @@ void overlay_geometry_tests() {
         "removed FPS checkbox cannot create a sixth table metric");
 
     const auto summary = calculate_overlay_columns(font, 31U, true, true);
-    check(summary.left[0] == 0.0f && summary.right[0] == 0.0f,
-        "summary-only view has no application column");
-    check(std::abs(summary.left[1] - config.left_padding) < .001f,
-        "summary-only view starts at the left padding without an unnecessary gap");
+    check(summary.left[0] == config.left_padding &&
+          std::abs(summary.right[0]-summary.left[0]-config.summary_fps_width*font)<.001f,
+        "summary-only view starts with a compact FPS cell and no icon slot");
+    check(std::abs(summary.left[1]-summary.right[0]-config.column_gap*font)<.001f,
+        "summary-only resource columns follow FPS using the standard gap");
     check(std::abs(summary.total_width - summary.right[5] - config.right_padding) < .001f,
         "summary-only width is produced by the same layout calculation");
+
+    using fluxtop::calculate_overlay_table;
+    const auto mixed=calculate_overlay_table(font,31U,false,true,3,2);
+    const float gap=config.column_gap*font;
+    check(std::abs(mixed.disks.left(0)-all.right[5]-gap)<.001f &&
+          std::abs(mixed.cores.left(0)-mixed.disks.right(2)-gap)<.001f &&
+          std::abs(mixed.total_width-mixed.cores.right(1)-config.right_padding)<.001f,
+        "dynamic column cells and the window width share one layout");
+    const auto coreOnly=calculate_overlay_table(font,0U,true,false,0,1);
+    const auto diskOnly=calculate_overlay_table(font,0U,true,false,1,0);
+    const auto fpsOnly=calculate_overlay_table(font,0U,true,false,0,0);
+    const float firstDynamic=fpsOnly.base.right[0]+gap;
+    check(std::abs(coreOnly.cores.left(0)-firstDynamic)<.001f &&
+          std::abs(diskOnly.disks.left(0)-firstDynamic)<.001f &&
+          std::abs(diskOnly.total_width-diskOnly.disks.right(0)-config.right_padding)<.001f,
+        "summary FPS stays aligned when only dynamic resource columns are shown");
+    check(std::abs(fpsOnly.total_width-fpsOnly.base.right[0]-config.right_padding)<.001f,
+        "the FPS cell fits even when every resource column is hidden");
+
+    using fluxtop::overlay_fitted_left;
+    constexpr int savedRight = 1700;
+    check(overlay_fitted_left(savedRight, 480, 0, 1920, 8) == 1220 &&
+          overlay_fitted_left(savedRight, 800, 0, 1920, 8) == 900,
+        "startup and sampled widths restore the same saved right edge");
+    check(overlay_fitted_left(savedRight, 1800, 0, 1920, 8) == 8 &&
+          overlay_fitted_left(savedRight, 800, 0, 1920, 8) == 900,
+        "a temporary oversized table does not change its preferred right edge");
+    check(overlay_fitted_left(-100, 480, -1920, 0, 8) == -580 &&
+          overlay_fitted_left(savedRight, 480, 0, 1280, 8) == 792,
+        "restore supports negative monitor coordinates and a smaller work area");
 }
 void statistics_sidebar_order_tests() {
     using namespace fluxtop;

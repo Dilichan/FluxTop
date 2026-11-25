@@ -26,17 +26,20 @@ CpuViewSettings load_cpu_view(const CpuSettingRead& read) {
     CpuViewSettings settings;
     settings.package=read(L"cpu_view_package")!=L"0";
     settings.maximum=read(L"cpu_view_maximum")==L"1";settings.average=read(L"cpu_view_average")==L"1";
-    std::wistringstream input(read(L"cpu_view_core_columns"));std::wstring item;unsigned visible{};
-    while(settings.columns.size()<512 && std::getline(input,item,L',')) {
-        const auto a=item.find(L'/'),b=item.find(L'/',a==item.npos?item.size():a+1);
-        if(a==item.npos || b==item.npos)continue;
-        const auto id=identity(std::wstring_view(item).substr(0,a));
-        const auto width=integer(std::wstring_view(item).substr(b+1));
-        if(!id || !width || (item.substr(a+1,b-a-1)!=L"0" && item.substr(a+1,b-a-1)!=L"1"))continue;
+    std::wistringstream input(read(L"cpu_view_core_columns"));std::wstring item;
+    while(settings.columns.size()<CpuViewSettings::column_limit && std::getline(input,item,L',')) {
+        const std::wstring_view entry{item};
+        const auto separator=entry.find(L'/');
+        if(separator==entry.npos)continue;
+        const auto id=identity(entry.substr(0,separator));
+        const auto flags=entry.substr(separator+1);
+        const auto legacy_separator=flags.find(L'/');
+        const auto visibility=flags.substr(0,legacy_separator);
+        if(!id || (visibility!=L"0" && visibility!=L"1"))continue;
+        // Older settings include a numeric width after the visibility flag.
+        if(legacy_separator!=flags.npos && !integer(flags.substr(legacy_separator+1)))continue;
         if(std::any_of(settings.columns.begin(),settings.columns.end(),[&](const auto& column){return column.id==*id;}))continue;
-        const bool show=item[a+1]==L'1' && visible<CpuViewSettings::column_limit;
-        if(show)++visible;
-        settings.columns.push_back({*id,show,std::clamp(*width,6U,18U)});
+        settings.columns.push_back({*id,visibility==L"1"});
     }
     return settings;
 }
@@ -45,7 +48,7 @@ void save_cpu_view(const CpuViewSettings& settings,const CpuSettingWrite& write)
     write(L"cpu_view_average",settings.average?L"1":L"0");
     std::wstring text;for(const auto& column:settings.columns){
         if(!text.empty())text+=L",";
-        text+=key(column.id)+L"/"+(column.visible?L"1":L"0")+L"/"+std::to_wstring(column.width);
+        text+=key(column.id)+L"/"+(column.visible?L"1":L"0");
     }
     write(L"cpu_view_core_columns",text);
 }
@@ -59,12 +62,6 @@ std::optional<double> cpu_application_load(const CpuProcessExecution& execution,
     if(execution.status!="ready" && execution.status!="partial")return {};
     for(const auto& cpu:execution.logical)if(id==CpuViewId{cpu.group,cpu.number})return cpu_logical_percent(cpu.percent.value_or(-1));
     return {};
-}
-std::vector<std::pair<float,float>> cpu_column_layout(float first,float font,float gap,std::span<const CpuViewColumn> columns){
-    std::vector<std::pair<float,float>> result;result.reserve(columns.size());
-    for(const auto& column:columns){const float right=first+font*static_cast<float>(column.width);
-        result.emplace_back(first,right);first=right+font*gap;}
-    return result;
 }
 std::wstring cpu_core_label(const IntelCoreTemperature& core,std::span<const IntelCoreTemperature> topology){
     unsigned ordinal=0;

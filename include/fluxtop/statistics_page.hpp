@@ -1,6 +1,7 @@
 #pragma once
 #include "fluxtop/model.hpp"
 #include "fluxtop/statistics_history.hpp"
+#include "fluxtop/statistics_chart_controls.hpp"
 #include "fluxtop/cpu_view.hpp"
 #include "fluxtop/system_graph_history.hpp"
 #include <windows.h>
@@ -72,23 +73,31 @@ private:
     };
     void draw_chart_core(HDC dc,const ChartStyle& style,
         const std::vector<ChartStroke>& plots,const std::vector<ChartBar>& bars={});
+    static ChartStyle mini_chart_style(const RECT& area,bool live);
+    HFONT chart_font();
+    void set_chart_fill(bool enabled);
     void fill_under(HDC dc,const std::vector<POINT>& points,LONG baseline,COLORREF color,BYTE opacity=31);
     void draw_system_details(HDC dc,unsigned metric);
     void select_disk(wchar_t letter);
     void select_core(std::size_t index);
     std::vector<CpuChartSeries> cpu_metric_series(unsigned metric,const CpuChartSample& sample)const;
-    void draw_core_pair(HDC dc,const RECT& area,std::size_t core,std::int64_t from,std::int64_t to,
-        bool autoscale,double zoom,POINT hover,const std::deque<SystemPoint>* frozen=nullptr,bool detached=false);
-    void show_system_hover(unsigned metric,POINT cursor,const RECT& area,std::int64_t from,std::int64_t to,const std::deque<SystemPoint>* frozen=nullptr);
+    void draw_system_charts(HDC dc,const RECT& area,unsigned kind,std::int64_t from,std::int64_t to,
+        bool autoscale,double zoom,const std::deque<SystemPoint>* frozen=nullptr,bool detached=false);
+    struct FrozenView;
+    void hover_system_charts(unsigned kind,POINT cursor,const RECT& area,std::int64_t from,std::int64_t to,
+        const FrozenView& held);
+    RECT selected_system_chart_area(unsigned kind) const;
+    void show_system_hover(unsigned metric,POINT cursor,const RECT& area,std::int64_t from,std::int64_t to,
+        const FrozenView& held);
     void draw_system_hover(HDC dc,const RECT& bounds);
     bool advance_time_view(double elapsed_ms);
     std::int64_t system_view_end() const;
     std::int64_t live_view_end() const;
     void draw_system_graph(HDC dc,const RECT& area,unsigned metric,std::int64_t from,
-        std::int64_t to,bool autoscale,double manual_zoom,POINT hover,
+        std::int64_t to,bool autoscale,double manual_zoom,
         const std::deque<SystemPoint>* frozen=nullptr,bool detached=false);
     void select_section(unsigned section);
-    unsigned selected_popup_kind() const;
+    unsigned selected_chart_kind() const;
     bool has_popup() const;
     void refresh_auto_axis(unsigned index,bool immediate);
     void rebuild_live_series();
@@ -108,10 +117,31 @@ private:
         void clear() noexcept;
         HDC prepare(HDC reference,LONG width,LONG height);
     };
+    struct SystemInfo {
+        std::optional<std::uint64_t> ram_used,ram_capacity,gpu_memory,gpu_capacity;
+        std::optional<double> rx,tx,cpu_temp,gpu_temp;
+        unsigned logical_processors{};
+        double collection_ms{};
+        bool cpu_board{};
+        std::string cpu_source{"unavailable"};
+        bool operator==(const SystemInfo&) const = default;
+    };
+    struct FrozenView {
+        bool paused{};
+        std::deque<SystemPoint> samples;
+        std::vector<StatisticsApplication> apps;
+        ChartTimeWindow range;
+        double zoom{1.0};
+        SystemInfo info;
+    };
+    ChartTimeWindow chart_range(unsigned kind,const FrozenView& held) const;
+    const std::vector<StatisticsApplication>& chart_apps(unsigned kind,const FrozenView& held) const;
+    void toggle_chart_pause(unsigned kind,FrozenView& held,HWND control);
     struct PopupState;
     static LRESULT CALLBACK popup_dispatch(HWND window,UINT message,WPARAM wp,LPARAM lp);
     void open_popup(unsigned kind);
-    void popup_range(const PopupState& popup,std::int64_t& from,std::int64_t& to) const;
+    ChartTimeWindow popup_range(const PopupState& popup) const;
+    void set_popup_autoscale(PopupState& popup,bool enabled);
     void paint_popup(PopupState& popup,HDC dc);
     COLORREF series_color(const StatisticsApplication& app,std::size_t index) const;
     void mouse(int x,int y);
@@ -135,10 +165,7 @@ private:
         HWND auto_toggle{};
         HWND fill_toggle{};
         HWND pause_toggle{};
-        bool paused{};
-        std::deque<SystemPoint> frozen_system;
-        std::vector<StatisticsApplication> frozen_apps;
-        std::int64_t frozen_from{},frozen_to{};
+        FrozenView held;
         bool auto_scale{true};
         double cached_auto_zoom{1.0};
         double target_auto_zoom{1.0};
@@ -158,7 +185,6 @@ private:
     const std::deque<SystemPoint>& system_points_;
     CpuViewSettings cpu_view_;
     ULONGLONG hover_last_frame_{};
-    POINT system_hover_{-1,-1};
     unsigned selected_section_{0}; // CPU, RAM, network, GPU, AutoScore, history, uptime
     wchar_t selected_disk_letter_{};
     std::optional<std::size_t> selected_core_;
@@ -176,26 +202,12 @@ private:
     void refresh_pause_control();
     bool fill_enabled_{true}; // Actual alpha blending; shared by embedded and detached graphs.
     double smooth_system_end_{},smooth_live_end_{};
-    struct SystemInfo {
-        std::optional<std::uint64_t> ram_used,ram_capacity,gpu_memory,gpu_capacity;
-        std::optional<double> rx,tx,cpu_temp,gpu_temp;
-        unsigned logical_processors{};
-        double collection_ms{};
-        bool cpu_board{};
-        std::string cpu_source{"unavailable"};
-    } system_info_;
-    struct FrozenView {
-        bool paused{};
-        std::deque<SystemPoint> samples;
-        std::vector<StatisticsApplication> apps;
-        std::int64_t from{},to{};
-        double zoom{1.0};
-        SystemInfo info{};
-    };
+    SystemInfo system_info_;
     std::deque<FrozenView> frozen_views_{32};
     bool system_tip_active_{};
     unsigned system_tip_metric_{};
     SystemPoint system_tip_sample_{};
+    SystemInfo system_tip_info_;
     HWND popout_live_{},popout_history_{},popout_table_{};
     HWND auto_live_{},auto_history_{};
     std::array<bool,2> auto_scale_{{true,true}};
@@ -224,7 +236,7 @@ private:
     HFONT font_{};
     UINT controls_font_dpi_{};
     // Fonts and pens are owned by the page and reused during 33-ms animation.
-    HFONT paint_font_{},popup_font_{};
+    HFONT paint_font_{};
     std::array<HFONT,3> tooltip_fonts_{};
     std::array<int,3> tooltip_font_heights_{};
     std::map<COLORREF,HPEN> stroke_pens_,detail_pens_;
