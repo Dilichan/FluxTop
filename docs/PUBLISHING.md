@@ -28,8 +28,8 @@ cmake -P tools/Prepare-PawnIO.cmake
 cmake --preset windows -DFLUXTOP_RELEASE_TAG:STRING=v0.2.6
 cmake --build --preset release
 ctest --preset release --output-on-failure
-cmake -DROOT=. -DTAG=v0.2.6 -DOUTPUT=build/release-notes.md -P tools/Get-ReleaseNotes.cmake
-cmake -DROOT=. -DBUILD_DIRECTORY=build -DOUTPUT_DIR=out/release -DCONFIG=Release -P tools/Package-Release.cmake
+cmake '-DROOT=.' '-DTAG=v0.2.6' '-DOUTPUT=build/release-notes.md' -P tools/Get-ReleaseNotes.cmake
+cmake '-DROOT=.' '-DBUILD_DIRECTORY=build' '-DOUTPUT_DIR=out/release' '-DCONFIG=Release' -P tools/Package-Release.cmake
 ```
 
 **Почему тег указан явно:** `FLUXTOP_RELEASE_TAG` — переменная CMake Cache. После сборки предыдущей версии в том же каталоге значение может остаться `v0.2.5`, даже когда `project(VERSION)` уже изменён. Перед локальной упаковкой задавайте `-DFLUXTOP_RELEASE_TAG:STRING=v0.2.6`; workflow релиза получает тег из GitHub и задаёт его самостоятельно.
