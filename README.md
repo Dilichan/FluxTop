@@ -14,9 +14,14 @@
 <p align="center">
   <a href="https://github.com/Dilichan/FluxTop/releases/latest/download/FluxTop.exe"><strong>Скачать FluxTop.exe</strong></a>
   · <a href="https://github.com/Dilichan/FluxTop/releases">Все релизы</a>
-  · <a href="docs/RELEASE_NOTES.md">Что нового в v0.2.11</a>
+  · <a href="docs/RELEASE_NOTES.md">Примечания к выпуску</a>
   · <a href="https://github.com/Dilichan/FluxTop/issues">Сообщить об ошибке</a>
 </p>
+
+## Что нового в v0.2.11
+
+- **Статистика → FPS.** График показывает FPS приложений в фокусе за 1, 5, 15 или 30 минут текущего запуска. Наведите курсор на точку, чтобы увидеть приложение, число кадров в секунду и время замера. FPS измеряется через Windows ETW, поэтому устанавливать PresentMon не нужно.
+- **Настройки → Логи.** Кнопка открывает в Проводнике папку с журналом `activity.log`.
 
 ![Демонстрация прозрачного оверлея FluxTop](assets/preview/overlay.svg)
 
@@ -90,7 +95,7 @@ FluxTop связывает нагрузку с конкретными проце
 Требуются **Windows 10/11 x64**, MSVC/Windows SDK, CMake 3.24+ и Git. В PowerShell либо Developer Command Prompt:
 
 ```powershell
-cmake --preset windows -DFLUXTOP_RELEASE_TAG:STRING=v0.2.6
+cmake --preset windows -DFLUXTOP_RELEASE_TAG:STRING=v0.2.11
 cmake --build --preset release
 ctest --preset release --output-on-failure
 ```
