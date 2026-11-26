@@ -1,5 +1,6 @@
 #include "fluxtop/diagnostics.hpp"
 #include "fluxtop/statistics_page.hpp"
+#include "fluxtop/statistics_colors.hpp"
 #include "fluxtop/history_identity.hpp"
 #include "fluxtop/statistics_axis.hpp"
 #include "fluxtop/statistics_sidebar_order.hpp"
@@ -25,11 +26,10 @@
 #include <numeric>
 
 namespace {
-constexpr std::array<COLORREF,5> system_chart_colors{
-    RGB(14,132,177),RGB(67,105,181),RGB(184,55,114),RGB(131,54,156),RGB(194,89,178)};
-constexpr COLORREF cpu_temperature_color=RGB(218,94,0);
-constexpr COLORREF disk_chart_color=RGB(42,132,108);
-constexpr COLORREF fps_chart_color=RGB(150,84,37);
+using fluxtop::system_chart_colors;
+using fluxtop::cpu_temperature_color;
+using fluxtop::disk_chart_color;
+using fluxtop::fps_chart_color;
 bool is_cpu_chart_metric(unsigned metric) {
     return metric==0 || metric==31 || metric>=fluxtop::first_core_chart_metric;
 }

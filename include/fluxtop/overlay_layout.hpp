@@ -18,7 +18,7 @@ struct OverlayLayoutConfig {
     float left_padding = 2.0f;
     float right_padding = 2.0f;
     // CPU, RAM, GPU, GPU RAM, Rx/Tx, in font-size units.
-    std::array<float, 5> metric_widths{8.0f, 5.8f, 8.0f, 9.0f, 12.0f};
+    std::array<float, 5> metric_widths{9.0f, 6.8f, 8.0f, 10.0f, 12.0f};
     float disk_width = 7.0f; // Read/write throughput columns, one font unit narrower.
     float cpu_core_width = 13.0f; // Shared width of all physical-core columns.
 };

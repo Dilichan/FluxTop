@@ -1,4 +1,5 @@
 #include "fluxtop/system_graph_history.hpp"
+#include "fluxtop/overlay_charts.hpp"
 #include "fluxtop/statistics_chart_controls.hpp"
 #include <algorithm>
 #include <iostream>
@@ -75,6 +76,18 @@ int main(){try{
     const auto& latest=history->points().back();
     check(cpu_chart_value(cpu_core_chart_series(latest.cpu,{0,0},false)[0],latest.cpu,{})==50 &&
         cpu_chart_value(cpu_core_chart_series(latest.cpu,{0,0},true)[0],latest.cpu,{})==61,"core history remains usable by the existing graph series");
+    const auto disk=overlay_chart_values({OverlayChartKind::disk,L"Disk C",L"",L'C'},latest);
+    const auto core=overlay_chart_values({OverlayChartKind::core,L"P-Core 1",L"",0,{0,0}},latest);
+    check(disk.primary==35 && disk.secondary==45 && core.primary==50 && core.secondary==61,
+        "overlay graphs use the same disk and physical core readings as statistics");
+    check(!overlay_chart_values({OverlayChartKind::fps,L"FPS",L""},latest).primary,
+        "unknown FPS is a gap in the overlay graph");
+    check(overlay_chart_layout(750,700,16,0).height==0,"disabled graphs take no overlay space");
+    const auto layout=overlay_chart_layout(750,700,16,35);
+    check(layout.columns==3 && layout.capacity>0 && layout.capacity<35 && layout.height<=350,
+        "many graphs paginate within the overlay height budget");
+    check(overlay_chart_layout(180,700,16,4).columns==1,
+        "compact summary overlays lay out charts in a single column");
     const auto frozen=history->points();history->append(sample(start+1802000));
     check(frozen.back().time==start+1801000,"new background samples do not mutate a paused copy");
     SystemGraphHistory fast;

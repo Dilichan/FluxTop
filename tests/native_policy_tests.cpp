@@ -340,7 +340,8 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         need(overlay,{"for (const auto label : {L\"Авто\", L\"CPU\", L\"RAM\", L\"GPU\""});
         regex_need(overlay,"L\"Авто\\s*[—-]",false);
         need(overlay,{"disk_checkbox_control = 300","std::array<HWND,26> disk_checks_{};",
-            "disk_checkbox_control+ordinal","const int cpu_y=486+rows*32;","const int summary_y=cpu_aggregate_y+36;",
+            "disk_checkbox_control+ordinal","const int cpu_y=486+rows*32;","const int charts_y=cpu_aggregate_y+36;",
+            "const int summary_y=charts_y+heading_spacing+chart_rows*32+8;",
             "position(cpu_temperature_label_,temperature_y)","const int cpu_aggregate_y=temperature_y+heading_spacing;",
             "SendMessageW(disk_checks_[i],BM_GETCHECK,0,0)",
             "right_anchor_ = read(L\"anchor_right\"", "save(L\"anchor_right\"",

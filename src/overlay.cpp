@@ -2,9 +2,11 @@
 #include "fluxtop/application_display_name.hpp"
 #include "fluxtop/diagnostics.hpp"
 #include "fluxtop/overlay_layout.hpp"
+#include "fluxtop/overlay_charts.hpp"
 #include "fluxtop/cpu_view.hpp"
 
 #include "fluxtop/statistics_page.hpp"
+#include "fluxtop/statistics_colors.hpp"
 #include "fluxtop/app_icons.hpp"
 #include "fluxtop/autostart.hpp"
 #include "fluxtop/history.hpp"
@@ -42,7 +44,8 @@ constexpr int toggle_hotkey = 1, client_hotkey = 2;
 enum Control : UINT { open_client = 100, toggle_table, quit_app, top_label, top_control, sort_control, font_control,
     alpha_control, visible_control, move_control, icons_control, stats_control, startup_control,
     alpha_label, interval_control, summary_control, header_colors_control, row_colors_control, animation_control, logs_control, metric_control = 200, disk_checkbox_control = 300, disk_total_checkbox_control = 326, tab_control = 450, font_label = 500, interval_label = 501,
-    cpu_package_control=604,cpu_max_control,cpu_average_control,cpu_checkbox_control=700 };
+    cpu_package_control=604,cpu_max_control,cpu_average_control,cpu_checkbox_control=700,
+    chart_checkbox_control=2000 };
 constexpr unsigned all_metrics = 31; // Five resource columns; FPS is in the application heading.
 constexpr unsigned default_metrics = 31;
 constexpr std::array<Sort, 8> sort_ui_values{Sort::automatic, Sort::cpu, Sort::ram, Sort::gpu,
@@ -55,13 +58,33 @@ constexpr std::size_t sort_ui_index(Sort value) noexcept {
 static_assert(sort_ui_index(Sort::automatic) == 0 && sort_ui_index(Sort::cpu) == 1 &&
     sort_ui_index(Sort::gpu) == 3 && sort_ui_index(Sort::network) == 7);
 constexpr int load_band(double x) { return x < 50.0 ? 0 : x < 70.0 ? 1 : 2; }
-D2D1_COLOR_F overlay_load_color(std::optional<double> load) {
-    if(!load || !std::isfinite(*load) || *load<0.0)return D2D1::ColorF(1,1,1,1);
-    return load_band(*load)==0?D2D1::ColorF(0.25f,0.92f,0.35f,1)
-        :load_band(*load)==1?D2D1::ColorF(1.0f,0.80f,0.13f,1)
+D2D1_COLOR_F overlay_band_color(int band) {
+    return band==0?D2D1::ColorF(0.25f,0.92f,0.35f,1)
+        :band==1?D2D1::ColorF(1.0f,0.80f,0.13f,1)
         :D2D1::ColorF(1.0f,0.22f,0.22f,1);
 }
+D2D1_COLOR_F overlay_load_color(std::optional<double> load) {
+    if(!load || !std::isfinite(*load) || *load<0.0)return D2D1::ColorF(1,1,1,1);
+    return overlay_band_color(load_band(*load));
+}
 constexpr int temperature_band(double x) { return x < 65.0 ? 0 : x <= 80.0 ? 1 : 2; }
+D2D1_COLOR_F chart_ink(COLORREF color) {
+    return D2D1::ColorF(GetRValue(color)/255.0f,GetGValue(color)/255.0f,GetBValue(color)/255.0f);
+}
+COLORREF overlay_chart_series_color(OverlayChartKind kind) {
+    switch(kind) {
+    case OverlayChartKind::ram:return system_chart_colors[1];
+    case OverlayChartKind::network:return system_chart_colors[2];
+    case OverlayChartKind::gpu:return system_chart_colors[3];
+    case OverlayChartKind::vram:return system_chart_colors[4];
+    case OverlayChartKind::fps:return fps_chart_color;
+    case OverlayChartKind::disk:return disk_chart_color;
+    case OverlayChartKind::cpu_temperature:return cpu_temperature_color;
+    case OverlayChartKind::cpu:
+    case OverlayChartKind::core:return system_chart_colors[0];
+    }
+    return system_chart_colors[0];
+}
 static_assert(load_band(49.9) == 0 && load_band(50.0) == 1 && load_band(70.0) == 2);
 static_assert(temperature_band(64.9) == 0 && temperature_band(65.0) == 1
     && temperature_band(80.0) == 1 && temperature_band(80.1) == 2);
@@ -145,6 +168,9 @@ private:
     void layout_client();
     void apply_client();
     void refresh_disk_controls();
+    bool refresh_chart_choices(bool create_controls=false);
+    void update_selected_charts();
+    void draw_overlay_charts(float width,float top);
     std::vector<wchar_t> enabled_disk_letters() const;
     void cpu_settings_changed();
     void refresh_cpu_controls(bool force=false);
@@ -165,6 +191,9 @@ private:
         std::optional<double> load = std::nullopt);
     void draw_header_metric(unsigned column, const std::wstring& reading, std::optional<double> load,
         std::optional<double> temperature, D2D1_RECT_F rect);
+    struct ReadingTint { std::size_t first{}, count{}; D2D1_COLOR_F color{}; };
+    void draw_heading(std::wstring_view line,D2D1_RECT_F rect,IDWriteTextFormat* font,
+        const std::array<ReadingTint,2>& tints);
     void draw_cached_row_text(const Row& row, unsigned column, std::wstring_view value,
         D2D1_RECT_F rect, IDWriteTextFormat* font, bool highlight = false,
         std::optional<double> load = std::nullopt, ID2D1RenderTarget* destination = nullptr,
@@ -194,7 +223,7 @@ private:
     float dip(int px) const { return static_cast<float>(px) * 96.0f / static_cast<float>(dpi_); }
     int pixels(float value) const { return static_cast<int>(value * static_cast<float>(dpi_) / 96.0f + .5f); }
     std::size_t visible_rows(float height) const {
-        return static_cast<std::size_t>(std::max(0.0f, (height - row_height() - 4 + .01f) / row_height()));
+        return static_cast<std::size_t>(std::max(0.0f, (height - chart_layout_.height - row_height() - 4 + .01f) / row_height()));
     }
 
     Options options_;
@@ -225,6 +254,14 @@ private:
     HWND disk_total_check_{};
     std::vector<wchar_t> available_disk_letters_;
     std::array<HWND,26> disk_checks_{};
+    HWND chart_settings_label_{};
+    std::vector<HWND> chart_checks_;
+    std::vector<OverlayChart> chart_choices_;
+    std::vector<std::size_t> selected_charts_;
+    std::vector<wchar_t> chart_disks_;
+    std::vector<CpuViewId> chart_cores_;
+    OverlayChartLayout chart_layout_;
+    std::size_t chart_page_{};
     HWND shortcuts_label_{};
     bool summary_ = false;
     bool header_colors_ = true, row_colors_ = true;
@@ -336,6 +373,7 @@ void Overlay::load_settings() {
     }
     if (!options_.sort_explicit) options_.sort = static_cast<Sort>(std::clamp(read(L"sort", 0), 0, 7));
     if (!options_.collectors.gpu && (options_.sort == Sort::gpu || options_.sort == Sort::vram)) options_.sort = Sort::cpu;
+    refresh_chart_choices();
 }
 void Overlay::save_settings() noexcept {
     if (settings_.empty() || !hwnd_) return;
@@ -455,7 +493,9 @@ void Overlay::refresh_disk_controls() {
     constexpr int heading_spacing=28;
     const int temperature_y=cpu_y+heading_spacing+static_cast<int>((cpu_checks_.size()+4)/5)*32;
     const int cpu_aggregate_y=temperature_y+heading_spacing;
-    const int summary_y=cpu_aggregate_y+36;
+    const int charts_y=cpu_aggregate_y+36;
+    const int chart_rows=static_cast<int>((chart_checks_.size()+4)/5);
+    const int summary_y=charts_y+heading_spacing+chart_rows*32+8;
     const int header_y=summary_y+33;
     const int animation_y=header_y+36;
     const int stats_y=animation_y+43;
@@ -474,6 +514,9 @@ void Overlay::refresh_disk_controls() {
     position(cpu_temperature_label_,temperature_y);
     position(GetDlgItem(client_,cpu_package_control),cpu_aggregate_y);position(GetDlgItem(client_,cpu_max_control),cpu_aggregate_y);
     position(GetDlgItem(client_,cpu_average_control),cpu_aggregate_y);
+    position(chart_settings_label_,charts_y);
+    for(std::size_t i=0;i<chart_checks_.size();++i)
+        position(chart_checks_[i],charts_y+heading_spacing+static_cast<int>(i/5)*32);
     position(GetDlgItem(client_,summary_control),summary_y);
     position(GetDlgItem(client_,header_colors_control),header_y);
     position(GetDlgItem(client_,row_colors_control),header_y);
@@ -483,6 +526,62 @@ void Overlay::refresh_disk_controls() {
     position(GetDlgItem(client_,logs_control),quit_y);
     position(GetDlgItem(client_,quit_app),quit_y);
     if(!initializing_client_)layout_client();
+}
+void Overlay::update_selected_charts() {
+    selected_charts_.clear();
+    for(std::size_t i=0;i<chart_choices_.size();++i)
+        if(chart_choices_[i].enabled)selected_charts_.push_back(i);
+    chart_page_=0;
+}
+bool Overlay::refresh_chart_choices(bool create_controls) {
+    const std::span<const CpuCoreTemperature> cores=snapshot_?
+        std::span<const CpuCoreTemperature>(snapshot_->cpu_topology.cores):std::span<const CpuCoreTemperature>{};
+    const auto core_id=[](const CpuCoreTemperature& core){return CpuViewId{core.group,core.core_id};};
+    const bool changed=chart_choices_.empty() || chart_disks_!=available_disk_letters_ ||
+        !std::ranges::equal(cores,chart_cores_,{},core_id);
+    if(changed) {
+        chart_disks_=available_disk_letters_;
+        chart_cores_.clear();
+        chart_choices_={
+            {OverlayChartKind::cpu,L"CPU",L"cpu"},
+            {OverlayChartKind::cpu_temperature,L"Темп. ЦП",L"cpu_temperature"},
+            {OverlayChartKind::ram,L"RAM",L"ram"},
+            {OverlayChartKind::gpu,L"GPU",L"gpu"},
+            {OverlayChartKind::vram,L"GPU RAM",L"vram"},
+            {OverlayChartKind::network,L"Rx/Tx",L"network"},
+            {OverlayChartKind::fps,L"FPS",L"fps"}
+        };
+        for(const auto letter:chart_disks_)
+            chart_choices_.push_back({OverlayChartKind::disk,metric_text::disk_name(letter),
+                L"disk_"+std::wstring(1,letter),letter});
+        for(const auto& core:cores) {
+            const auto id=core_id(core);
+            chart_cores_.push_back(id);
+            chart_choices_.push_back({OverlayChartKind::core,cpu_core_label(core,cores),
+                L"core_"+std::to_wstring(id.group)+L"_"+std::to_wstring(id.number),0,id});
+        }
+        for(auto& chart:chart_choices_) {
+            chart.key=L"overlay_chart_"+chart.key;
+            chart.enabled=ini_overlay_read(settings_,chart.key.c_str(),0)!=0;
+        }
+        update_selected_charts();
+    }
+    if(chart_settings_label_ && (changed || create_controls)) {
+        for(HWND box:chart_checks_) {
+            std::erase_if(controls_,[box](const Child& child){return child.window==box;});
+            DestroyWindow(box);
+        }
+        chart_checks_.clear();
+        for(std::size_t i=0;i<chart_choices_.size();++i) {
+            const auto& chart=chart_choices_[i];
+            const auto box=control(L"BUTTON",chart.title.c_str(),BS_AUTOCHECKBOX|WS_TABSTOP,
+                chart_checkbox_control+static_cast<UINT>(i),22+static_cast<int>(i%5)*104,0,102,26);
+            SendMessageW(box,BM_SETCHECK,chart.enabled?BST_CHECKED:BST_UNCHECKED,0);
+            if(client_page_!=0)ShowWindow(box,SW_HIDE);
+            chart_checks_.push_back(box);
+        }
+    }
+    return changed;
 }
 void Overlay::fonts() {
     // Layouts and rasterized rows use the previous font; release both.
@@ -507,8 +606,12 @@ void Overlay::fit_table() {
     MONITORINFO monitor{sizeof(monitor)};
     if (!GetMonitorInfoW(MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST), &monitor)) return;
     const auto& area = monitor.rcWork; const int margin = pixels(8);
-    const int width = std::min(pixels(table_width()), static_cast<int>(area.right-area.left-margin*2));
-    const int requested_height = static_cast<int>(std::ceil((row_height() * static_cast<float>(summary_only() ? 1 : options_.top+1) + 4) * static_cast<float>(dpi_) / 96.0f));
+    const float desired_width=selected_charts_.empty()?table_width():std::max(table_width(),std::max(152.0f,text_size()*12));
+    const int width = std::max(1,std::min(pixels(desired_width), static_cast<int>(area.right-area.left-margin*2)));
+    chart_layout_=overlay_chart_layout(dip(width),dip(area.bottom-area.top-margin*2),text_size(),selected_charts_.size());
+    const auto last_page=chart_layout_.capacity?(selected_charts_.size()-1)/chart_layout_.capacity:0;
+    chart_page_=std::min(chart_page_,last_page);
+    const int requested_height = static_cast<int>(std::ceil((row_height() * static_cast<float>(summary_only() ? 1 : options_.top+1) + 4 + chart_layout_.height) * static_cast<float>(dpi_) / 96.0f));
     const int height = std::min(requested_height, static_cast<int>(area.bottom-area.top-margin*2));
     const int right = dragging_ || right_anchor_ == CW_USEDEFAULT ? rect.right : right_anchor_;
     const int x = overlay_fitted_left(right, width, area.left, area.right, margin);
@@ -653,6 +756,8 @@ void Overlay::init_client() {
         const auto box=control(L"BUTTON",label,BS_AUTOCHECKBOX|WS_TABSTOP,id,22+static_cast<int>(id-cpu_package_control)*190,720,180,26);
         SendMessageW(box,BM_SETCHECK,enabled?BST_CHECKED:BST_UNCHECKED,0);
     }
+    chart_settings_label_=control(L"STATIC",L"Графики в оверлее · последняя минута",0,0,22,0,540,24);
+    refresh_chart_choices(true);
     refresh_cpu_controls();
     refresh_disk_controls();
     initializing_client_ = false; client_stats();
@@ -822,6 +927,10 @@ void Overlay::receive() {
         for(const auto& disk:snapshot_->disks)detected.push_back(disk.letter);
         if(detected!=available_disk_letters_) {
             available_disk_letters_=std::move(detected);
+            refresh_disk_controls();
+            if(hwnd_)fit_table();
+        }
+        if(refresh_chart_choices()) {
             refresh_disk_controls();
             if(hwnd_)fit_table();
         }
@@ -1190,36 +1299,127 @@ void Overlay::draw_header_metric(unsigned column, const std::wstring& reading, s
         line += temperature && std::isfinite(*temperature) ? decimal(*temperature,0) + L"°C" : L"—";
         if (temperature && std::isfinite(*temperature)) temp_length = line.size() - temp_from;
     }
-    draw_text(line,rect,number_font_.Get());
-    if (!header_colors_) return;
+    draw_heading(line,rect,number_font_.Get(),{{
+        {from,load && std::isfinite(*load) && *load>=0?digits:0,overlay_load_color(load)},
+        {temp_from,temp_length,temp_length?overlay_band_color(temperature_band(*temperature)):D2D1_COLOR_F{}}
+    }});
+}
+void Overlay::draw_heading(std::wstring_view line,D2D1_RECT_F rect,IDWriteTextFormat* font,
+    const std::array<ReadingTint,2>& tints) {
+    draw_text(line,rect,font);
+    if (!header_colors_ || (!tints[0].count && !tints[1].count)) return;
     // A colored CPU/GPU heading has two ranges, but only needs one text layout.
     ComPtr<IDWriteTextLayout> layout;
-    if (FAILED(write_factory_->CreateTextLayout(line.c_str(),static_cast<UINT32>(line.size()),
-        number_font_.Get(),rect.right-rect.left,rect.bottom-rect.top,&layout))) return;
-    auto tint = [&](std::size_t offset, std::size_t length, D2D1_COLOR_F color) {
+    if (FAILED(write_factory_->CreateTextLayout(line.data(),static_cast<UINT32>(line.size()),
+        font,rect.right-rect.left,rect.bottom-rect.top,&layout))) return;
+    for(const auto& tint:tints) {
+        if(!tint.count)continue;
         DWRITE_HIT_TEST_METRICS hits[8]{};
         UINT32 count = 0;
-        if (FAILED(layout->HitTestTextRange(static_cast<UINT32>(offset),static_cast<UINT32>(length),
-            0,0,hits,8,&count))) return;
+        if (FAILED(layout->HitTestTextRange(static_cast<UINT32>(tint.first),static_cast<UINT32>(tint.count),
+            0,0,hits,8,&count))) continue;
         for (UINT32 i=0;i<count;++i) {
             const auto& hit = hits[i];
             if (hit.width <= 0 || hit.height <= 0) continue;
             target_->PushAxisAlignedClip(D2D1::RectF(rect.left+hit.left,rect.top+hit.top,
                 rect.left+hit.left+hit.width,rect.top+hit.top+hit.height),D2D1_ANTIALIAS_MODE_ALIASED);
-            brush_->SetColor(color);
-            target_->DrawText(line.c_str(),static_cast<UINT32>(line.size()),number_font_.Get(),
+            brush_->SetColor(tint.color);
+            target_->DrawText(line.data(),static_cast<UINT32>(line.size()),font,
                 rect,brush_.Get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
             target_->PopAxisAlignedClip();
         }
-    };
-    if (load && std::isfinite(*load) && *load >= 0) {
-        tint(from,digits,overlay_load_color(load));
     }
-    if (temp_length) {
-        const auto color = *temperature < 65 ? D2D1::ColorF(0.25f,0.92f,0.35f,1.0f)
-            : *temperature <= 80 ? D2D1::ColorF(1.0f,0.80f,0.13f,1.0f)
-            : D2D1::ColorF(1.0f,0.22f,0.22f,1.0f);
-        tint(temp_from,temp_length,color);
+}
+void Overlay::draw_overlay_charts(float width,float top) {
+    const auto& layout=chart_layout_;
+    if(!layout.capacity)return;
+    target_->SetTransform(D2D1::Matrix3x2F::Identity());
+    const auto first=chart_page_*layout.capacity;
+    const auto last=std::min(first+layout.capacity,selected_charts_.size());
+    const auto& samples=graph_history_->points();
+    const auto end=samples.empty()?0:samples.back().time;
+    constexpr std::int64_t duration=60000;
+    const auto start=end-duration;
+    const auto begin=std::lower_bound(samples.begin(),samples.end(),start,
+        [](const SystemChartPoint& point,std::int64_t time){return point.time<time;});
+    const float tile_width=(width-layout.gap*(static_cast<float>(layout.columns)+1))/static_cast<float>(layout.columns);
+    if(tile_width<=0)return;
+    for(auto index=first;index<last;++index) {
+        const auto& chart=chart_choices_[selected_charts_[index]];
+        const auto kind=chart.kind;
+        const auto values=samples.empty()?OverlayChartValues{}:overlay_chart_values(chart,samples.back());
+        const float x=layout.gap+static_cast<float>((index-first)%layout.columns)*(tile_width+layout.gap);
+        const float y=top+layout.gap+static_cast<float>((index-first)/layout.columns)*(layout.tile_height+layout.gap);
+        const float plot_top=y+row_height();
+        const float plot_bottom=y+layout.tile_height-2;
+        const bool temperature=kind==OverlayChartKind::cpu_temperature;
+        const bool variable=kind==OverlayChartKind::fps || kind==OverlayChartKind::network;
+        const wchar_t* unit=temperature?L" °C":kind==OverlayChartKind::fps?L"":
+            kind==OverlayChartKind::network?L" Mbps":L"%";
+        const bool has_value=values.primary && std::isfinite(*values.primary) && *values.primary>=0;
+        const auto reading=has_value?decimal(*values.primary)+unit:std::wstring(L"—");
+        std::wstring title=chart.title+L"  ";
+        const auto primary_offset=title.size();
+        title+=reading;
+        const auto secondary_offset=title.size()+3;
+        const bool paired=kind==OverlayChartKind::core || kind==OverlayChartKind::disk;
+        if(paired)
+            title+=L" · "+metric_text::temperature(values.secondary);
+        const bool has_secondary=paired && values.secondary && std::isfinite(*values.secondary);
+        draw_heading(title,D2D1::RectF(x,y,x+tile_width,plot_top),body_font_.Get(),{{
+            {primary_offset,has_value && !variable?reading.size():0,
+                temperature && has_value?overlay_band_color(temperature_band(*values.primary)):overlay_load_color(values.primary)},
+            {secondary_offset,has_secondary?title.size()-secondary_offset:0,
+                has_secondary?overlay_band_color(temperature_band(*values.secondary)):D2D1_COLOR_F{}}
+        }});
+        double primary_max=temperature?130.0:100.0;
+        if(variable) {
+            primary_max=1.0;
+            for(auto sample=begin;sample!=samples.end();++sample)
+                if(const auto value=overlay_chart_values(chart,*sample).primary)
+                    primary_max=std::max(primary_max,*value*1.1);
+        }
+        target_->PushAxisAlignedClip(D2D1::RectF(x,plot_top,x+tile_width,plot_bottom),D2D1_ANTIALIAS_MODE_ALIASED);
+        std::array<std::optional<D2D1_POINT_2F>,2> previous;
+        std::int64_t previous_time{};
+        const FocusedFpsSource* previous_source=nullptr;
+        const std::array<D2D1_COLOR_F,2> colors{chart_ink(overlay_chart_series_color(kind)),
+            chart_ink(cpu_temperature_color)};
+        for(auto sample=begin;sample!=samples.end();++sample) {
+            const auto current=overlay_chart_values(chart,*sample);
+            const auto* source=sample->fps?sample->fps->source.get():nullptr;
+            if(sample->time-previous_time>2LL*options_.interval_ms ||
+                (kind==OverlayChartKind::fps && source!=previous_source))previous={};
+            previous_time=sample->time;
+            previous_source=source;
+            const auto px=x+static_cast<float>(sample->time-start)/static_cast<float>(duration)*(tile_width-1);
+            const std::array readings{current.primary,current.secondary};
+            for(std::size_t series=0;series<readings.size();++series) {
+                if(!readings[series] || !std::isfinite(*readings[series])) {
+                    previous[series].reset();continue;
+                }
+                const auto maximum=series==0?primary_max:130.0;
+                const auto ratio=static_cast<float>(std::clamp(*readings[series]/maximum,0.0,1.0));
+                const auto point=D2D1::Point2F(px,plot_bottom-1-ratio*(plot_bottom-plot_top-2));
+                if(previous[series]) {
+                    brush_->SetColor(D2D1::ColorF(0,0,0,.8f));
+                    target_->DrawLine(*previous[series],point,brush_.Get(),3);
+                    brush_->SetColor(colors[series]);
+                    target_->DrawLine(*previous[series],point,brush_.Get(),1.5f);
+                } else {
+                    brush_->SetColor(colors[series]);
+                    target_->FillEllipse(D2D1::Ellipse(point,1,1),brush_.Get());
+                }
+                previous[series]=point;
+            }
+        }
+        target_->PopAxisAlignedClip();
+    }
+    if(selected_charts_.size()>layout.capacity) {
+        const auto pages=(selected_charts_.size()+layout.capacity-1)/layout.capacity;
+        const auto page_number=std::to_wstring(chart_page_+1)+L" / "+std::to_wstring(pages);
+        const auto y=top+layout.height-text_size()-layout.gap;
+        draw_text(page_number,D2D1::RectF(layout.gap,y,width-layout.gap,y+row_height()),number_font_.Get());
     }
 }
 void Overlay::paint(bool animation_only) {
@@ -1237,7 +1437,8 @@ void Overlay::paint(bool animation_only) {
     // On an animation tick, find the Y-band occupied by changing positions in
     // the previous and current frame. Static rows outside this band are reused.
     const float body_top=row_height()+1;
-    float dirty_top=body_top,dirty_bottom=dip(bitmap_size_.cy);
+    const float table_bottom=std::max(body_top,dip(bitmap_size_.cy)-chart_layout_.height);
+    float dirty_top=body_top,dirty_bottom=table_bottom;
     bool partial_body=false;
     if(animation_only && dip(bitmap_size_.cy)>body_top && row_animation_active_ && !row_motion_.empty()) {
         float low=dirty_bottom,high=body_top;
@@ -1256,7 +1457,7 @@ void Overlay::paint(bool animation_only) {
         }
         if(high>low) {
             dirty_top=std::clamp(low,body_top,dirty_bottom);
-            dirty_bottom=std::clamp(high,body_top,dip(bitmap_size_.cy));
+            dirty_bottom=std::clamp(high,body_top,table_bottom);
             partial_body=dirty_bottom>dirty_top;
         }
     }
@@ -1350,7 +1551,7 @@ void Overlay::paint(bool animation_only) {
     } // Header values and layout stay untouched during animation-only frames.
     // The header never moves or gets covered by transitioning rows.
     target_->PushAxisAlignedClip(D2D1::RectF(0,row_height()+1,table.total_width,
-        dip(bitmap_size_.cy)),D2D1_ANTIALIAS_MODE_ALIASED);
+        table_bottom),D2D1_ANTIALIAS_MODE_ALIASED);
     if(partial_body)
         target_->PushAxisAlignedClip(D2D1::RectF(0,dirty_top,table.total_width,dirty_bottom),
             D2D1_ANTIALIAS_MODE_ALIASED);
@@ -1430,6 +1631,7 @@ void Overlay::paint(bool animation_only) {
     }
     if(partial_body)target_->PopAxisAlignedClip();
     target_->PopAxisAlignedClip();
+    if(!animation_only)draw_overlay_charts(dip(bitmap_size_.cx),table_bottom);
     const auto result=target_->EndDraw();
     if (result == D2DERR_RECREATE_TARGET) { release_surface(); return; }
     require_hr(result,"Transparent table paint");
@@ -1560,6 +1762,18 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         break;
     case WM_COMMAND:
         if (initializing_client_) return 0;
+        if(LOWORD(wp)>=chart_checkbox_control && LOWORD(wp)<chart_checkbox_control+chart_checks_.size() &&
+            HIWORD(wp)==BN_CLICKED) {
+            const auto index=LOWORD(wp)-chart_checkbox_control;
+            auto& chart=chart_choices_[index];
+            chart.enabled=SendMessageW(chart_checks_[index],BM_GETCHECK,0,0)==BST_CHECKED;
+            update_selected_charts();
+            fit_table();
+            save_settings();
+            if(!settings_.empty())ini_overlay_write(settings_,chart.key.c_str(),chart.enabled);
+            InvalidateRect(hwnd_,nullptr,FALSE);
+            return 0;
+        }
         diagnostics::write(diagnostics::Level::trace,"ui.command",
             "control_id="+std::to_string(LOWORD(wp))+" notification="+std::to_string(HIWORD(wp)));
         if(LOWORD(wp)>=cpu_checkbox_control && LOWORD(wp)<cpu_checkbox_control+cpu_checks_.size() && HIWORD(wp)==BN_CLICKED){
@@ -1622,6 +1836,7 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         KillTimer(window,settings_timer); apply_client(); DestroyWindow(window); return 0;
     case WM_DESTROY:
         statistics_.reset(); tabs_=nullptr; client_=nullptr; controls_.clear();
+        chart_settings_label_=nullptr;chart_checks_.clear();
         cpu_label_=nullptr;cpu_temperature_label_=nullptr;cpu_checks_.clear();cpu_topology_ids_.clear();
         disk_checks_.fill(nullptr);disk_total_check_=nullptr;shortcuts_label_=nullptr;
         if (client_font_) { DeleteObject(client_font_); client_font_=nullptr; } activity(); return 0;
@@ -1702,7 +1917,17 @@ LRESULT Overlay::message(UINT msg,WPARAM wp,LPARAM lp) {
     case WM_NCHITTEST: return moving_ ? HTCAPTION : HTTRANSPARENT;
     case WM_MOUSEWHEEL: {
         if (moving_) {
-            RECT rect{}; GetClientRect(hwnd_,&rect); const auto count=visible_rows(dip(rect.bottom)); const auto maximum=rows_.size()>count ? rows_.size()-count : 0;
+            RECT rect{}; GetClientRect(hwnd_,&rect);
+            POINT cursor{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
+            ScreenToClient(hwnd_,&cursor);
+            if(chart_layout_.capacity && dip(cursor.y)>=dip(rect.bottom)-chart_layout_.height) {
+                const auto maximum=(selected_charts_.size()-1)/chart_layout_.capacity;
+                if(GET_WHEEL_DELTA_WPARAM(wp)<0)chart_page_=std::min(maximum,chart_page_+1);
+                else if(chart_page_)--chart_page_;
+                InvalidateRect(hwnd_,nullptr,FALSE);
+                return 0;
+            }
+            const auto count=visible_rows(dip(rect.bottom)); const auto maximum=rows_.size()>count ? rows_.size()-count : 0;
             if (GET_WHEEL_DELTA_WPARAM(wp)<0) scroll_=std::min(maximum,scroll_+1); else if (scroll_) --scroll_;
             InvalidateRect(hwnd_,nullptr,FALSE);
         }
