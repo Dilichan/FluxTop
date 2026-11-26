@@ -20,10 +20,16 @@ constexpr ChartPairSplit chart_pair_split(long top,long bottom) noexcept {
 // System kinds (2 and above) share the detached windows' stored autoscale keys.
 struct SystemChartPanel { unsigned metric; std::wstring_view caption{}; };
 struct SystemChartPanels { SystemChartPanel primary; std::optional<SystemChartPanel> secondary; };
+inline constexpr unsigned fps_chart_kind=32, first_core_chart_kind=fps_chart_kind+1;
+inline constexpr unsigned fps_chart_metric=32, first_core_chart_metric=fps_chart_metric+1;
 constexpr SystemChartPanels chart_system_panels(unsigned kind) noexcept {
     if(kind==2)return {{0,L"Загрузка CPU"},SystemChartPanel{31,L"Температура CPU"}};
     if(kind==5)return {{3,L"Загрузка GPU"},SystemChartPanel{4,L"Использование VRAM"}};
-    if(kind>=32)return {{32U+2U*(kind-32U),L"Загрузка "},SystemChartPanel{33U+2U*(kind-32U),L"Температура "}};
+    if(kind==fps_chart_kind)return {{fps_chart_metric},{}};
+    if(kind>=first_core_chart_kind) {
+        const auto metric=first_core_chart_metric+2U*(kind-first_core_chart_kind);
+        return {{metric,L"Загрузка "},SystemChartPanel{metric+1,L"Температура "}};
+    }
     return {{kind>=6?kind-1:kind-2},{}}; // Disks, RAM, network
 }
 

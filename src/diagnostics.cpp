@@ -114,6 +114,7 @@ public:
     Journal():path_(journal_path()),worker_([this]{run();}){}
     Journal(const Journal&)=delete;
     Journal& operator=(const Journal&)=delete;
+    std::filesystem::path directory() const { return path_.parent_path(); }
     ~Journal() {
         {std::lock_guard lock(mutex_);closing_=true;}
         ready_.notify_one();
@@ -201,4 +202,8 @@ void write(Level level,std::string_view category,std::string_view message) noexc
     try {instance().enqueue(level,category,message);}catch(...){}
 }
 void flush() noexcept {try{instance().flush_now();}catch(...){}}
+std::filesystem::path log_directory() noexcept {
+    try { return instance().directory(); }
+    catch (...) { return {}; }
+}
 } // namespace fluxtop::diagnostics

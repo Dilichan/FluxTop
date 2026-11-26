@@ -107,8 +107,15 @@ struct DiskActivity {
     std::optional<double> temperature_c; // Device temperature, not attributable to individual processes.
 };
 
+struct FpsFocus {
+    std::uintptr_t window{};
+    std::uint32_t pid{};
+    std::uint64_t epoch{};
+};
+
 struct Snapshot {
     std::int64_t timestamp_ms{};
+    std::uint64_t fps_focus_epoch{};
     double collection_ms{};
     double elapsed_ms{};
     unsigned logical_processors{};

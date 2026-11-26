@@ -18,7 +18,9 @@ void layout_detached_controls(HWND window,const std::array<HWND,3>& controls) {
 }
 }
 std::wstring popup_auto_scale_key(unsigned kind) {
-    if(kind>=32)return L"stats_popup_auto_core_"+std::to_wstring(kind-32);
+    if(kind==fps_chart_kind)return L"stats_popup_auto_fps";
+    if(kind>=first_core_chart_kind)
+        return L"stats_popup_auto_core_"+std::to_wstring(kind-first_core_chart_kind);
     if(kind<popup_auto_scale_keys.size())return popup_auto_scale_keys[kind];
     return L"stats_popup_auto_disk_"+std::wstring(1,static_cast<wchar_t>(L'A'+kind-6));
 }
@@ -61,10 +63,11 @@ void StatisticsPage::open_popup(unsigned kind) {
     const std::array<const wchar_t*,6> titles{{L"FluxTop — последняя минута (AutoScore)",
         L"FluxTop — история (AutoScore)",L"FluxTop — ЦП",L"FluxTop — память",
         L"FluxTop — сеть",L"FluxTop — GPU"}};
-    const auto disk_title=kind>=32?L"FluxTop — "+cpu_core_label(core_entries_[kind-32],core_entries_):kind>=6
+    const auto disk_title=kind>=first_core_chart_kind?
+        L"FluxTop — "+cpu_core_label(core_entries_[kind-first_core_chart_kind],core_entries_):kind>=6
         ?L"FluxTop — Disk "+std::wstring(1,static_cast<wchar_t>(L'A'+kind-6))
         :std::wstring{};
-    const wchar_t* title=kind<titles.size()?titles[kind]:disk_title.c_str();
+    const wchar_t* title=kind==fps_chart_kind?L"FluxTop — FPS":(kind<titles.size()?titles[kind]:disk_title.c_str());
     popup.window=CreateWindowExW(0,window_class,title,
         WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,
         CW_USEDEFAULT,CW_USEDEFAULT,1050,820,nullptr,nullptr,GetModuleHandleW(nullptr),&popup);
@@ -84,10 +87,12 @@ void StatisticsPage::paint_popup(PopupState& popup,HDC dc) {
     const auto old_font=SelectObject(dc,chart_font());
     const std::array<const wchar_t*,6> names{{L"AutoScore · последняя минута",L"AutoScore · история",
         L"ЦП",L"Память",L"Сеть",L"GPU"}};
-    const auto disk_name=popup.kind>=32?cpu_core_label(core_entries_[popup.kind-32],core_entries_):popup.kind>=6
+    const auto disk_name=popup.kind>=first_core_chart_kind?
+        cpu_core_label(core_entries_[popup.kind-first_core_chart_kind],core_entries_):popup.kind>=6
         ?L"Disk "+std::wstring(1,static_cast<wchar_t>(L'A'+popup.kind-6))
         :std::wstring{};
-    label(dc,popup.kind<names.size()?names[popup.kind]:disk_name.c_str(),22,layout.title_top);
+    label(dc,popup.kind==fps_chart_kind?L"FPS приложений в фокусе":
+        (popup.kind<names.size()?names[popup.kind]:disk_name.c_str()),22,layout.title_top);
     // Controls are native Win32; navigation instructions are intentionally absent.
     const auto [from,to]=popup_range(popup);
     const auto* frozen_system=popup.held.paused?&popup.held.samples:nullptr;

@@ -95,8 +95,9 @@ private:
     std::int64_t live_view_end() const;
     void draw_system_graph(HDC dc,const RECT& area,unsigned metric,std::int64_t from,
         std::int64_t to,bool autoscale,double manual_zoom,
-        const std::deque<SystemPoint>* frozen=nullptr,bool detached=false);
+        const std::deque<SystemPoint>* frozen=nullptr,bool detached=false,bool miniature=false);
     void select_section(unsigned section);
+    bool has_system_chart() const;
     unsigned selected_chart_kind() const;
     bool has_popup() const;
     void refresh_auto_axis(unsigned index,bool immediate);
@@ -179,13 +180,13 @@ private:
     PaintBuffer page_buffer_;
     PaintBuffer tooltip_buffer_; // Reusable native tooltip double buffer.
     PaintBuffer fill_color_buffer_; // Reused 1x1 bitmap for GDI alpha blending.
-    std::deque<PopupState> popups_{32}; // Append cores; deque keeps native callback pointers stable.
+    std::deque<PopupState> popups_{first_core_chart_kind}; // Deque keeps native callback pointers stable.
     // FluxTop.SystemDashboard.Stage1: bounded, sampler-fed system history.
     std::shared_ptr<SystemGraphHistory> graph_history_;
     const std::deque<SystemPoint>& system_points_;
     CpuViewSettings cpu_view_;
     ULONGLONG hover_last_frame_{};
-    unsigned selected_section_{0}; // CPU, RAM, network, GPU, AutoScore, history, uptime
+    unsigned selected_section_{0}; // CPU, RAM, network, GPU, AutoScore, history, uptime, FPS
     wchar_t selected_disk_letter_{};
     std::optional<std::size_t> selected_core_;
     std::vector<CpuCoreTemperature> core_entries_;
@@ -194,16 +195,18 @@ private:
     unsigned sidebar_scroll_{};
     unsigned system_range_{0}; // 1, 5, 15, 30 minutes.
     bool system_autoscale_{true};
-    // Independent axis easing for embedded and detached system charts (five metrics).
-    std::array<std::vector<double>,2> smooth_system_axis_max_{{std::vector<double>(32),std::vector<double>(32)}};
-    std::array<std::vector<ULONGLONG>,2> smooth_system_axis_tick_{{std::vector<ULONGLONG>(32),std::vector<ULONGLONG>(32)}};
+    // Independent axis easing for embedded and detached system charts.
+    std::array<std::vector<double>,2> smooth_system_axis_max_{{
+        std::vector<double>(first_core_chart_metric),std::vector<double>(first_core_chart_metric)}};
+    std::array<std::vector<ULONGLONG>,2> smooth_system_axis_tick_{{
+        std::vector<ULONGLONG>(first_core_chart_metric),std::vector<ULONGLONG>(first_core_chart_metric)}};
     HWND system_period_{},system_auto_{},system_popout_{},fill_toggle_{},pause_toggle_{};
     void toggle_section_pause();
     void refresh_pause_control();
     bool fill_enabled_{true}; // Actual alpha blending; shared by embedded and detached graphs.
     double smooth_system_end_{},smooth_live_end_{};
     SystemInfo system_info_;
-    std::deque<FrozenView> frozen_views_{32};
+    std::deque<FrozenView> frozen_views_{first_core_chart_kind};
     bool system_tip_active_{};
     unsigned system_tip_metric_{};
     SystemPoint system_tip_sample_{};

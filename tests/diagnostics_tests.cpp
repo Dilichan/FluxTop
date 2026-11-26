@@ -17,6 +17,8 @@ int wmain(int argc,wchar_t** argv) {
     for(int i=0;i<3000;++i)
         fluxtop::diagnostics::write(fluxtop::diagnostics::Level::info,"fixture",std::string(270,'x'));
     fluxtop::diagnostics::flush();
+    if(!SetEnvironmentVariableW(L"FLUXTOP_LOG_PATH",(directory/L"other"/L"activity.log").c_str()) ||
+        fluxtop::diagnostics::log_directory()!=std::filesystem::absolute(directory))return 10;
     std::uint64_t total=0;
     unsigned files=0;
     for(unsigned i=0;i<5;++i){

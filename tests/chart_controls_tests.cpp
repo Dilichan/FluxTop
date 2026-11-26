@@ -15,15 +15,18 @@ int main() {
             check(split.first_bottom+24+18<split.second_top-28,
                 "Upper chart dates must clear the lower chart caption after resizing");
         }
-        const auto cpu=chart_system_panels(2),gpu=chart_system_panels(5),core=chart_system_panels(41);
+        const auto cpu=chart_system_panels(2),gpu=chart_system_panels(5),
+            core=chart_system_panels(first_core_chart_kind+9),fps=chart_system_panels(fps_chart_kind);
         check(cpu.primary.metric==0 && cpu.secondary && cpu.secondary->metric==31 &&
             gpu.primary.metric==3 && gpu.secondary && gpu.secondary->metric==4 &&
-            core.primary.metric==50 && core.secondary && core.secondary->metric==51,
+            core.primary.metric==first_core_chart_metric+18 && core.secondary &&
+            core.secondary->metric==first_core_chart_metric+19,
             "CPU, GPU and physical cores use the same paired chart template");
         check(chart_system_panels(3).primary.metric==1 && !chart_system_panels(3).secondary &&
             chart_system_panels(4).primary.metric==2 && !chart_system_panels(4).secondary &&
-            chart_system_panels(31).primary.metric==30 && !chart_system_panels(31).secondary,
-            "RAM, network and disks use the single chart template");
+            chart_system_panels(31).primary.metric==30 && !chart_system_panels(31).secondary &&
+            fps.primary.metric==fps_chart_metric && !fps.secondary,
+            "RAM, network, disks and FPS use the single chart template");
         for(long width=400;width<=1400;++width) {
             const auto layout=chart_detached_layout(width,300);
             for(std::size_t i=0;i<layout.controls.size();++i) {

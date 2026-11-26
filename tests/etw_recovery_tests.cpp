@@ -1,4 +1,5 @@
 #include "fluxtop/disk_io_collector.hpp"
+#include "fluxtop/etw_session.hpp"
 #include "fluxtop/network_collector.hpp"
 #include "fluxtop/privileges.hpp"
 #include "fluxtop/windows.hpp"
@@ -48,6 +49,18 @@ void poll(fluxtop::DiskIoCollector& disk,fluxtop::NetworkCollector& net,fluxtop:
         "one ETW failure must not alter other measurements or AutoScore");
 }
 void policy(){
+    using fluxtop::EtwSessionKind;
+    using fluxtop::parse_etw_session_owner;
+    const auto disk=parse_etw_session_owner(EtwSessionKind::disk_cpu,L"FluxTop.Disk.42.abc123.00112233");
+    const auto network=parse_etw_session_owner(EtwSessionKind::network,L"FluxTop.Network.73.1ABC.00A1B2C3");
+    need(disk && disk->pid==42 && disk->creation_time==0xabc123 && network && network->pid==73 &&
+        network->creation_time==0x1abc,"recover the recorded PID and birth time for both session owners");
+    for(const auto* name:{L"FluxTop.Network.42.abc123.00112233",L"FluxTop.Disk.4294967296.abc123.00112233",
+        L"FluxTop.Disk.42.10000000000000000.00112233",L"FluxTop.Disk.42.abc123.00112233-extra",
+        L"FluxTop.Disk.42.0.00112233",L"FluxTop.Disk.0.abc123.00112233",L"FluxTop.Disk.42.abc123"})
+        need(!parse_etw_session_owner(EtwSessionKind::disk_cpu,name),"foreign or malformed session names never qualify for reclaim");
+    const fluxtop::EtwSession idle;
+    need(!idle.active() && !idle.health().complete(),"an inactive owner has no healthy session");
     using fluxtop::EtwRecovery;const auto start=EtwRecovery::Clock::time_point{};
     EtwRecovery r;need(!r.due(start) && r.schedule(start) && !r.schedule(start+1s),"one scheduled recovery, not one per sample");
     need(!r.due(start+2s) && r.due(start+3s),"first recovery is delayed, never a busy loop");

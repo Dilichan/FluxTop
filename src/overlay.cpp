@@ -41,7 +41,7 @@ constexpr UINT foreground_update_message = WM_APP + 13;
 constexpr int toggle_hotkey = 1, client_hotkey = 2;
 enum Control : UINT { open_client = 100, toggle_table, quit_app, top_label, top_control, sort_control, font_control,
     alpha_control, visible_control, move_control, icons_control, stats_control, startup_control,
-    alpha_label, interval_control, summary_control, header_colors_control, row_colors_control, animation_control, metric_control = 200, disk_checkbox_control = 300, disk_total_checkbox_control = 326, tab_control = 450, font_label = 500, interval_label = 501,
+    alpha_label, interval_control, summary_control, header_colors_control, row_colors_control, animation_control, logs_control, metric_control = 200, disk_checkbox_control = 300, disk_total_checkbox_control = 326, tab_control = 450, font_label = 500, interval_label = 501,
     cpu_package_control=604,cpu_max_control,cpu_average_control,cpu_checkbox_control=700 };
 constexpr unsigned all_metrics = 31; // Five resource columns; FPS is in the application heading.
 constexpr unsigned default_metrics = 31;
@@ -154,6 +154,7 @@ private:
     void activity();
     void movement();
     void receive();
+    void update_foreground();
     void update_view();
     void fit_table();
     void release_surface();
@@ -210,6 +211,8 @@ private:
     HWINEVENTHOOK foreground_hook_{};
     DWORD focused_pid_{}; // Auto-ranked pinned application.
     DWORD foreground_pid_{}; // Actual active window PID (any sorting mode).
+    HWND foreground_window_{};
+    std::uint64_t foreground_epoch_{};
     std::optional<double> foreground_fps_; // Only the currently focused PID.
     HFONT client_font_{};
     UINT dpi_ = 96, client_dpi_ = 96, taskbar_created_{};
@@ -477,6 +480,7 @@ void Overlay::refresh_disk_controls() {
     position(GetDlgItem(client_,animation_control),animation_y);
     position(GetDlgItem(client_,stats_control),stats_y);
     position(shortcuts_label_,shortcuts_y);
+    position(GetDlgItem(client_,logs_control),quit_y);
     position(GetDlgItem(client_,quit_app),quit_y);
     if(!initializing_client_)layout_client();
 }
@@ -637,6 +641,7 @@ void Overlay::init_client() {
     SendMessageW(animation, BM_SETCHECK, animation_enabled_ ? BST_CHECKED : BST_UNCHECKED, 0);
     control(L"STATIC", L"", 0, stats_control, 22, 747, 536, 104);
     shortcuts_label_=control(L"STATIC", L"Ctrl+Alt+F9 — клиент   ·   Ctrl+Alt+F10 — оверлей", 0, 0, 22, 859, 540, 24);
+    control(L"BUTTON", L"Логи", WS_TABSTOP, logs_control, 22, 899, 130, 32);
     control(L"BUTTON", L"Завершить работу", WS_TABSTOP, quit_app, 373, 899, 185, 32);
     statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,options_.top,graph_history_);
     statistics_->set_cpu_view(cpu_view_);
@@ -791,7 +796,6 @@ void Overlay::set_visible(bool visible) {
         KillTimer(hwnd_,overlay_animation_timer);
         row_animation_active_=false;
         previous_rows_.clear();row_motion_.clear();
-        worker_.set_fps_targets({});
         ShowWindow(hwnd_, SW_HIDE); release_surface(); icons_.reset();
         row_text_cache_.clear(); // Hidden overlays should not keep text layout buffers.
     }
@@ -879,7 +883,20 @@ void Overlay::receive() {
         DestroyWindow(hwnd_);
     }
 }
+void Overlay::update_foreground() {
+    const HWND active_window = GetForegroundWindow();
+    if (active_window != foreground_window_) {
+        foreground_window_ = active_window;
+        ++foreground_epoch_;
+    }
+    foreground_pid_ = 0;
+    if (active_window && !IsIconic(active_window))
+        GetWindowThreadProcessId(active_window, &foreground_pid_);
+    worker_.set_fps_focus(foreground_pid_!=GetCurrentProcessId() ? FpsFocus{
+        reinterpret_cast<std::uintptr_t>(active_window), foreground_pid_, foreground_epoch_} : FpsFocus{});
+}
 void Overlay::update_view() {
+    update_foreground();
     if (!snapshot_) return;
     const auto& s = *snapshot_;
     // Foreground changes only reorder borrowed pointers, not full Process trees.
@@ -887,16 +904,14 @@ void Overlay::update_view() {
     display.reserve(grouped_processes_.size());
     for (const auto& process : grouped_processes_) display.push_back(&process);
     sort_process_refs(display, options_.sort, ranking_metrics());
-    foreground_pid_ = 0;
-    if (const HWND active_window = GetForegroundWindow())
-        GetWindowThreadProcessId(active_window, &foreground_pid_);
     foreground_fps_.reset();
-    // The FPS reading belongs to this exact PID, never to a grouped app or old foreground.
-    for (const auto& process : s.processes) {
-        if (process.pid != foreground_pid_) continue;
-        if (process.presented_fps && std::isfinite(*process.presented_fps))
-            foreground_fps_ = process.presented_fps;
-        break;
+    if (visible_ && s.fps_focus_epoch == foreground_epoch_) {
+        for (const auto& process : s.processes) {
+            if (process.pid != foreground_pid_) continue;
+            if (process.presented_fps && std::isfinite(*process.presented_fps))
+                foreground_fps_ = process.presented_fps;
+            break;
+        }
     }
     focused_pid_ = 0;
     if (options_.sort == Sort::automatic && foreground_pid_ &&
@@ -920,10 +935,6 @@ void Overlay::update_view() {
             p.disk_volume_bytes_per_second,loads,{}});
         for(const auto& column:cpu_columns_)next.back().logical_cpu.push_back(cpu_application_core_load(p.cpu_execution,column.id,s.cpu_topology));
     }
-    // A single PresentMon target: the actual foreground window, regardless of table sorting.
-    std::vector<std::uint32_t> fps_targets;
-    if (visible_ && foreground_pid_) fps_targets.push_back(foreground_pid_);
-    worker_.set_fps_targets(std::move(fps_targets));
     if (visible_ && show_icons_ && !summary_only()) {
         if (!icons_) icons_ = std::make_unique<AppIconCache>(history_path(), [this] {
             if (!icon_posted_.exchange(true)) PostMessageW(hwnd_, icon_message, 0, 0);
@@ -1589,6 +1600,16 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         case animation_control: if (HIWORD(wp)==BN_CLICKED) apply_client(); return 0;
         case move_control: moving_=SendDlgItemMessageW(window,move_control,BM_GETCHECK,0,0)==BST_CHECKED; movement(); return 0;
         case visible_control: set_visible(SendDlgItemMessageW(window,visible_control,BM_GETCHECK,0,0)==BST_CHECKED); return 0;
+        case logs_control:
+            if (HIWORD(wp)==BN_CLICKED) {
+                const auto folder=diagnostics::log_directory();
+                std::error_code error;
+                if(!folder.empty())std::filesystem::create_directories(folder,error);
+                if(folder.empty() || error ||
+                    reinterpret_cast<INT_PTR>(ShellExecuteW(window,L"open",folder.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)
+                    MessageBoxW(window,L"Не удалось открыть папку с логами.",L"Логи FluxTop",MB_OK|MB_ICONWARNING);
+            }
+            return 0;
         case quit_app: DestroyWindow(hwnd_); return 0;
         }
         break;
@@ -1696,10 +1717,11 @@ LRESULT Overlay::message(UINT msg,WPARAM wp,LPARAM lp) {
     case sample_message: receive(); return 0;
     case foreground_update_message:
         diagnostics::write(diagnostics::Level::trace,"ui.foreground","foreground window changed");
+        ++foreground_epoch_;
         if (visible_) {
             update_view(); // Update FPS target and header in every sorting mode.
             InvalidateRect(hwnd_,nullptr,FALSE);
-        }
+        } else update_foreground();
         return 0;
     case icon_message:
         diagnostics::write(diagnostics::Level::trace,"ui.icons","icon notification received");

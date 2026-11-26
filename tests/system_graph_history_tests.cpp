@@ -2,6 +2,7 @@
 #include "fluxtop/statistics_chart_controls.hpp"
 #include <algorithm>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 using namespace fluxtop;
@@ -16,8 +17,44 @@ Snapshot sample(std::int64_t at){
     s.cpu_topology.cores={{0,0,0,true,61,2,false}};
     s.cpu_logical_usage={{0,0,0,true,40},{0,1,0,true,60}};return s;
 }
+void focused_fps_history(){
+    SystemGraphHistory history;
+    auto input=sample(1000);
+    Process process;
+    process.pid=42;process.creation_time=10;process.name="game.exe";process.presented_fps=88;
+    input.processes.push_back(process);
+    input.fps_focus_epoch=1;
+    history.append(input);
+    const auto& points=history.points();
+    check(points.back().fps && points.back().fps->value==88 &&
+        points.back().fps->source->name=="game.exe","retain FPS and its application before a page opens");
+    const auto source=points.back().fps->source;
+    input.timestamp_ms=2000;input.processes[0].presented_fps=144;
+    history.append(input);
+    check(points.back().fps && points.back().fps->value==144 && points.back().fps->source==source,
+        "consecutive samples of the same focused application use the same series");
+    input.timestamp_ms=3000;++input.fps_focus_epoch;
+    history.append(input);
+    check(points.back().fps && points.back().fps->source!=source,"a new focus epoch breaks the series");
+    const auto next_source=points.back().fps->source;
+    input.timestamp_ms=4000;input.processes[0].creation_time=11;
+    history.append(input);
+    check(points.back().fps && points.back().fps->source!=next_source,"a reused PID cannot inherit old FPS");
+    const auto before_gap=points.back().fps->source;
+    input.timestamp_ms=5000;input.processes[0].presented_fps=std::numeric_limits<double>::quiet_NaN();
+    history.append(input);
+    check(!points.back().fps,"unavailable FPS stays absent");
+    input.timestamp_ms=6000;input.processes[0].presented_fps=60;
+    history.append(input);
+    check(points.back().fps && points.back().fps->source!=before_gap,"the next sample starts a fresh segment");
+    const auto before_sleep=points.back().fps->source;
+    input.timestamp_ms+=60000;
+    history.append(input);
+    check(points.back().fps && points.back().fps->source!=before_sleep,"a sampling outage leaves a gap");
+}
 }
 int main(){try{
+    focused_fps_history();
     auto history=std::make_shared<SystemGraphHistory>();
     // No page or client window exists during this collection period.
     constexpr std::int64_t start=1800000000000;

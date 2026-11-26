@@ -72,8 +72,8 @@ void physical_metrics(){
 void navigation(){
     for(unsigned cores:{0U,3U,24U,96U})for(unsigned disks:{0U,2U,26U}){
         need(statistics_sidebar_item_at(0,disks,cores)->index==4 && statistics_sidebar_item_at(1,disks,cores)->index==0,"AutoScore and CPU retain original sidebar positions");
-        for(unsigned core=0;core<cores;++core){const auto item=statistics_sidebar_item_at(core+2,disks,cores);need(item && item->kind==StatisticsSidebarKind::core && item->index==core,"every physical core has its own sidebar entry");}
-        for(unsigned section:{1U,2U,3U,5U,6U}){const auto item=statistics_sidebar_item_at(statistics_sidebar_section_row(section,disks,cores),disks,cores);
+        for(unsigned core=0;core<cores;++core){const auto item=statistics_sidebar_item_at(statistics_sidebar_core_row(core),disks,cores);need(item && item->kind==StatisticsSidebarKind::core && item->index==core,"every physical core has its own sidebar entry");}
+        for(unsigned section:{1U,2U,3U,5U,6U,fps_section}){const auto item=statistics_sidebar_item_at(statistics_sidebar_section_row(section,disks,cores),disks,cores);
             need(item && item->kind==StatisticsSidebarKind::section && item->index==section,"existing sections remain selectable after dynamic cores and disks");}
         for(unsigned disk=0;disk<disks;++disk){const auto item=statistics_sidebar_item_at(statistics_sidebar_disk_row(disk,cores),disks,cores);need(item && item->kind==StatisticsSidebarKind::disk && item->index==disk,"disk navigation is unchanged by core count");}
     }

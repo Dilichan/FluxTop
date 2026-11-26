@@ -21,10 +21,10 @@ Sampler::Sampler(CollectionPlan plan) : privileges_(initialize_privileges()),
     previous_ = std::chrono::steady_clock::now();
 }
 
-void Sampler::set_fps_targets(std::vector<std::uint32_t> targets) {
+void Sampler::set_fps_focus(FpsFocus focus) {
     if(!fps_enabled_)return;
-    fps_targets_=std::move(targets);
-    if(fps_targets_.empty())fps_.reset();
+    fps_focus_=focus;
+    if(!focus.pid)fps_.reset();
     else if(!fps_)fps_=std::make_unique<FpsCollector>();
 }
 
@@ -35,7 +35,10 @@ Snapshot Sampler::collect() {
     snapshot.debug_privilege_enabled = privileges_.debug_enabled;
     if(gpu_)gpu_->collect(snapshot);
     else snapshot.gpu_status="disabled";
-    if(fps_)fps_->collect(snapshot.processes, fps_targets_);
+    if(fps_) {
+        snapshot.fps_focus_epoch=fps_focus_.epoch;
+        fps_->collect(snapshot.processes, fps_focus_);
+    }
     const auto hwtemps = read_hardware_temperatures(cpu_temperature_);
     snapshot.cpu_temperature_c = hwtemps.cpu_c;
     snapshot.cpu_topology = hwtemps.intel_cores;
@@ -103,9 +106,9 @@ void SamplingWorker::set_interval(unsigned milliseconds) {
     { std::lock_guard lock(mutex_); interval_ = milliseconds; ++revision_; }
     wake_.notify_all();
 }
-void SamplingWorker::set_fps_targets(std::vector<std::uint32_t> targets) {
+void SamplingWorker::set_fps_focus(FpsFocus focus) {
     std::lock_guard lock(mutex_);
-    fps_targets_ = std::move(targets);
+    fps_focus_ = focus;
 }
 void SamplingWorker::pause(bool paused) { paused_ = paused; wake_.notify_all(); }
 void SamplingWorker::stop() {
@@ -137,9 +140,9 @@ void SamplingWorker::start(Options options, Notify notify) {
                     lock.unlock();
                     if (stop.stop_requested() || paused_) break;
                     last_sample = std::chrono::steady_clock::now();
-                    std::vector<std::uint32_t> targets;
-                    { std::lock_guard targets_lock(mutex_); targets=fps_targets_; }
-                    sampler.set_fps_targets(std::move(targets));
+                    FpsFocus fps_focus;
+                    { std::lock_guard targets_lock(mutex_); fps_focus=fps_focus_; }
+                    sampler.set_fps_focus(fps_focus);
                     auto snapshot = sampler.collect();
                     const bool finished = options.samples && ++emitted >= options.samples;
                     notify(std::move(snapshot), {}, finished);

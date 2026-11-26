@@ -670,25 +670,27 @@ void statistics_sidebar_order_tests() {
                 "sidebar click resolves the correct graph with dynamic disks");
         };
         assert_item(0U,StatisticsSidebarKind::section,4U); // Auto first.
-        for(unsigned section=0U;section<4U;++section) {
+        assert_item(1U,StatisticsSidebarKind::section,0U);
+        assert_item(statistics_sidebar_section_row(fps_section,drives),StatisticsSidebarKind::section,fps_section);
+        for(unsigned section=1U;section<4U;++section) {
             const auto row=statistics_sidebar_section_row(section,drives);
-            check(row==section+1U,"CPU/RAM/network/GPU follow Auto");
+            check(row==section+2U,"RAM/network/GPU follow CPU and FPS");
             assert_item(row,StatisticsSidebarKind::section,section);
         }
         for(unsigned i=0;i<drives;++i) {
             const auto row=statistics_sidebar_disk_row(i);
-            check(row==5U+i,"disks appear immediately after GPU");
+            check(row==6U+i,"disks appear immediately after GPU");
             assert_item(row,StatisticsSidebarKind::disk,i);
         }
         check(statistics_sidebar_section_row(4U,drives)==0U,
             "Auto is visually first for every disk count");
-        check(statistics_sidebar_section_row(5U,drives)==5U+drives,
+        check(statistics_sidebar_section_row(5U,drives)==6U+drives,
             "History is always penultimate");
-        check(statistics_sidebar_section_row(6U,drives)==6U+drives,
+        check(statistics_sidebar_section_row(6U,drives)==7U+drives,
             "Uptime is always last");
-        assert_item(5U+drives,StatisticsSidebarKind::section,5U);
-        assert_item(6U+drives,StatisticsSidebarKind::section,6U);
-        check(!statistics_sidebar_item_at(7U+drives,drives),
+        assert_item(6U+drives,StatisticsSidebarKind::section,5U);
+        assert_item(7U+drives,StatisticsSidebarKind::section,6U);
+        check(!statistics_sidebar_item_at(8U+drives,drives),
             "sidebar rejects out-of-range click");
     }
 }

@@ -1,193 +1,434 @@
 #include "fluxtop/fps_collector.hpp"
+#include "fluxtop/diagnostics.hpp"
+#include "fluxtop/etw_recovery.hpp"
+#include "fluxtop/etw_session.hpp"
+#include "fluxtop/windows.hpp"
+#include "fluxtop/presented_frame_window.hpp"
 
+#include <evntcons.h>
+#include <dxgi.h>
+#include <d3d9.h>
 #include <algorithm>
 #include <array>
-#include <cmath>
+#include <atomic>
+#include <cstddef>
 #include <cstring>
-#include <cwchar>
-#include <string>
-#include <unordered_map>
-#include <utility>
+#include <limits>
+#include <mutex>
+#include <thread>
 
 namespace fluxtop {
 namespace {
-// The path is registered by the installed PresentMon service. Do not load a random DLL from PATH.
-std::wstring installed_presentmon_dll() noexcept {
-    constexpr wchar_t key[] = L"SOFTWARE\\INTEL\\PresentMon\\Service";
-    constexpr wchar_t value[] = L"sharedMiddlewarePath";
-    DWORD bytes = 0;
-    constexpr DWORD flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ;
-    if (RegGetValueW(HKEY_LOCAL_MACHINE, key, value, flags, nullptr, nullptr, &bytes) != ERROR_SUCCESS ||
-        bytes < sizeof(wchar_t) || bytes > 65536) return {};
-    try {
-        std::wstring path(bytes / sizeof(wchar_t), L'\0');
-        if (RegGetValueW(HKEY_LOCAL_MACHINE, key, value, flags, nullptr, path.data(), &bytes) != ERROR_SUCCESS)
-            return {};
-        path.resize(wcsnlen_s(path.c_str(), path.size()));
-        return path;
-    } catch (...) { return {}; }
-}
-// Avoid MSVC C4191 unsafe function-pointer-cast warning under /W4 /WX.
-template<typename Fn> Fn endpoint(HMODULE dll, const char* name) noexcept {
-    const FARPROC proc = GetProcAddress(dll, name);
-    static_assert(sizeof(Fn) == sizeof(proc));
-    Fn result{};
-    std::memcpy(&result, &proc, sizeof(result));
-    return result;
-}
-} // namespace
 
-FpsCollector::~FpsCollector() { disconnect(); }
+using Window = detail::PresentedFrameWindow;
+constexpr GUID dxgi_provider{0xca11c036, 0x0102, 0x4a2d, {0xa6, 0xad, 0xf0, 0x3c, 0xfe, 0xd5, 0xd3, 0xc9}};
+constexpr GUID d3d9_provider{0x783aca0a, 0x790e, 0x4d7f, {0x84, 0x51, 0xaa, 0x85, 0x05, 0x11, 0xc6, 0xb9}};
+constexpr ULONG64 present_keyword = 0x8000000000000002ULL;
+constexpr USHORT dxgi_start = 42, dxgi_stop = 43, mpo_start = 55, mpo_stop = 56;
+constexpr USHORT d3d9_start = 1, d3d9_stop = 2;
+constexpr std::size_t max_targets = 4;
+constexpr ULONG trace_running = std::numeric_limits<ULONG>::max();
 
-void FpsCollector::disconnect() noexcept {
-    if (session_ && stop_) for (const auto& [pid, created] : tracked_) {
-        (void)created;
-        stop_(session_, pid);
-    }
-    tracked_.clear();
-    if (query_ && free_query_) free_query_(query_);
-    query_ = nullptr;
-    if (session_ && close_) close_(session_);
-    session_ = nullptr;
-    if (library_) FreeLibrary(library_);
-    library_ = nullptr;
-    open_ = nullptr; close_ = nullptr; start_ = nullptr; stop_ = nullptr;
-    register_ = nullptr; free_query_ = nullptr; poll_ = nullptr;
-    element_ = QueryElement{};
+std::int64_t qpc_now() noexcept {
+    LARGE_INTEGER value{};
+    QueryPerformanceCounter(&value);
+    return value.QuadPart;
 }
 
-bool FpsCollector::connect() noexcept {
-    if (session_ && query_) return true;
-    const ULONGLONG tick = GetTickCount64();
-    if (tick < next_connect_attempt_) return false;
-    next_connect_attempt_ = tick + 30000;
-    auto dll = installed_presentmon_dll();
-    if (dll.empty()) {
-        // Official optional SDK loader, installed with PresentMon Service.
-        wchar_t program_files[32768]{};
-        const DWORD length=GetEnvironmentVariableW(L"ProgramFiles",program_files,32768);
-        if (length && length < 32768) {
-            std::wstring candidate(program_files,length);
-            candidate += L"\\Intel\\PresentMon\\SDK\\PresentMonAPI2Loader.dll";
-            if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES)
-                dll=std::move(candidate);
+std::int64_t qpc_frequency() noexcept {
+    LARGE_INTEGER value{};
+    QueryPerformanceFrequency(&value);
+    return value.QuadPart;
+}
+
+struct SourceIdentity {
+    DWORD pid{};
+    std::uint64_t creation{};
+    HWND window{};
+    bool operator==(const SourceIdentity&) const = default;
+};
+
+struct Sources {
+    std::array<SourceIdentity, max_targets> identities{};
+    std::size_t count{};
+    bool overflow{};
+    bool operator==(const Sources&) const = default;
+
+    void add(SourceIdentity identity) noexcept {
+        for (std::size_t i = 0; i < count; ++i) {
+            if (identities[i].pid == identity.pid) return;
         }
+        if (count == identities.size()) {
+            overflow = true;
+            return;
+        }
+        identities[count++] = identity;
     }
-    if (dll.empty()) return false;
-    library_ = LoadLibraryExW(dll.c_str(), nullptr,
-        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-    if (!library_) return false;
-    open_ = endpoint<OpenFn>(library_, "pmOpenSession");
-    close_ = endpoint<CloseFn>(library_, "pmCloseSession");
-    start_ = endpoint<StartFn>(library_, "pmStartTrackingProcess");
-    stop_ = endpoint<StopFn>(library_, "pmStopTrackingProcess");
-    register_ = endpoint<RegisterFn>(library_, "pmRegisterDynamicQuery");
-    free_query_ = endpoint<FreeQueryFn>(library_, "pmFreeDynamicQuery");
-    poll_ = endpoint<PollFn>(library_, "pmPollDynamicQuery");
-    if (!open_ || !close_ || !start_ || !stop_ || !register_ || !free_query_ || !poll_ ||
-        open_(&session_) != 0 || !session_) {
-        disconnect(); return false;
-    }
-    if (register_(session_, &query_, &element_, 1, 1000.0, 0.0) != 0 || !query_ ||
-        element_.size != sizeof(double) || element_.offset + element_.size > 512) {
-        disconnect(); return false;
+};
+
+const Process* lookup(const std::vector<Process>& processes, DWORD pid) noexcept {
+    const auto it = std::find_if(processes.begin(), processes.end(), [pid](const Process& row) {
+        return row.pid == pid;
+    });
+    return it == processes.end() ? nullptr : &*it;
+}
+
+std::uint64_t creation_time(const std::vector<Process>& processes, DWORD pid) noexcept {
+    if (!pid || pid == GetCurrentProcessId()) return 0;
+    const auto* row = lookup(processes, pid);
+    return row && row->has_baseline ? row->creation_time.value_or(0) : 0;
+}
+
+bool current_foreground(HWND hwnd, DWORD pid) noexcept {
+    if (!hwnd || GetForegroundWindow() != hwnd || !IsWindowVisible(hwnd) || IsIconic(hwnd)) return false;
+    DWORD owner{};
+    GetWindowThreadProcessId(hwnd, &owner);
+    return owner && owner == pid;
+}
+
+Sources find_sources(const std::vector<Process>& processes, HWND foreground, SourceIdentity primary) noexcept {
+    Sources sources;
+    sources.add(primary);
+    struct Enumeration {
+        const std::vector<Process>& processes;
+        Sources& sources;
+        unsigned visited{};
+    } ctx{processes, sources};
+    // A different PID is eligible only if it owns a visible descendant of the focused
+    // window. A process tree or shared image path alone cannot establish a render target.
+    EnumChildWindows(foreground, [](HWND child, LPARAM data) -> BOOL {
+        auto& e = *reinterpret_cast<Enumeration*>(data);
+        if (++e.visited > 128) {
+            e.sources.overflow = true;
+            return FALSE;
+        }
+        if (!IsWindowVisible(child)) return TRUE;
+        DWORD pid{};
+        GetWindowThreadProcessId(child, &pid);
+        if (pid == e.sources.identities[0].pid) return TRUE;
+        if (const auto birth = creation_time(e.processes, pid)) e.sources.add({pid, birth, child});
+        return !e.sources.overflow;
+    }, reinterpret_cast<LPARAM>(&ctx));
+    return sources;
+}
+
+bool sources_match(const Sources& sources, const std::vector<Process>& processes, HWND hwnd) noexcept {
+    for (std::size_t i = 0; i < sources.count; ++i) {
+        const auto& source = sources.identities[i];
+        if (source.creation != creation_time(processes, source.pid)) return false;
+        if (i == 0) continue;
+        DWORD owner{};
+        GetWindowThreadProcessId(source.window, &owner);
+        if (owner != source.pid || !IsWindowVisible(source.window) || !IsChild(hwnd, source.window))
+            return false;
     }
     return true;
 }
 
-void FpsCollector::collect(std::vector<Process>& processes,
-    const std::vector<std::uint32_t>& targets) noexcept {
-    if (targets.empty()) {
-        // No foreground target: stop tracking without polling PresentMon.
-        if (session_ && stop_) for (const auto& [pid, created] : tracked_) {
-            (void)created;
-            stop_(session_, pid);
+template<typename T>
+T payload(const EVENT_RECORD& event, std::size_t offset = 0) noexcept {
+    T value{};
+    std::memcpy(&value, static_cast<const std::byte*>(event.UserData) + offset, sizeof(value));
+    return value;
+}
+
+struct EventFilter {
+    BOOLEAN include{TRUE};
+    UCHAR reserved{};
+    USHORT count{};
+    USHORT ids[4]{};
+};
+static_assert(offsetof(EventFilter, ids) == offsetof(EVENT_FILTER_EVENT_ID, Events));
+
+ULONG enable_provider(const EtwSession& session, const GUID& provider, const EventFilter& ids,
+                      const std::array<DWORD, max_targets>& pids, std::size_t count) noexcept {
+    std::array<EVENT_FILTER_DESCRIPTOR, 2> filters{};
+    filters[0] = {reinterpret_cast<ULONG64>(&ids),
+        static_cast<ULONG>(offsetof(EventFilter, ids) + ids.count * sizeof(USHORT)), EVENT_FILTER_TYPE_EVENT_ID};
+    filters[1] = {reinterpret_cast<ULONG64>(pids.data()), static_cast<ULONG>(count * sizeof(DWORD)),
+        EVENT_FILTER_TYPE_PID};
+    ENABLE_TRACE_PARAMETERS parameters{};
+    parameters.Version = ENABLE_TRACE_PARAMETERS_VERSION_2;
+    parameters.EnableFilterDesc = filters.data();
+    parameters.FilterDescCount = static_cast<ULONG>(filters.size());
+    return session.enable_provider(provider, TRACE_LEVEL_VERBOSE, present_keyword, parameters);
+}
+
+bool lost_data(const EtwSessionHealth& a, const EtwSessionHealth& b) noexcept {
+    return a.events_lost != b.events_lost || a.realtime_buffers_lost != b.realtime_buffers_lost ||
+           a.log_buffers_lost != b.log_buffers_lost;
+}
+
+} // namespace
+
+class FpsCollector::Trace {
+    struct Target {
+        SourceIdentity identity;
+        Window window;
+    };
+public:
+    Trace() : frequency_(qpc_frequency()) { targets_.reserve(max_targets); }
+    ~Trace() { close(); }
+
+    void clear() noexcept {
+        std::lock_guard lock(mutex_);
+        targets_.clear();
+    }
+
+    ULONG start() {
+        if (frequency_ <= 0) return ERROR_NOT_SUPPORTED;
+        // A provider-only session uses no kernel logger slots required by CPU, disk or network.
+        const auto status = session_.start(EtwSessionKind::presentation, {0, 8, 2, 8, false});
+        if (status != ERROR_SUCCESS) return status;
+        EVENT_TRACE_LOGFILEW logfile{};
+        logfile.LoggerName = session_.name();
+        logfile.ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD |
+                                   PROCESS_TRACE_MODE_RAW_TIMESTAMP;
+        logfile.EventRecordCallback = &Trace::consume;
+        logfile.Context = this;
+        consumer_ = OpenTraceW(&logfile);
+        if (consumer_ == INVALID_PROCESSTRACE_HANDLE) {
+            const auto error = GetLastError();
+            session_.stop();
+            return error;
         }
-        tracked_.clear(); retry_after_.clear();
+        worker_ = std::thread([this] {
+            TRACEHANDLE handle = consumer_;
+            trace_status_.store(ProcessTrace(&handle, 1, nullptr, nullptr), std::memory_order_release);
+        });
+        return ERROR_SUCCESS;
+    }
+
+    ULONG select(const Sources& sources) {
+        std::array<DWORD, max_targets> pids{};
+        const auto boundary = qpc_now();
+        {
+            std::lock_guard lock(mutex_);
+            targets_.clear();
+            for (std::size_t i = 0; i < sources.count; ++i) {
+                const auto& source = sources.identities[i];
+                pids[i] = source.pid;
+                targets_.push_back({source, Window(frequency_)});
+                targets_.back().window.reset(boundary);
+            }
+        }
+        auto status = enable_provider(session_, dxgi_provider,
+            {TRUE, 0, 4, {dxgi_start, dxgi_stop, mpo_start, mpo_stop}}, pids, sources.count);
+        if (status != ERROR_SUCCESS) return status;
+        status = enable_provider(session_, d3d9_provider,
+            {TRUE, 0, 2, {d3d9_start, d3d9_stop}}, pids, sources.count);
+        return status;
+    }
+
+    bool active() const noexcept { return session_.active(); }
+
+    void close() noexcept {
+        session_.stop();
+        if (consumer_ != INVALID_PROCESSTRACE_HANDLE) CloseTrace(consumer_);
+        if (worker_.joinable()) worker_.join();
+        consumer_ = INVALID_PROCESSTRACE_HANDLE;
+        trace_status_.store(trace_running, std::memory_order_relaxed);
+        previous_health_ = {};
+        clear();
+    }
+
+    struct Reading {
+        std::optional<double> fps;
+        DWORD pid{};
+        ULONG error{};
+        bool loss{};
+    };
+    Reading read() noexcept {
+        const auto ended = trace_status_.load(std::memory_order_acquire);
+        if (ended != trace_running) return {{}, 0, ended ? ended : ERROR_INVALID_HANDLE};
+        const auto health = session_.health();
+        if (health.status != ERROR_SUCCESS) return {{}, 0, health.status};
+        const auto now = qpc_now();
+        std::lock_guard lock(mutex_);
+        if (lost_data(previous_health_, health)) {
+            previous_health_ = health;
+            for (auto& target : targets_) target.window.reset(now);
+            return {{}, 0, ERROR_SUCCESS, true};
+        }
+        Reading reading{};
+        for (auto& target : targets_) {
+            if (const auto fps = target.window.rate(now)) {
+                if (reading.fps) return {};
+                reading.fps = fps;
+                reading.pid = target.identity.pid;
+            }
+        }
+        return reading;
+    }
+
+    std::uint64_t invalid_intervals() noexcept {
+        std::lock_guard lock(mutex_);
+        std::uint64_t total{};
+        for (const auto& target : targets_) total += target.window.invalid_intervals();
+        return total;
+    }
+
+private:
+    static void WINAPI consume(EVENT_RECORD* event) noexcept {
+        static_cast<Trace*>(event->UserContext)->consume_record(*event);
+    }
+
+    void consume_record(const EVENT_RECORD& event) noexcept {
+        const auto& hdr = event.EventHeader;
+        const auto id = hdr.EventDescriptor.Id;
+        const bool dxgi = hdr.ProviderId == dxgi_provider;
+        const bool d3d9 = hdr.ProviderId == d3d9_provider;
+        if (!dxgi && !d3d9) return;
+
+        const bool mpo = dxgi && (id == mpo_start || id == mpo_stop);
+        const auto runtime = d3d9 ? Window::Runtime::d3d9 : mpo ? Window::Runtime::dxgi_mpo : Window::Runtime::dxgi;
+        const bool start = id == (d3d9 ? d3d9_start : mpo ? mpo_start : dxgi_start);
+        const bool stop = id == (d3d9 ? d3d9_stop : mpo ? mpo_stop : dxgi_stop);
+        if (!start && !stop) return;
+
+        const auto ticks = hdr.TimeStamp.QuadPart;
+        std::lock_guard lock(mutex_);
+        const auto target = std::find_if(targets_.begin(), targets_.end(), [&hdr](const Target& value) {
+            return value.identity.pid == hdr.ProcessId;
+        });
+        if (target == targets_.end()) return;
+
+        // The version-0 runtime events carry the swap-chain pointer and flags
+        // on entry, and HRESULT on return. Reject unfamiliar descriptors.
+        const auto size = hdr.Flags & EVENT_HEADER_FLAG_32_BIT_HEADER ? sizeof(std::uint32_t) : sizeof(std::uint64_t);
+        if (hdr.EventDescriptor.Version != 0 || !event.UserData ||
+            event.UserDataLength < (start ? size + sizeof(std::uint32_t) : sizeof(HRESULT))) {
+            target->window.discard(ticks);
+            return;
+        }
+        if (start) {
+            const auto chain = size == sizeof(std::uint32_t) ?
+                payload<std::uint32_t>(event) : payload<std::uint64_t>(event);
+            const auto flags = payload<std::uint32_t>(event, size);
+            target->window.start(hdr.ThreadId, runtime, chain, ticks,
+                (flags & (dxgi ? DXGI_PRESENT_TEST : D3DPRESENT_DONOTFLIP)) != 0);
+        } else {
+            target->window.stop(hdr.ThreadId, runtime, ticks, payload<HRESULT>(event) == S_OK);
+        }
+    }
+
+    std::int64_t frequency_;
+    EtwSession session_;
+    TRACEHANDLE consumer_{INVALID_PROCESSTRACE_HANDLE};
+    std::thread worker_;
+    std::atomic<ULONG> trace_status_{trace_running};
+    EtwSessionHealth previous_health_{};
+    std::mutex mutex_;
+    std::vector<Target> targets_;
+};
+
+struct FpsCollector::State {
+    Trace trace;
+    EtwRecovery recovery;
+    Sources sources{};
+    std::uint64_t epoch{};
+    ULONGLONG next_discovery{};
+    ULONGLONG next_diagnostic{};
+    bool failed{};
+    bool was_ready{};
+
+    void unavailable(ULONG error, EtwRecovery::Clock::time_point now) {
+        trace.close();
+        sources = {};
+        failed = true;
+        if (recovery.schedule(now))
+            diagnostics::write(diagnostics::Level::warning, "fps.trace", "retry win32=" + std::to_string(error));
+    }
+};
+
+FpsCollector::FpsCollector() = default;
+FpsCollector::~FpsCollector() = default;
+
+void FpsCollector::collect(std::vector<Process>& processes, FpsFocus focus) noexcept {
+    for (auto& row : processes) row.presented_fps.reset();
+    const auto hwnd = reinterpret_cast<HWND>(focus.window);
+    const auto birth = creation_time(processes, focus.pid);
+    if (!birth || !current_foreground(hwnd, focus.pid)) {
+        if (state_ && state_->trace.active()) {
+            state_->trace.close();
+            state_->sources = {};
+        }
         return;
     }
     try {
-        std::unordered_map<std::uint32_t, Process*> processes_by_pid;
-        processes_by_pid.reserve(processes.size());
-        for (auto& row : processes) processes_by_pid.emplace(row.pid, &row);
+        if (!state_) state_ = std::make_unique<State>();
+        auto& state = *state_;
+        const auto now = EtwRecovery::Clock::now();
+        if (state.failed) {
+            if (!state.recovery.due(now)) return;
+            state.recovery.restarted(now);
+            state.failed = false;
+        }
 
-        constexpr std::size_t max_tracked_pids = 1; // Only the foreground PID.
-        std::unordered_map<std::uint32_t, Process*> desired;
-        desired.reserve(std::min(targets.size(), max_tracked_pids));
-        for (const auto pid : targets) {
-            if (desired.size() >= max_tracked_pids) break;
-            if (pid == GetCurrentProcessId()) continue;
-            if (const auto it = processes_by_pid.find(pid);
-                it != processes_by_pid.end() && it->second->creation_time && it->second->has_baseline)
-                desired.emplace(pid, it->second);
-        }
-        if(desired.empty()) {
-            if(session_) { disconnect(); next_connect_attempt_=0; }
-            retry_after_.clear();
-            return;
-        }
-        if(!connect())return;
-        for (auto it = tracked_.begin(); it != tracked_.end();) {
-            const auto wanted = desired.find(it->first);
-            if (wanted == desired.end() || it->second != wanted->second->creation_time) {
-                if (session_ && stop_) stop_(session_, it->first);
-                it = tracked_.erase(it);
-            } else ++it;
-        }
-        for (auto it = retry_after_.begin(); it != retry_after_.end();) {
-            if (desired.find(it->first) == desired.end()) it = retry_after_.erase(it);
-            else ++it;
-        }
         const auto tick = GetTickCount64();
-        std::array<std::uint8_t, 4096> blob{};
-        const auto stride = element_.offset + element_.size;
-        if (!stride || stride * 8 > blob.size()) return;
-        for (const auto pid : targets) {
-            const auto it = desired.find(pid);
-            if (it == desired.end()) continue;
-            Process& row = *it->second;
-            if (tracked_.find(pid) == tracked_.end()) {
-                if (const auto failed = retry_after_.find(pid);
-                    failed != retry_after_.end() && tick < failed->second) continue;
-                const int status = start_(session_, pid);
-                // PresentMon API: 7=ALREADY_TRACKING; 8=UNABLE_TO_CREATE_NSM (error).
-                if (status != 0 && status != 7) {
-                    retry_after_[pid] = tick + 15000;
-                    continue;
-                }
-                tracked_.emplace(pid, row.creation_time);
-                retry_after_.erase(pid);
-                continue; // Need actual frames before reporting an FPS value.
+        const SourceIdentity primary{focus.pid, birth, hwnd};
+        if (!state.sources.count || state.epoch != focus.epoch || state.sources.identities[0] != primary ||
+            tick >= state.next_discovery) {
+            state.next_discovery = tick + 5000;
+            auto sources = find_sources(processes, hwnd, primary);
+            if (sources.overflow) {
+                state.trace.close();
+                state.sources = {};
+                return;
             }
-            std::uint32_t chains = 8;
-            const int status = poll_(query_, pid, blob.data(), &chains);
-            if (status != 0) {
-                if (status == 4 || status == 12 || status == 13) {
-                    disconnect();
-                    next_connect_attempt_ = GetTickCount64() + 30000;
+            if (sources != state.sources || state.epoch != focus.epoch) {
+                if (!state.trace.active()) {
+                    const auto status = state.trace.start();
+                    if (status != ERROR_SUCCESS) {
+                        state.unavailable(status, now);
+                        return;
+                    }
+                    diagnostics::write(diagnostics::Level::info, "fps.trace", "started DXGI/D3D9 ETW");
+                }
+                if (const auto status = state.trace.select(sources); status != ERROR_SUCCESS) {
+                    state.unavailable(status, now);
                     return;
                 }
-                if (status == 6) { // INVALID_PID: stop tracking a recycled PID.
-                    stop_(session_, pid);
-                    tracked_.erase(pid);
-                    retry_after_[pid] = tick + 15000;
-                }
-                continue;
+                state.sources = sources;
+                state.epoch = focus.epoch;
+                state.was_ready = false;
+                state.next_diagnostic = 0;
             }
-            if (chains > 8 || stride * chains > blob.size()) continue;
-            std::optional<double> best;
-            for (std::uint32_t i = 0; i < chains; ++i) {
-                double fps{};
-                std::memcpy(&fps, blob.data() + i * stride + element_.offset, sizeof(fps));
-                if (std::isfinite(fps) && fps > 0.0 && fps <= 10000.0)
-                    best = std::max(best.value_or(0.0), fps);
-            }
-            row.presented_fps = best; // Never add independent swap-chain frame rates.
         }
+        if (!sources_match(state.sources, processes, hwnd)) {
+            state.trace.clear();
+            state.sources = {};
+            return;
+        }
+
+        const auto reading = state.trace.read();
+        if (reading.error) {
+            state.unavailable(reading.error, now);
+            return;
+        }
+        if (reading.loss) {
+            diagnostics::write(diagnostics::Level::warning, "fps.trace", "ETW loss; waiting for fresh frames");
+            return;
+        }
+        state.recovery.healthy(now);
+        if (!current_foreground(hwnd, focus.pid)) return;
+        const auto row = std::find_if(processes.begin(), processes.end(), [focus](const Process& p) {
+            return p.pid == focus.pid;
+        });
+        if (row != processes.end()) row->presented_fps = reading.fps;
+
+        if (tick >= state.next_diagnostic || (reading.fps && !state.was_ready)) {
+            state.next_diagnostic = tick + 30000;
+            const auto result = reading.fps ? std::to_string(*reading.fps) : std::string("null");
+            diagnostics::write(diagnostics::Level::info, "fps.sample",
+                "foreground_pid=" + std::to_string(focus.pid) + " render_pid=" + std::to_string(reading.pid) +
+                " fps=" + result + " invalid_windows=" + std::to_string(state.trace.invalid_intervals()));
+        }
+        state.was_ready = reading.fps.has_value();
     } catch (...) {
-        // FPS must never crash resource monitoring if PresentMon becomes unavailable.
-        disconnect();
-        next_connect_attempt_ = GetTickCount64() + 30000;
+        state_.reset();
+        diagnostics::write(diagnostics::Level::warning, "fps.trace", "collector reset after exception");
     }
 }
+
 } // namespace fluxtop

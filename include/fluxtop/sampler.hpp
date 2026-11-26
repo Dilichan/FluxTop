@@ -19,7 +19,7 @@ class Sampler {
 public:
     explicit Sampler(CollectionPlan plan);
     Snapshot collect();
-    void set_fps_targets(std::vector<std::uint32_t> targets);
+    void set_fps_focus(FpsFocus focus);
 private:
     Privileges privileges_;
     ProcessCollector processes_;
@@ -32,7 +32,7 @@ private:
     CpuTemperatureSelector cpu_temperature_;
     std::unique_ptr<FpsCollector> fps_;
     bool fps_enabled_{};
-    std::vector<std::uint32_t> fps_targets_;
+    FpsFocus fps_focus_;
     HistoryWriter history_{history_path()};
     std::chrono::steady_clock::time_point origin_;
     std::chrono::steady_clock::time_point previous_;

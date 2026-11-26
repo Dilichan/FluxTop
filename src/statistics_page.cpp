@@ -29,7 +29,18 @@ constexpr std::array<COLORREF,5> system_chart_colors{
     RGB(14,132,177),RGB(67,105,181),RGB(184,55,114),RGB(131,54,156),RGB(194,89,178)};
 constexpr COLORREF cpu_temperature_color=RGB(218,94,0);
 constexpr COLORREF disk_chart_color=RGB(42,132,108);
-bool cpu_temperature_metric(unsigned metric){return metric==31 || (metric>=32 && (metric-32)%2==1);}
+constexpr COLORREF fps_chart_color=RGB(150,84,37);
+bool is_cpu_chart_metric(unsigned metric) {
+    return metric==0 || metric==31 || metric>=fluxtop::first_core_chart_metric;
+}
+bool cpu_temperature_metric(unsigned metric) {
+    return metric==31 || (metric>=fluxtop::first_core_chart_metric &&
+        (metric-fluxtop::first_core_chart_metric)%2==1);
+}
+COLORREF system_metric_color(unsigned metric) {
+    if(metric==fluxtop::fps_chart_metric)return fps_chart_color;
+    return metric<system_chart_colors.size()?system_chart_colors[metric]:disk_chart_color;
+}
 COLORREF cpu_series_color(std::size_t index,bool temperature){
     constexpr std::array<COLORREF,8> colors{{system_chart_colors[0],cpu_temperature_color,RGB(0,138,88),RGB(169,50,157),
         RGB(117,105,0),RGB(41,73,175),RGB(172,46,64),RGB(73,111,101)}};
@@ -39,6 +50,11 @@ COLORREF cpu_series_color(std::size_t index,bool temperature){
 
 namespace fluxtop {
 namespace {
+std::optional<double> system_metric_value(const SystemChartPoint& sample,unsigned metric) {
+    if(metric==fps_chart_metric)
+        return sample.fps?std::optional{sample.fps->value}:std::nullopt;
+    return metric<sample.values.size()?sample.values[metric]:sample.disks[metric-sample.values.size()];
+}
 constexpr wchar_t page_class[]=L"FluxTop.Statistics.Page";
 constexpr wchar_t hover_class[]=L"FluxTop.Statistics.HoverTooltip.v1";
 constexpr wchar_t table_class[]=L"FluxTop.Statistics.DetachedTable.v1";
@@ -284,7 +300,7 @@ StatisticsPage::StatisticsPage(HWND parent,std::filesystem::path database,
     system_=ini_overlay_read(settings_,L"stats_show_system",0)!=0;
     auto_scale_[0]=ini_overlay_read(settings_,L"stats_auto_live",1)!=0;
     auto_scale_[1]=ini_overlay_read(settings_,L"stats_auto_history",1)!=0;
-    selected_section_=std::clamp(ini_overlay_read(settings_,L"stats_selected_section",0),0U,6U);
+    selected_section_=std::clamp(ini_overlay_read(settings_,L"stats_selected_section",0),0U,fps_section);
     const UINT saved_disk=ini_overlay_read(settings_,L"stats_selected_disk",0);
     selected_disk_letter_=saved_disk>=L'A' && saved_disk<=L'Z'?static_cast<wchar_t>(saved_disk):0;
     system_range_=chart_system_period_index(ini_overlay_read(settings_,L"stats_system_range",0));
@@ -440,7 +456,7 @@ void StatisticsPage::layout() {
         MoveWindow(control,sx(x),sy(y),sx(w),sy(h),TRUE);
     };
     const bool live=!selected_core_ && !selected_disk_letter_ && selected_section_==4,history=!selected_core_ && !selected_disk_letter_ && selected_section_==5,uptime=!selected_core_ && !selected_disk_letter_ && selected_section_==6;
-    const bool system=selected_core_ || selected_disk_letter_ || selected_section_<4;
+    const bool system=has_system_chart();
     // Old per-graph options are preserved above the selected chart, never in its popup only.
     put(limit_label_,292,66,260,28);
     put(limit_slider_,546,63,225,33);
@@ -789,10 +805,14 @@ bool StatisticsPage::has_popup() const {
     return std::any_of(popups_.begin(),popups_.end(),[](const auto& p){return p.window!=nullptr;});
 }
 unsigned StatisticsPage::selected_chart_kind() const {
-    if(selected_core_)return 32U+static_cast<unsigned>(*selected_core_);
+    if(selected_core_)return first_core_chart_kind+static_cast<unsigned>(*selected_core_);
     if(selected_disk_letter_)return 6U+static_cast<unsigned>(selected_disk_letter_-L'A');
+    if(selected_section_==fps_section)return fps_chart_kind;
     constexpr std::array<unsigned,6> mapping{{2,3,4,5,0,1}};
     return mapping[std::min<std::size_t>(selected_section_,5)];
+}
+bool StatisticsPage::has_system_chart() const {
+    return selected_core_ || selected_disk_letter_ || selected_section_<4 || selected_section_==fps_section;
 }
 void StatisticsPage::select_disk(wchar_t letter) {
     if(letter<L'A' || letter>L'Z' || selected_disk_letter_==letter)return;
@@ -805,7 +825,7 @@ void StatisticsPage::select_disk(wchar_t letter) {
     layout();InvalidateRect(hwnd_,nullptr,FALSE);
 }
 void StatisticsPage::select_section(unsigned index) {
-    if(index>=7 || (index==selected_section_ && !selected_disk_letter_ && !selected_core_))return;
+    if(index>fps_section || (index==selected_section_ && !selected_disk_letter_ && !selected_core_))return;
     selected_core_.reset();
     selected_disk_letter_=0;
     ini_overlay_write(settings_,L"stats_selected_disk",0);
@@ -816,7 +836,7 @@ void StatisticsPage::select_section(unsigned index) {
     system_tip_active_=false;
     if(tooltip_)ShowWindow(tooltip_,SW_HIDE);
     layout();
-    if(index>=4)request();
+    if(index>=4 && index<=6)request();
     InvalidateRect(hwnd_,nullptr,FALSE);
 }
 void StatisticsPage::select_core(std::size_t index){
@@ -840,7 +860,7 @@ void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Pro
     for(const auto& disk:system.disks)found_letters.push_back(disk.letter);
     if(found_letters!=disk_letters_) {
         disk_letters_=std::move(found_letters);
-            const auto max_scroll=static_cast<unsigned>(disk_letters_.size()+core_indices_.size());
+        const auto max_scroll=static_cast<unsigned>(1+disk_letters_.size()+core_indices_.size());
         sidebar_scroll_=std::min(sidebar_scroll_,max_scroll);
         if(selected_disk_letter_ && std::find(disk_letters_.begin(),disk_letters_.end(),selected_disk_letter_)==disk_letters_.end()) {
             selected_disk_letter_=0;
@@ -855,12 +875,12 @@ void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Pro
         if(found==core_entries_.end() && core_entries_.size()<512){core_entries_.push_back(core);found=std::prev(core_entries_.end());}
         if(found!=core_entries_.end()){*found=core;core_indices_.push_back(static_cast<std::size_t>(found-core_entries_.begin()));}
     }
-    const auto states=32+core_entries_.size();
-    sidebar_scroll_=std::min(sidebar_scroll_,static_cast<unsigned>(disk_letters_.size()+core_indices_.size()));
+    const auto states=first_core_chart_kind+core_entries_.size();
+    sidebar_scroll_=std::min(sidebar_scroll_,static_cast<unsigned>(1+disk_letters_.size()+core_indices_.size()));
     while(popups_.size()<states){popups_.emplace_back();popups_.back().owner=this;popups_.back().kind=static_cast<unsigned>(popups_.size()-1);}
     frozen_views_.resize(states);
-    for(auto& axis:smooth_system_axis_max_)axis.resize(32+2*core_entries_.size());
-    for(auto& axis:smooth_system_axis_tick_)axis.resize(32+2*core_entries_.size());
+    for(auto& axis:smooth_system_axis_max_)axis.resize(first_core_chart_metric+2*core_entries_.size());
+    for(auto& axis:smooth_system_axis_tick_)axis.resize(first_core_chart_metric+2*core_entries_.size());
     if(selected_core_ && std::find(core_indices_.begin(),core_indices_.end(),*selected_core_)==core_indices_.end())selected_core_.reset();
     system_info_.ram_used=system.total_ram_used;
     system_info_.ram_capacity=system.total_ram_capacity;
@@ -1337,9 +1357,9 @@ void StatisticsPage::fill_under(HDC dc,const std::vector<POINT>& line,LONG basel
 
 // FluxTop.SystemDashboard.Stage1: sidebar+in-page chart; old popouts remain available.
 void StatisticsPage::draw_sidebar(HDC dc) {
-    const std::array<const wchar_t*,7> names{{L"ЦП",L"Память",L"Сеть",L"GPU",L"Авто",L"История",L"Аптайм"}};
-    const std::array<COLORREF,7> colors{{system_chart_colors[0],system_chart_colors[1],system_chart_colors[2],
-        system_chart_colors[3],RGB(34,133,123),RGB(85,112,142),RGB(99,123,96)}};
+    const std::array<const wchar_t*,fps_section+1> names{{L"ЦП",L"Память",L"Сеть",L"GPU",L"Авто",L"История",L"Аптайм",L"FPS"}};
+    const std::array<COLORREF,fps_section+1> colors{{system_chart_colors[0],system_chart_colors[1],system_chart_colors[2],
+        system_chart_colors[3],RGB(34,133,123),RGB(85,112,142),RGB(99,123,96),fps_chart_color}};
     const std::int64_t latest=system_view_end();
     for(unsigned section=0;section<names.size();++section) {
         const int y=18+(static_cast<int>(statistics_sidebar_section_row(
@@ -1357,8 +1377,14 @@ void StatisticsPage::draw_sidebar(HDC dc) {
         } else if(section==4)reading=L"1 мин";
         else if(section==5)reading=L"История";
         else if(section==6)reading=std::to_wstring(history_.uptime.size())+L" прил.";
+        else if(section==fps_section && !system_points_.empty() && system_points_.back().fps)
+            reading=stat_decimal(system_points_.back().fps->value)+L" FPS";
         sidebar_heading(dc,names[section],reading,y,colors[section]);
         const RECT spark{26,y+38,249,y+94};
+        if(section==fps_section) {
+            draw_system_graph(dc,spark,fps_chart_metric,latest-60000,latest,true,1.0,nullptr,false,true);
+            continue;
+        }
         std::vector<POINT> points,second_gpu_line,second_cpu_temperature_line;
         std::vector<ChartBar> bars;
         const auto add=[&](std::int64_t at,double value,std::int64_t begin,std::int64_t end,double max_y){
@@ -1463,7 +1489,8 @@ void StatisticsPage::draw_sidebar(HDC dc) {
     }
     for(std::size_t ordinal=0;ordinal<core_indices_.size();++ordinal){
         const auto index=core_indices_[ordinal];const auto& core=core_entries_[index];
-        const int y=18+(static_cast<int>(ordinal)+2-static_cast<int>(sidebar_scroll_))*114;
+        const int y=18+(static_cast<int>(statistics_sidebar_core_row(static_cast<unsigned>(ordinal)))-
+            static_cast<int>(sidebar_scroll_))*114;
         if(y>=830 || y+105<=18)continue;
         const RECT item{14,y,266,y+105};const bool chosen=selected_core_==index;
         const auto face=CreateSolidBrush(chosen?RGB(225,233,241):RGB(245,246,247));FillRect(dc,&item,face);DeleteObject(face);
@@ -1531,7 +1558,7 @@ void StatisticsPage::draw_sidebar(HDC dc) {
     }
 }
 std::vector<CpuChartSeries> StatisticsPage::cpu_metric_series(unsigned metric,const CpuChartSample& sample)const{
-    if(metric>=32){const auto index=(metric-32)/2;
+    if(metric>=first_core_chart_metric){const auto index=(metric-first_core_chart_metric)/2;
         if(index>=core_entries_.size())return {};
         const auto& core=core_entries_[index];return cpu_core_chart_series(sample,{core.group,core.core_id},cpu_temperature_metric(metric));
     }
@@ -1552,7 +1579,8 @@ void StatisticsPage::draw_system_charts(HDC dc,const RECT& area,unsigned kind,st
     bool autoscale,double zoom,const std::deque<SystemPoint>* frozen,bool detached) {
     const auto panels=chart_system_panels(kind);
     const auto bounds=system_chart_bounds(area,panels.secondary.has_value());
-    const auto core_name=kind>=32?cpu_core_label(core_entries_[kind-32],core_entries_):std::wstring{};
+    const auto core_name=kind>=first_core_chart_kind?
+        cpu_core_label(core_entries_[kind-first_core_chart_kind],core_entries_):std::wstring{};
     const auto draw_panel=[&](const SystemChartPanel& panel,const RECT& plot) {
         if(!panel.caption.empty()) {
             auto caption=std::wstring(panel.caption)+core_name;
@@ -1575,30 +1603,37 @@ void StatisticsPage::hover_system_charts(unsigned kind,POINT cursor,const RECT& 
 }
 void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
     std::int64_t from,std::int64_t to,bool autoscale,double manual_zoom,
-    const std::deque<SystemPoint>* frozen,bool detached) {
+    const std::deque<SystemPoint>* frozen,bool detached,bool miniature) {
     const auto& samples=frozen?*frozen:system_points_;
     if(metric>=smooth_system_axis_max_[0].size())return;
     const auto& ink=system_chart_colors;
-    const bool cpu_metric=metric==0 || metric>=31;
+    const bool cpu_metric=is_cpu_chart_metric(metric);
     const bool cpu_temperature=cpu_temperature_metric(metric);
+    const bool fps=metric==fps_chart_metric;
     const auto cpu_series=cpu_metric?cpu_metric_series(metric,samples.empty()?CpuChartSample{}:samples.back().cpu):std::vector<CpuChartSeries>{};
     const unsigned count=cpu_metric?static_cast<unsigned>(cpu_series.size()):1U;
     const auto reading=[&](const SystemPoint& sample,unsigned index){
         return cpu_metric?cpu_chart_value(cpu_series[index],sample.cpu,sample.values[0]):
-            (metric<5?sample.values[metric]:sample.disks[metric-5]);
+            system_metric_value(sample,metric);
     };
-    double max_y=metric==2?1.0:(cpu_temperature?130.0:100.0);
+    if(to<=from)to=from+1;
+    const auto begin=std::lower_bound(samples.begin(),samples.end(),from,
+        [](const SystemPoint& sample,std::int64_t time){return sample.time<time;});
+    const auto end=std::upper_bound(begin,samples.end(),to,
+        [](std::int64_t time,const SystemPoint& sample){return time<sample.time;});
+    double max_y=metric==2?1.0:(fps?240.0:(cpu_temperature?130.0:100.0));
     if(autoscale) {
         max_y=metric==2?0.1:5.0;
-        for(const auto& sample:samples)if(sample.time>=from && sample.time<=to)
+        for(auto sample=begin;sample!=end;++sample)
             for(unsigned s=0;s<count;++s) {
-                const auto value=reading(sample,s);
+                const auto value=reading(*sample,s);
                 if(value)max_y=std::max(max_y,*value*(metric==2?1.2:1.12));
             }
-        if(metric!=2)max_y=std::min(cpu_temperature?130.0:100.0,std::ceil(max_y/5.0)*5.0);
+        if(fps)max_y=std::ceil(max_y/5.0)*5.0;
+        else if(metric!=2)max_y=std::min(cpu_temperature?130.0:100.0,std::ceil(max_y/5.0)*5.0);
     } else max_y/=std::clamp(manual_zoom,1.0,100.0);
     max_y=std::max(max_y,.001);
-    if(autoscale && !frozen) {
+    if(autoscale && !frozen && !miniature) {
         const unsigned context=detached?1U:0U;
         auto& shown=smooth_system_axis_max_[context][metric];
         auto& previous_tick=smooth_system_axis_tick_[context][metric];
@@ -1614,33 +1649,37 @@ void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
         previous_tick=tick;
         max_y=shown;
     }
-    if(to<=from)to=from+1;
     // System metrics only prepare contiguous pixel segments. Missing readings
     // terminate segments rather than bridging gaps with fabricated values.
     std::vector<ChartStroke> plots;
     plots.reserve(8);
     for(unsigned s=0;s<count;++s) {
-        const unsigned index=metric+s;
         std::vector<POINT> line;
         std::optional<double> previous_measurement;
         std::int64_t segment_end=0;
+        const FocusedFpsSource* fps_source=nullptr;
         const auto finish_segment=[&]() {
             if(line.empty())return;
-            if(!frozen) {
+            if(!frozen && !fps) {
                 extend_fresh_left_edge(line,area,from,to,animation_duration_ms_);
                 if(!samples.empty() && segment_end==samples.back().time)
                     extend_recent_line(line,area.right,segment_end,to,animation_duration_ms_);
             }
             plots.push_back({std::move(line),cpu_metric?cpu_series_color(s,cpu_temperature):
-                (index<ink.size()?ink[index]:disk_chart_color),cpu_metric && s%2==1});
+                system_metric_color(metric),cpu_metric && s%2==1});
             line.clear();
             previous_measurement.reset();
             segment_end=0;
         };
-        for(const auto& sample:samples) {
+        for(auto entry=begin;entry!=end;++entry) {
+            const auto& sample=*entry;
             const auto value=reading(sample,s);
-            if(sample.time<from || sample.time>to || !value) {
+            if(!value) {
                 finish_segment();continue;
+            }
+            if(fps && sample.fps->source.get()!=fps_source) {
+                finish_segment();
+                fps_source=sample.fps->source.get();
             }
             const double fraction=static_cast<double>(sample.time-from)/static_cast<double>(to-from);
             const double actual=*value;
@@ -1657,11 +1696,17 @@ void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
         finish_segment();
     }
     ChartStyle style{};
-    style.area=area;style.from=from;style.to=to;
-    style.horizontal_rows=5;style.time_divisions=10;
-    style.adaptive_fill=cpu_metric && count>1;
-    style.right_edge_overscan=!frozen && to>=system_view_end()-1000?live_tail_guard_px:0;
+    if(miniature) {
+        style=mini_chart_style(area,true);
+        style.point_markers=true;
+    } else {
+        style.area=area;style.from=from;style.to=to;
+        style.horizontal_rows=5;style.time_divisions=10;
+        style.adaptive_fill=cpu_metric && count>1;
+        style.right_edge_overscan=!frozen && to>=system_view_end()-1000?live_tail_guard_px:0;
+    }
     draw_chart_core(dc,style,plots);
+    if(miniature)return;
     if(cpu_metric) {
         const int slots=std::max(1,static_cast<int>(area.right-area.left-16)/190);
         for(std::size_t i=0;i<cpu_series.size();++i){
@@ -1679,9 +1724,10 @@ void StatisticsPage::draw_system_graph(HDC dc,const RECT& area,unsigned metric,
         FillRect(dc,&swatch,marker);DeleteObject(marker);
         label(dc,metric==3?L"GPU":L"VRAM",area.left+26,area.top+5);
     }
-    const auto cap=stat_decimal(max_y)+(metric==2?L" Mbps":(cpu_temperature?L" °C":L"%"));
+    const auto cap=stat_decimal(max_y)+(fps?L" FPS":(metric==2?L" Mbps":(cpu_temperature?L" °C":L"%")));
     chart_axes(dc,area,cap,local_label(from),local_label(to));
-    if(samples.empty())label(dc,L"Ожидание показаний Windows…",area.left+20,area.top+50,RGB(120,119,116));
+    if(fps && plots.empty())label(dc,L"Нет замеров FPS за выбранный период",area.left+20,area.top+30,RGB(120,119,116));
+    else if(samples.empty())label(dc,L"Ожидание показаний Windows…",area.left+20,area.top+50,RGB(120,119,116));
 }
 
 void StatisticsPage::draw_system_details(HDC dc,unsigned metric) {
@@ -1731,7 +1777,7 @@ void StatisticsPage::set_chart_fill(bool enabled) {
     InvalidateRect(hwnd_,nullptr,FALSE);
 }
 void StatisticsPage::refresh_pause_control() {
-    if(!pause_toggle_ || (!selected_core_ && !selected_disk_letter_ && selected_section_>=6))return;
+    if(!pause_toggle_ || (!has_system_chart() && selected_section_==6))return;
     SetWindowTextW(pause_toggle_,frozen_views_[selected_chart_kind()].paused?L"Продолжить":L"Пауза");
 }
 ChartTimeWindow StatisticsPage::chart_range(unsigned kind,const FrozenView& held) const {
@@ -1763,7 +1809,7 @@ void StatisticsPage::toggle_chart_pause(unsigned kind,FrozenView& held,HWND cont
     if(tooltip_)ShowWindow(tooltip_,SW_HIDE);
 }
 void StatisticsPage::toggle_section_pause() {
-    if(!selected_core_ && !selected_disk_letter_ && selected_section_>=6)return;
+    if(!has_system_chart() && selected_section_==6)return;
     const auto kind=selected_chart_kind();
     toggle_chart_pause(kind,frozen_views_[kind],pause_toggle_);
     InvalidateRect(hwnd_,nullptr,FALSE);
@@ -1776,8 +1822,8 @@ void StatisticsPage::draw(HDC dc) {
     FillRect(dc,&background,GetSysColorBrush(COLOR_BTNFACE));
     const auto old=SelectObject(dc,chart_font());
     draw_sidebar(dc);
-    const std::array<const wchar_t*,7> titles{{L"ЦП",L"ПАМЯТЬ",L"СЕТЬ",L"ГРАФИЧЕСКИЙ ПРОЦЕССОР",
-        L"ПОСЛЕДНЯЯ МИНУТА · AutoScore",L"ИСТОРИЯ · AutoScore",L"НАБЛЮДАЕМЫЙ АПТАЙМ"}};
+    const std::array<const wchar_t*,fps_section+1> titles{{L"ЦП",L"ПАМЯТЬ",L"СЕТЬ",L"ГРАФИЧЕСКИЙ ПРОЦЕССОР",
+        L"ПОСЛЕДНЯЯ МИНУТА · AutoScore",L"ИСТОРИЯ · AutoScore",L"НАБЛЮДАЕМЫЙ АПТАЙМ",L"FPS ПРИЛОЖЕНИЙ В ФОКУСЕ"}};
     if(selected_core_) {
         label(dc,cpu_core_label(core_entries_[*selected_core_],core_entries_).c_str(),292,18,RGB(40,47,55));
     } else if(selected_disk_letter_) {
@@ -1786,7 +1832,7 @@ void StatisticsPage::draw(HDC dc) {
     } else label(dc,titles[selected_section_],292,18,RGB(40,47,55));
     // Only one graph is visible; the original range, auto-scale and popout controls
     // remain above the graph and keep their existing settings and handlers.
-    if(selected_core_ || selected_disk_letter_ || selected_section_<4) {
+    if(has_system_chart()) {
         const auto kind=selected_chart_kind();
         const auto& held=frozen_views_[kind];
         const auto [from,to]=chart_range(kind,held);
@@ -1815,7 +1861,7 @@ void StatisticsPage::mouse(int x,int y) {
     RECT physical{};GetClientRect(hwnd_,&physical);
     if(physical.right<=0 || physical.bottom<=0) return;
     x=MulDiv(x,page_width,physical.right);y=MulDiv(y,page_height,physical.bottom);
-    if(selected_core_ || selected_disk_letter_ || selected_section_<4) {
+    if(has_system_chart()) {
         const auto kind=selected_chart_kind();
         const auto& held=frozen_views_[kind];
         const auto [from,to]=chart_range(kind,held);
@@ -1926,7 +1972,8 @@ bool StatisticsPage::position_tooltip(POINT screen,int offset_x,int offset_y) {
     if(!tooltip_)return false;
     const UINT dpi=GetDpiForWindow(tooltip_);
     const int width=MulDiv(420,static_cast<int>(dpi),96);
-    const int height=MulDiv(198,static_cast<int>(dpi),96);
+    const bool fps_tooltip=system_tip_active_ && system_tip_metric_==fps_chart_metric;
+    const int height=MulDiv(fps_tooltip?112:198,static_cast<int>(dpi),96);
     int x=screen.x+MulDiv(offset_x,static_cast<int>(dpi),96);
     int y=screen.y+MulDiv(offset_y,static_cast<int>(dpi),96);
     MONITORINFO monitor{sizeof(monitor)};
@@ -1961,15 +2008,22 @@ void StatisticsPage::show_system_hover(unsigned metric,POINT cursor,const RECT& 
         static_cast<double>(to-from)/std::max<LONG>(1,area.right-area.left));
     const SystemPoint* closest=nullptr;
     const auto& samples=held.paused?held.samples:system_points_;
-    const bool cpu_metric=metric==0 || metric>=31;
+    const bool cpu_metric=is_cpu_chart_metric(metric);
+    const bool fps=metric==fps_chart_metric;
     const auto cpu_series=cpu_metric?cpu_metric_series(metric,samples.empty()?CpuChartSample{}:samples.back().cpu):std::vector<CpuChartSeries>{};
     for(const auto& sample:samples) {
-        const auto reading=cpu_metric?(std::any_of(cpu_series.begin(),cpu_series.end(),[&](const auto& series){return cpu_chart_value(series,sample.cpu,sample.values[0]).has_value();})?std::optional<double>{1.0}:std::nullopt):
-            (metric<5?sample.values[metric]:sample.disks[metric-5]);
-        if(sample.time<from || sample.time>to || !reading)continue;
+        if(sample.time<from || sample.time>to)continue;
+        // FPS uses the closest sampling instant, including explicit gaps.
+        const bool measured=fps || (cpu_metric?
+            std::any_of(cpu_series.begin(),cpu_series.end(),[&](const auto& series){
+                return cpu_chart_value(series,sample.cpu,sample.values[0]).has_value();
+            }):system_metric_value(sample,metric).has_value());
+        if(!measured)continue;
         if(!closest || std::abs(sample.time-time)<std::abs(closest->time-time))closest=&sample;
     }
-    if(!closest){system_tip_active_=false;ShowWindow(tooltip_,SW_HIDE);return;}
+    if(!closest || (fps && (!closest->fps || std::abs(closest->time-time)>animation_duration_ms_))){
+        system_tip_active_=false;ShowWindow(tooltip_,SW_HIDE);return;
+    }
     const auto& info=held.paused?held.info:system_info_;
     const bool content_changed=!system_tip_active_ || system_tip_metric_!=metric || system_tip_info_!=info ||
         system_tip_sample_.time!=closest->time || system_tip_sample_.values!=closest->values || system_tip_sample_.disks!=closest->disks || system_tip_sample_.cpu_temperature!=closest->cpu_temperature || system_tip_sample_.cpu!=closest->cpu;
@@ -1981,7 +2035,7 @@ void StatisticsPage::show_system_hover(unsigned metric,POINT cursor,const RECT& 
     if(content_changed || newly_shown)InvalidateRect(tooltip_,nullptr,FALSE);
 }
 void StatisticsPage::draw_system_hover(HDC dc,const RECT& bounds){
-    if(system_tip_metric_==0 || system_tip_metric_>=31){
+    if(is_cpu_chart_metric(system_tip_metric_)){
         FillRect(dc,&bounds,GetSysColorBrush(COLOR_INFOBK));
         FrameRect(dc,&bounds,GetSysColorBrush(COLOR_BTNSHADOW));SetBkMode(dc,TRANSPARENT);
         const auto& sample=system_tip_sample_;const bool temperature=cpu_temperature_metric(system_tip_metric_);
@@ -1990,7 +2044,7 @@ void StatisticsPage::draw_system_hover(HDC dc,const RECT& bounds){
         SetTextColor(dc,RGB(40,43,47));
         const auto name=sample.cpu.name.empty()?std::wstring(L"CPU"):sample.cpu.name;
         DrawTextW(dc,name.c_str(),-1,&title,DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
-        const bool dts_time=system_tip_metric_>=32 || sample.cpu.package_from_dts ||
+        const bool dts_time=system_tip_metric_>=first_core_chart_metric || sample.cpu.package_from_dts ||
             (!series.empty() && series.front().kind!=CpuSeriesKind::package);
         const auto measured_at=temperature && dts_time && sample.cpu.temperature_time_ms?*sample.cpu.temperature_time_ms:sample.time;
         const auto time=L"Замер: "+local_sample_label(measured_at);
@@ -2013,22 +2067,23 @@ void StatisticsPage::draw_system_hover(HDC dc,const RECT& bounds){
     const std::array<const wchar_t*,5> names{{L"ЦП",L"Память",L"Сеть",L"GPU",L"VRAM"}};
     const HBRUSH paper=CreateSolidBrush(RGB(250,248,239));FillRect(dc,&bounds,paper);DeleteObject(paper);
     const HBRUSH edge=CreateSolidBrush(RGB(151,137,112));FrameRect(dc,&bounds,edge);DeleteObject(edge);
-    const bool disk=system_tip_metric_>=system_chart_colors.size();
-    const COLORREF color=disk?disk_chart_color:system_chart_colors[system_tip_metric_];
+    const bool fps=system_tip_metric_==fps_chart_metric;
+    const bool disk=!fps && system_tip_metric_>=system_chart_colors.size();
+    const COLORREF color=system_metric_color(system_tip_metric_);
     const HBRUSH accent=CreateSolidBrush(color);
     const RECT bar{bounds.left+2,bounds.bottom-6,bounds.right-2,bounds.bottom-2};
     FillRect(dc,&bar,accent);DeleteObject(accent);
     SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(53,49,43));
     RECT header{bounds.left+18,bounds.top+9,bounds.right-16,bounds.top+39};
-    const auto title=disk?
-        metric_text::disk_name(static_cast<wchar_t>(L'A'+system_tip_metric_-5)):
-        std::wstring(names[system_tip_metric_]);
-    DrawTextW(dc,title.c_str(),-1,&header,DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
+    const auto title=fps?stat_wide(system_tip_sample_.fps->source->name):
+        (disk?metric_text::disk_name(static_cast<wchar_t>(L'A'+system_tip_metric_-5)):
+            std::wstring(names[system_tip_metric_]));
+    DrawTextW(dc,title.c_str(),-1,&header,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
     const auto value=[&](unsigned index,const wchar_t* unit)->std::wstring {
-        const auto reading=index<5?system_tip_sample_.values[index]:system_tip_sample_.disks[index-5];
+        const auto reading=system_metric_value(system_tip_sample_,index);
         return reading?stat_decimal(*reading)+unit:L"—";
     };
-    std::wstring primary=value(system_tip_metric_,system_tip_metric_==2?L" Mbps":L"%");
+    std::wstring primary=value(system_tip_metric_,fps?L" FPS":(system_tip_metric_==2?L" Mbps":L"%"));
     if(system_tip_metric_==3)primary+=L"   VRAM: "+value(4,L"%");
     SetTextColor(dc,color);
     RECT main{bounds.left+18,bounds.top+41,bounds.right-12,bounds.top+75};
@@ -2042,6 +2097,7 @@ void StatisticsPage::draw_system_hover(HDC dc,const RECT& bounds){
         DrawTextW(dc,text.c_str(),-1,&cell,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
     };
     write(L"Замер: "+local_sample_label(system_tip_sample_.time),75);
+    if(fps)return;
     if(disk) {
         write(L"Активность логического диска, %: "+metric_text::disk_activity(system_tip_sample_.disks[system_tip_metric_-5]),108);
     } else if(system_tip_metric_==1) {
@@ -2164,7 +2220,7 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
         RECT viewport{};GetClientRect(hwnd_,&viewport);
         const int x=viewport.right?MulDiv(screen.x,page_width,viewport.right):screen.x;
         if(x>=14 && x<=266) {
-            const unsigned limit=static_cast<unsigned>(disk_letters_.size()+core_indices_.size());
+            const unsigned limit=static_cast<unsigned>(1+disk_letters_.size()+core_indices_.size());
             const int direction=GET_WHEEL_DELTA_WPARAM(wp)<0?1:-1;
             sidebar_scroll_=static_cast<unsigned>(std::clamp(
                 static_cast<int>(sidebar_scroll_)+direction,0,static_cast<int>(limit)));
@@ -2187,7 +2243,7 @@ LRESULT StatisticsPage::message(UINT msg,WPARAM wp,LPARAM lp) {
             axis_tick_=tick;
             const bool axis_animating=advance_axes(elapsed);
             const bool viewport_animating=advance_time_view(elapsed);
-            const bool live_page=(selected_disk_letter_ || selected_core_ || selected_section_<5) &&
+            const bool live_page=(has_system_chart() || selected_section_==4) &&
                 !frozen_views_[selected_chart_kind()].paused;
             if(active_ && (axis_animating ||
                 (live_page && (animating || viewport_animating)))) {

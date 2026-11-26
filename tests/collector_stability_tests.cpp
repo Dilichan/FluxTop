@@ -48,7 +48,7 @@ int wmain(int argc,wchar_t** argv){try{
     DWORD baseline{};std::uint64_t previous_time{};bool own_cpu=false,cpu_etw=false,disk=false,network=false;
     {Workload load(root/L"workload.bin");
     for(unsigned cycle=0;cycle<3;++cycle){
-        {fluxtop::Sampler sampler({.fps=true});sampler.set_fps_targets({GetCurrentProcessId()});
+        {fluxtop::Sampler sampler({.fps=true});sampler.set_fps_focus({0,GetCurrentProcessId(),1});
             for(unsigned i=0;i<samples;++i){std::this_thread::sleep_for(500ms);const auto s=sampler.collect();
                 need(s.elevated.value_or(false),"all collectors run elevated");need(!s.processes.empty() && s.logical_processors>0,"process list and CPU topology");
                 need(s.timestamp_ms>static_cast<std::int64_t>(previous_time),"measurement timestamps advance");previous_time=static_cast<std::uint64_t>(s.timestamp_ms);
@@ -73,7 +73,7 @@ int wmain(int argc,wchar_t** argv){try{
     need(!load.failed,"owned network/disk workload failed");need(own_cpu && cpu_etw && disk && network,"CPU, disk and network must become operational together");}
     {
         fluxtop::Sampler sampler({.gpu=false,.network=false});
-        sampler.set_fps_targets({GetCurrentProcessId()});
+        sampler.set_fps_focus({0,GetCurrentProcessId(),1});
         const auto snapshot=sampler.collect();
         need(snapshot.gpu_status=="disabled" && !snapshot.total_gpu_percent && !snapshot.total_gpu_memory,
             "disabled GPU block has no utilization or memory readings");

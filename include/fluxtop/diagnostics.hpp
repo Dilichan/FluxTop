@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <filesystem>
 #include <string_view>
 
 // FluxTop-wide, non-blocking application event journal.
@@ -9,4 +10,5 @@ namespace fluxtop::diagnostics {
 enum class Level : std::uint8_t { trace, info, warning, error };
 void write(Level level, std::string_view category, std::string_view message) noexcept;
 void flush() noexcept;
+std::filesystem::path log_directory() noexcept;
 }

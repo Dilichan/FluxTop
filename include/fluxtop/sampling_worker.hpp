@@ -18,13 +18,13 @@ public:
     void pause(bool paused);
     void stop();
     void set_interval(unsigned milliseconds);
-    void set_fps_targets(std::vector<std::uint32_t> targets);
+    void set_fps_focus(FpsFocus focus);
 private:
     std::atomic<bool> paused_{false};
     std::mutex mutex_;
     std::condition_variable_any wake_;
     std::jthread thread_;
-    std::vector<std::uint32_t> fps_targets_;
+    FpsFocus fps_focus_;
     std::atomic<unsigned> interval_{1000}, revision_{0};
 };
 

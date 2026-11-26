@@ -84,20 +84,16 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         ordered(launcher,"fluxtop::download_release_update(*candidate)","if (!close_monitor_for_consented_update()");
     } else if(policy=="fps_header_policy") {
         const auto layout=read(root/"include/fluxtop/overlay_layout.hpp");
-        const auto collector=read(root/"src/fps_collector.cpp");
         const auto model=read(root/"src/model.cpp");
         const auto sampler=read(root/"src/sampler.cpp");
         need(layout,{"std::array<float, 5> metric_widths","std::array<const wchar_t*, 5> metric_names"});
         need(overlay,{"summary_only()?L\"FPS: ","foreground_fps_","draw_text(fps_heading,header[0]",
             "constexpr unsigned all_metrics = 31;","GetWindowThreadProcessId(active_window, &foreground_pid_)",
-            "if (visible_ && foreground_pid_) fps_targets.push_back(foreground_pid_)","update_view(); // Update FPS target and header in every sorting mode.",
+            "s.fps_focus_epoch == foreground_epoch_","update_view(); // Update FPS target and header in every sorting mode.",
             "else fps_heading += L\""});
         absent(overlay,{"displayed.fps","std::move(fps),loads,bursts","metric_visual_to_storage"});
         absent(model,{"max_gpu(combined.presented_fps,part.presented_fps)"});
-        need(collector,{"status != 0 && status != 7","status == 6","PresentMonAPI2Loader.dll",
-            "std::optional<double> best;"});
-        absent(collector,{"status != 0 && status != 8"});
-        need(sampler,{"fps_->collect(snapshot.processes, fps_targets_)","if(fps_targets_.empty())fps_.reset()"});
+        need(sampler,{"fps_->collect(snapshot.processes, fps_focus_)","if(!focus.pid)fps_.reset()"});
     } else if(policy=="statistics_policy") {
         const auto history=read(root/"src/history.cpp");
         const auto math=read(root/"include/fluxtop/history_math.hpp");
@@ -142,7 +138,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         absent(page,{"GetPrivateProfileIntW(","WritePrivateProfileStringW(","RegisterClassExW("});
         absent(overlay,{"GetPrivateProfileIntW(","WritePrivateProfileStringW(","RegisterClassExW("});
         absent(popup,{"GetPrivateProfileIntW(","WritePrivateProfileStringW(","RegisterClassExW("});
-        need(header,{"PopupState","target_auto_zoom_","std::deque<PopupState> popups_{32}",
+        need(header,{"PopupState","target_auto_zoom_","std::deque<PopupState> popups_{first_core_chart_kind}",
             "SystemChartPoint", "fill_enabled_", "smooth_system_end_",
             "frozen_views_", "toggle_section_pause()", "pause_toggle_"});
         need(page,{"FluxTop.SystemDashboard.VisualRefinement.v1", "draw_system_hover(dc,rect)",
@@ -193,7 +189,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "plots.push_back({std::move(second_cpu_temperature_line),cpu_temperature_color})",
             "extend_fresh_left_edge(second_cpu_temperature_line",
             "draw_chart_core(dc,style,plots,bars)"});
-        need(header,{"std::deque<FrozenView> frozen_views_{32}"});
+        need(header,{"std::deque<FrozenView> frozen_views_{first_core_chart_kind}"});
         need(page,{"toggle_chart_pause(kind,frozen_views_[kind],pause_toggle_)", "refresh_pause_control();",
             "held.paused?&held.samples:nullptr", "open_popup(selected_chart_kind())",
             "const auto& info=held.paused?held.info:system_info_", "system_tip_info_.ram_capacity"});
@@ -238,7 +234,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         need(page,{"void StatisticsPage::draw_metric_tooltip(",
             "draw_metric_tooltip(dc,bounds,source[hover_index_],hover_value_,hover_timestamp_)",
             "hover_timestamp_=sample_at","time.wSecond","local_sample_label(sample_at)",
-            "const int width=MulDiv(420","const int height=MulDiv(198","current_readings_.emplace(color_key(identity)",
+            "const int width=MulDiv(420","const int height=MulDiv(fps_tooltip?112:198","current_readings_.emplace(color_key(identity)",
             "metric_text::network_rate(rx,tx)","L\" Mbps\"",
             "double eased_axis(double current,double target,double elapsed_ms)",
             "popup.cached_auto_zoom=eased_axis(","const bool axis_animating=advance_axes(elapsed);",

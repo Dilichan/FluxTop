@@ -1,6 +1,7 @@
 #include "fluxtop/disk_io_collector.hpp"
 #include "fluxtop/disk_attribution.hpp"
 #include "fluxtop/cpu_etw_collector.hpp"
+#include "fluxtop/etw_session.hpp"
 #include "fluxtop/diagnostics.hpp"
 #include "fluxtop/windows.hpp"
 #include <windows.h>
@@ -8,7 +9,6 @@
 #include <evntrace.h>
 #include <evntcons.h>
 #include <tdh.h>
-#include <objbase.h>
 #include <algorithm>
 #include <atomic>
 #include <array>
@@ -40,43 +40,6 @@ std::optional<std::uint64_t> property(EVENT_RECORD* event,const wchar_t* name) {
     if(TdhGetProperty(event,0,nullptr,1,&desc,bytes,reinterpret_cast<BYTE*>(&value))!=ERROR_SUCCESS)
         return std::nullopt;
     return value;
-}
-void reclaim_old_sessions() {
-    struct Properties { EVENT_TRACE_PROPERTIES info{}; wchar_t name[256]{}; };
-    std::vector<Properties> info(64);
-    std::array<EVENT_TRACE_PROPERTIES*,64> pointers{};
-    for(std::size_t i=0;i<info.size();++i) {
-        info[i].info.Wnode.BufferSize=sizeof(Properties);
-        info[i].info.LoggerNameOffset=offsetof(Properties,name);
-        pointers[i]=&info[i].info;
-    }
-    ULONG found{};
-    if(QueryAllTracesW(pointers.data(),static_cast<ULONG>(pointers.size()),&found)!=ERROR_SUCCESS)return;
-    for(ULONG i=0;i<std::min<ULONG>(found,static_cast<ULONG>(info.size()));++i) {
-        const auto& p=info[i].info;
-        if(p.LoggerNameOffset>=sizeof(Properties))continue;
-        const auto* name=reinterpret_cast<const wchar_t*>(
-            reinterpret_cast<const BYTE*>(&info[i])+p.LoggerNameOffset);
-        unsigned long pid{};unsigned long long birth{};unsigned long suffix{};
-        if(swscanf_s(name,L"FluxTop.Disk.%lu.%llx.%lx",&pid,&birth,&suffix)!=3)continue;
-        Handle owner(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid));
-        bool orphan=!owner.valid() && GetLastError()==ERROR_INVALID_PARAMETER;
-        if(owner.valid()) {
-            FILETIME created{},exited{},kernel{},user{};
-            DWORD exit_code{};
-            if(GetExitCodeProcess(owner.get(),&exit_code) && exit_code!=STILL_ACTIVE)orphan=true;
-            else if(GetProcessTimes(owner.get(),&created,&exited,&kernel,&user))
-                orphan=filetime_ticks(created)!=birth;
-        }
-        if(orphan) {
-            // Keep the trailing name storage: Wnode.BufferSize describes the
-            // full Properties object, not a short stack copy of its header.
-            auto& props=info[i].info;
-            props.Wnode.Flags=WNODE_FLAG_TRACED_GUID;
-            props.LogFileNameOffset=0;
-            ControlTraceW(0,name,&props,EVENT_TRACE_CONTROL_STOP);
-        }
-    }
 }
 std::vector<PhysicalVolumeExtent> discover_volumes() {
     std::vector<PhysicalVolumeExtent> results;
@@ -110,11 +73,11 @@ std::vector<PhysicalVolumeExtent> discover_volumes() {
 }
 }
 struct DiskIoCollector::Impl {
-    struct Properties { EVENT_TRACE_PROPERTIES trace{}; wchar_t name[96]{}; } properties{};
+    EtwSession session;
     struct Inflight { DWORD pid{};std::uint64_t file{};std::uint64_t at{};bool write{}; };
     struct Bytes { std::uint64_t read{},write{};std::array<std::uint64_t,26> volumes{};
         std::uint64_t first_event{}; };
-    TRACEHANDLE session{},consumer=INVALID_PROCESSTRACE_HANDLE;
+    TRACEHANDLE consumer=INVALID_PROCESSTRACE_HANDLE;
     std::thread thread;
     std::unique_ptr<CpuEtwCollector> cpu;
     std::mutex mutex;
@@ -337,42 +300,26 @@ struct DiskIoCollector::Impl {
             status="administrator-required";return;
         }
         extents=discover_volumes();drive_mask=GetLogicalDrives();
-        GUID suffix{};
-        FILETIME created{},exited{},kernel{},user{};
-        if(FAILED(CoCreateGuid(&suffix)) ||
-            !GetProcessTimes(GetCurrentProcess(),&created,&exited,&kernel,&user))return;
-        reclaim_old_sessions();
-        swprintf_s(properties.name,L"FluxTop.Disk.%lu.%llx.%08lx",GetCurrentProcessId(),
-            static_cast<unsigned long long>(filetime_ticks(created)),suffix.Data1);
-        auto& p=properties.trace;
-        p.Wnode.BufferSize=sizeof(properties);p.Wnode.Flags=WNODE_FLAG_TRACED_GUID;
-        p.Wnode.ClientContext=1;p.Wnode.Guid=suffix;
         const auto processors=GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
         // CSwitch needs real originating-CPU context, not the legacy shared
         // low-frequency buffer stream. Keep an explicit <=32 MiB pool budget.
         const bool cpu_supported=processors>0 && processors<=512;
-        p.BufferSize=cpu_supported?16:64;
         // Reserve burst headroom up front: high-IRQL scheduler events cannot
         // always obtain on-demand buffers. The requested pool remains <=32 MiB.
-        p.MinimumBuffers=cpu_supported?std::max<ULONG>(processors*2,256):2;
-        p.MaximumBuffers=cpu_supported?2048:8;
-        p.FlushTimer=1;
-        p.LogFileMode=EVENT_TRACE_REAL_TIME_MODE|EVENT_TRACE_SYSTEM_LOGGER_MODE;
-        if(!cpu_supported)p.LogFileMode|=EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING;
-        p.EnableFlags=EVENT_TRACE_FLAG_DISK_IO|EVENT_TRACE_FLAG_DISK_IO_INIT|
+        ULONG events=EVENT_TRACE_FLAG_DISK_IO|EVENT_TRACE_FLAG_DISK_IO_INIT|
             EVENT_TRACE_FLAG_DISK_FILE_IO|EVENT_TRACE_FLAG_FILE_IO|EVENT_TRACE_FLAG_FILE_IO_INIT|
             EVENT_TRACE_FLAG_THREAD;
-        if(cpu_supported)p.EnableFlags|=EVENT_TRACE_FLAG_PROCESS|EVENT_TRACE_FLAG_CSWITCH;
-        p.LoggerNameOffset=offsetof(Properties,name);
-        const ULONG rc=StartTraceW(&session,properties.name,&p);
+        if(cpu_supported)events|=EVENT_TRACE_FLAG_PROCESS|EVENT_TRACE_FLAG_CSWITCH;
+        const ULONG rc=session.start(EtwSessionKind::disk_cpu,{events,cpu_supported?16UL:64UL,
+            cpu_supported?std::max<ULONG>(processors*2,256):2UL,cpu_supported?2048UL:8UL,cpu_supported});
         if(rc!=ERROR_SUCCESS) {
-            session=0;status=rc==ERROR_ACCESS_DENIED?"administrator-required":"unavailable";
+            status=rc==ERROR_ACCESS_DENIED?"administrator-required":"unavailable";
             diagnostics::write(diagnostics::Level::warning,"disk_io.session",
                 "StartTrace failed win32="+std::to_string(rc)+" status="+status);
             return;
         }
         EVENT_TRACE_LOGFILEW trace{};
-        trace.LoggerName=properties.name;
+        trace.LoggerName=session.name();
         trace.ProcessTraceMode=PROCESS_TRACE_MODE_REAL_TIME|PROCESS_TRACE_MODE_EVENT_RECORD;
         trace.EventRecordCallback=event;trace.BufferCallback=buffer;trace.Context=this;
         consumer=OpenTraceW(&trace);
@@ -385,7 +332,7 @@ struct DiskIoCollector::Impl {
         }
         // Reuse this one kernel session. CPU gets a separate raw-QPC consumer;
         // the established disk consumer keeps its original FILETIME conversion/correlation.
-        try {if(cpu_supported)cpu=std::make_unique<CpuEtwCollector>(properties.name);}
+        try {if(cpu_supported)cpu=std::make_unique<CpuEtwCollector>(session.name());}
         catch(const std::exception& error) {
             diagnostics::write(diagnostics::Level::warning,"cpu_etw.start",error.what());
         }
@@ -404,10 +351,7 @@ struct DiskIoCollector::Impl {
         }catch(...) {stop();throw;}
     }
     void stop() noexcept {
-        if(session) {
-            ControlTraceW(session,properties.name,&properties.trace,EVENT_TRACE_CONTROL_STOP);
-            session=0;
-        }
+        session.stop();
         if(consumer!=INVALID_PROCESSTRACE_HANDLE) {
             CloseTrace(consumer);
             if(thread.joinable())thread.join();
@@ -434,16 +378,13 @@ void DiskIoCollector::collect(Snapshot& snapshot) {
     snapshot.cpu_execution_begin_qpc=0;snapshot.cpu_execution_end_qpc=0;
     snapshot.cpu_execution_frequency=0;snapshot.cpu_execution_unknown_ticks=0;snapshot.cpu_execution_lag_ms=0;
     bool trace_failed=false;
-    if(self.session) {
-        Impl::Properties query{};
-        query.trace.Wnode.BufferSize=sizeof(query);query.trace.LoggerNameOffset=offsetof(Impl::Properties,name);
-        query.trace.Wnode.Flags=WNODE_FLAG_TRACED_GUID;
-        const auto query_status=ControlTraceW(self.session,self.properties.name,&query.trace,EVENT_TRACE_CONTROL_QUERY);
-        if(query_status!=ERROR_SUCCESS || query.trace.EventsLost || query.trace.RealTimeBuffersLost || query.trace.LogBuffersLost) {
+    if(self.session.active()) {
+        const auto health=self.session.health();
+        if(!health.complete()) {
             trace_failed=true;self.failed=true;
             diagnostics::write(diagnostics::Level::warning,"cpu_etw.loss",
-                "query="+std::to_string(query_status)+" events="+std::to_string(query.trace.EventsLost)+
-                " realtime_buffers="+std::to_string(query.trace.RealTimeBuffersLost)+" log_buffers="+std::to_string(query.trace.LogBuffersLost));
+                "query="+std::to_string(health.status)+" events="+std::to_string(health.events_lost)+
+                " realtime_buffers="+std::to_string(health.realtime_buffers_lost)+" log_buffers="+std::to_string(health.log_buffers_lost));
             if(self.cpu)self.cpu->events_lost();
         }
     }
