@@ -10,6 +10,7 @@
 #include <string_view>
 #include <iterator>
 #include <set>
+#include <sstream>
 
 namespace {
 std::string read(const std::filesystem::path& path) {
@@ -44,11 +45,13 @@ void ordered(const std::string& source,std::string_view first,std::string_view s
 void check_includes(const std::filesystem::path& root,const std::filesystem::path& file,
     const std::regex& forbidden,std::set<std::filesystem::path>& visited) {
     if(!visited.insert(file).second)return;
-    static const std::regex include(R"inc(^[ \t]*#[ \t]*include[ \t]*[<"]([^>"]+)[>"])inc",
-        std::regex_constants::multiline);
-    const auto source=read(root/file);
-    for(std::sregex_iterator it(source.begin(),source.end(),include),end;it!=end;++it) {
-        const auto dependency=(*it)[1].str();
+    static const std::regex include(R"inc(^[ \t]*#[ \t]*include[ \t]*[<"]([^>"]+)[>"])inc");
+    std::istringstream source(read(root/file));
+    std::string line;
+    std::smatch match;
+    while(std::getline(source,line)) {
+        if(!std::regex_search(line,match,include))continue;
+        const auto dependency=match[1].str();
         if(std::regex_search(dependency,forbidden))
             throw std::runtime_error(file.generic_string()+" depends on forbidden header "+dependency);
         const auto target=dependency.starts_with("fluxtop/")?std::filesystem::path("include")/dependency:
