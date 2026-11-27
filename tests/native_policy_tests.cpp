@@ -345,6 +345,8 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         need(overlay,{"disk_checkbox_control = 300","std::array<HWND,26> disk_checks_{};",
             "disk_checkbox_control+ordinal","const int cpu_y=486+rows*32;","const int summary_y=cpu_aggregate_y+36;",
             "open_group_==group","edit_overlay_scene(window,hwnd_","edit_overlay_blacklist(window,learned_apps_",
+            "manual_move_control,22,81","manual_movement_?HTCAPTION:HTTRANSPARENT",
+            "if(dragging_)return;","overlay_position_from_rect(bounds,","scene_position_changed",
             "position(cpu_temperature_label_,temperature_y)","const int cpu_aggregate_y=temperature_y+heading_spacing;",
             "SendMessageW(disk_checks_[i],BM_GETCHECK,0,0)",
             "right_anchor_ = read(L\"anchor_right\"", "save(L\"anchor_right\"",

@@ -39,6 +39,7 @@ HWND control(HWND parent,const wchar_t* type,const wchar_t* text,DWORD style,int
 }
 
 struct Scene {
+    HWND& dialog;
     std::vector<Display> screens;
     std::size_t screen{};
     OverlayScenePosition position;
@@ -88,8 +89,10 @@ constexpr int monitor_control=120, blacklist_control=121;
 INT_PTR CALLBACK scene_message(HWND hwnd,UINT message,WPARAM wp,LPARAM lp) {
     if(message==WM_INITDIALOG) {
         auto& scene=*reinterpret_cast<Scene*>(lp);
+        scene.dialog=hwnd;
         SetWindowLongPtrW(hwnd,DWLP_USER,lp);
         SetWindowTextW(hwnd,L"Сцена оверлея");
+        SetWindowPos(hwnd,HWND_TOPMOST,0,0,0,0,SWP_NOSIZE|SWP_NOMOVE|SWP_NOACTIVATE);
         RECT rect{};GetClientRect(hwnd,&rect);
         control(hwnd,L"STATIC",L"Перетащите оверлей на нужное место или щёлкните на сетке.",0,0,16,12,rect.right-32,20);
         const auto combo=control(hwnd,L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,
@@ -108,6 +111,19 @@ INT_PTR CALLBACK scene_message(HWND hwnd,UINT message,WPARAM wp,LPARAM lp) {
     auto* scene=reinterpret_cast<Scene*>(GetWindowLongPtrW(hwnd,DWLP_USER));
     if(!scene)return FALSE;
     switch(message) {
+    case WM_DESTROY: scene->dialog=nullptr;return TRUE;
+    case scene_position_changed: {
+        const auto& position=*reinterpret_cast<const OverlayScenePosition*>(lp);
+        const auto screen=std::find_if(scene->screens.begin(),scene->screens.end(),
+            [&](const Display& item){return item.info.szDevice==position.display;});
+        if(screen!=scene->screens.end()) {
+            scene->screen=static_cast<std::size_t>(screen-scene->screens.begin());
+            scene->position=position;
+            SendDlgItemMessageW(hwnd,monitor_control,CB_SETCURSEL,scene->screen,0);
+            InvalidateRect(hwnd,nullptr,TRUE);
+        }
+        return TRUE;
+    }
     case WM_PAINT: {
         PAINTSTRUCT ps{};const auto dc=BeginPaint(hwnd,&ps);
         const auto canvas=scene->screen_area(hwnd);
@@ -277,9 +293,19 @@ HMONITOR overlay_display_monitor(std::wstring_view display,HMONITOR fallback) {
     return found==available.end()?fallback:found->handle;
 }
 
+std::optional<OverlayScenePosition> overlay_position_from_rect(const RECT& bounds,HMONITOR monitor,int margin) {
+    MONITORINFOEXW info{sizeof(info)};
+    if(!GetMonitorInfoW(monitor,&info))return {};
+    const auto& work=info.rcWork;
+    return OverlayScenePosition{
+        scene_axis_position(work.right-work.left,bounds.right-bounds.left,margin,bounds.left-work.left),
+        scene_axis_position(work.bottom-work.top,bounds.bottom-bounds.top,margin,bounds.top-work.top),
+        info.szDevice};
+}
+
 std::optional<OverlayScenePosition> edit_overlay_scene(HWND owner,HWND overlay,
-    std::optional<OverlayScenePosition> initial,int margin) {
-    Scene scene;scene.screens=displays();scene.margin=margin;
+    std::optional<OverlayScenePosition> initial,int margin,HWND& dialog) {
+    Scene scene{dialog,displays()};scene.margin=margin;
     if(scene.screens.empty())return {};
     RECT rect{};if(!GetWindowRect(overlay,&rect))return {};
     scene.size={rect.right-rect.left,rect.bottom-rect.top};
@@ -288,10 +314,8 @@ std::optional<OverlayScenePosition> edit_overlay_scene(HWND owner,HWND overlay,
     const auto found=std::find_if(scene.screens.begin(),scene.screens.end(),
         [monitor](const Display& entry){return entry.handle==monitor;});
     if(found!=scene.screens.end())scene.screen=static_cast<std::size_t>(found-scene.screens.begin());
-    const auto& work=scene.screens[scene.screen].info.rcWork;
-    scene.position=initial.value_or(OverlayScenePosition{
-        scene_axis_position(work.right-work.left,scene.size.cx,margin,rect.left-work.left),
-        scene_axis_position(work.bottom-work.top,scene.size.cy,margin,rect.top-work.top),{}});
+    if(initial)scene.position=*initial;
+    else if(const auto position=overlay_position_from_rect(rect,monitor,margin))scene.position=*position;
     if(modal(owner,scene_message,reinterpret_cast<LPARAM>(&scene),450,330)!=IDOK)return {};
     scene.position.display=scene.screens[scene.screen].info.szDevice;
     return scene.position;

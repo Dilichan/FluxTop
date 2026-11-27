@@ -47,7 +47,7 @@ enum Control : UINT { open_client = 100, toggle_table, quit_app, top_label, top_
     alpha_label, interval_control, summary_control, header_colors_control, row_colors_control, animation_control, logs_control, metric_control = 200, disk_checkbox_control = 300, disk_total_checkbox_control = 326, tab_control = 450, font_label = 500, interval_label = 501,
     cpu_package_control=604,cpu_max_control,cpu_average_control,cpu_checkbox_control=700,
     blacklist_button=1800, table_options_group, metrics_options_group, chart_options_group, diagnostic_options_group,
-    next_chart_page, next_table_page, chart_heading_control,
+    next_chart_page, next_table_page, chart_heading_control, manual_move_control,
     chart_checkbox_control=2000 };
 constexpr unsigned all_metrics = 31; // Five resource columns; FPS is in the application heading.
 constexpr unsigned default_metrics = 31;
@@ -212,6 +212,7 @@ private:
     void update_foreground();
     void update_view();
     void fit_table();
+    void set_manual_movement(bool enabled);
     void release_surface();
     void surface();
     // Animation ticks repaint only the moving row area; ordinary updates repaint everything.
@@ -278,6 +279,8 @@ private:
     bool overlay_running_=true, always_show_=false, inspect_overlay_=false;
     bool show_icons_ = true, stopping_ = false, initializing_client_ = false;
     std::optional<OverlayScenePosition> scene_position_;
+    bool manual_movement_{}, dragging_{};
+    HWND scene_dialog_{};
     std::vector<OverlayApplication> learned_apps_;
     std::optional<std::size_t> foreground_app_;
     std::optional<std::uint64_t> foreground_app_creation_;
@@ -663,6 +666,7 @@ void Overlay::fonts() {
     number_font_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
 }
 void Overlay::fit_table() {
+    if(dragging_)return;
     RECT rect{}; if (!GetWindowRect(hwnd_, &rect)) return;
     MONITORINFO monitor{sizeof(monitor)};
     const auto current=MonitorFromRect(&rect,MONITOR_DEFAULTTONEAREST);
@@ -682,7 +686,8 @@ void Overlay::fit_table() {
     const int y = scene_position_?area.top+scene_axis_offset(area.bottom-area.top,height,margin,scene_position_->y):
         std::clamp(static_cast<int>(rect.top), static_cast<int>(area.top+margin), static_cast<int>(area.bottom-margin-height));
     if (right_anchor_ == CW_USEDEFAULT) right_anchor_ = x + width;
-    SetWindowPos(hwnd_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
+    SetWindowPos(hwnd_, HWND_TOPMOST, x, y, width, height,
+        SWP_NOACTIVATE|(scene_dialog_?SWP_NOZORDER:0));
 }
 void Overlay::add_tray() {
     NOTIFYICONDATAW data{}; data.cbSize = sizeof(data); data.hWnd = hwnd_; data.uID = 1;
@@ -727,7 +732,7 @@ HWND Overlay::control(const wchar_t* kind, const wchar_t* label, DWORD style, UI
     else if(id==chart_heading_control || id>=chart_checkbox_control)group=chart_options_group;
     else if((id>=metric_control && id<tab_control) ||
         (id>=cpu_package_control && id<blacklist_button) || y>=422)group=metrics_options_group;
-    if(y==18 || id==visible_control || id==move_control || id==blacklist_button ||
+    if(y==18 || id==visible_control || id==manual_move_control || id==move_control || id==blacklist_button ||
         id==logs_control || id==quit_app || (id>=table_options_group && id<=diagnostic_options_group))group=0;
     controls_.push_back({window, {x,y,x+width,y+height},group}); return window;
 }
@@ -800,8 +805,10 @@ void Overlay::init_client() {
     SendMessageW(icons, BM_SETCHECK, show_icons_ ? BST_CHECKED : BST_UNCHECKED, 0);
     const auto visible = control(L"BUTTON", L"Показывать оверлей всегда", BS_AUTOCHECKBOX | WS_TABSTOP, visible_control, 22, 51, 380, 26);
     SendMessageW(visible, BM_SETCHECK, always_show_ ? BST_CHECKED : BST_UNCHECKED, 0);
-    control(L"BUTTON",L"Настроить сцену",WS_TABSTOP,move_control,22,86,260,28);
-    control(L"BUTTON",L"Чёрный список приложений",WS_TABSTOP,blacklist_button,22,122,260,28);
+    const auto manual=control(L"BUTTON",L"Перемещать оверлей вручную",BS_AUTOCHECKBOX|WS_TABSTOP,manual_move_control,22,81,380,26);
+    SendMessageW(manual,BM_SETCHECK,manual_movement_?BST_CHECKED:BST_UNCHECKED,0);
+    control(L"BUTTON",L"Настроить сцену",WS_TABSTOP,move_control,22,115,260,28);
+    control(L"BUTTON",L"Чёрный список приложений",WS_TABSTOP,blacklist_button,22,151,260,28);
     for(const auto& [id,title]:{std::pair<UINT,const wchar_t*>{table_options_group,L"Внешний вид и обновление"},
         {metrics_options_group,L"Показатели и датчики"},{chart_options_group,L"Графики в оверлее"},
         {diagnostic_options_group,L"Диагностика и горячие клавиши"}})
@@ -883,7 +890,7 @@ void Overlay::layout_client() {
         if(!child.group && (id<table_options_group || id>diagnostic_options_group) &&
             id!=logs_control && id!=quit_app)placements.emplace_back(child.window,child.bounds);
     }
-    int next=166;
+    int next=195;
     constexpr std::array group_titles{L"Внешний вид и обновление",L"Показатели и датчики",
         L"Графики в оверлее",L"Диагностика и горячие клавиши"};
     for(UINT group=table_options_group;group<=diagnostic_options_group;++group) {
@@ -1042,8 +1049,17 @@ void Overlay::set_visible(bool visible) {
 }
 void Overlay::update_overlay_visibility() {
     const bool blocked=foreground_app_ && learned_apps_[*foreground_app_].blocked;
-    set_visible(overlay_should_show(overlay_running_,always_show_ || inspect_overlay_,
+    set_visible(overlay_should_show(overlay_running_,always_show_ || inspect_overlay_ || manual_movement_,
         foreground_app_.has_value(),blocked));
+}
+void Overlay::set_manual_movement(bool enabled) {
+    if(manual_movement_==enabled)return;
+    manual_movement_=enabled;
+    const auto style=GetWindowLongPtrW(hwnd_,GWL_EXSTYLE);
+    SetWindowLongPtrW(hwnd_,GWL_EXSTYLE,enabled?style&~static_cast<LONG_PTR>(WS_EX_TRANSPARENT):
+        style|WS_EX_TRANSPARENT);
+    update_overlay_visibility();
+    InvalidateRect(hwnd_,nullptr,FALSE);
 }
 void Overlay::ensure_icon_cache() {
     if(!icons_)icons_=std::make_shared<AppIconCache>(history_path(),[this] {
@@ -1711,7 +1727,9 @@ void Overlay::paint(bool animation_only) {
     // Clear with the identity transform: preserve the header and any still
     // valid row pixels; never use opacity/fade to hide stale content.
     target_->SetTransform(D2D1::Matrix3x2F::Identity());
-    const auto background=D2D1::ColorF(0,0,0,0);
+    const auto global_alpha=static_cast<BYTE>(opacity_*255/100);
+    // Layered windows ignore fully transparent pixels in hit testing.
+    const auto background=D2D1::ColorF(0,0,0,manual_movement_?2.0f/global_alpha:0.0f);
     if(animation_only && dip(bitmap_size_.cy)>body_top) {
         target_->PushAxisAlignedClip(D2D1::RectF(0,dirty_top,
             dip(bitmap_size_.cx),dirty_bottom),D2D1_ANTIALIAS_MODE_ALIASED);
@@ -1883,7 +1901,7 @@ void Overlay::paint(bool animation_only) {
     if (result == D2DERR_RECREATE_TARGET) { release_surface(); return; }
     require_hr(result,"Transparent table paint");
     RECT rect{}; GetWindowRect(hwnd_,&rect); POINT destination{rect.left,rect.top}, source{};
-    BLENDFUNCTION blend{AC_SRC_OVER,0,static_cast<BYTE>(opacity_*255/100),AC_SRC_ALPHA};
+    BLENDFUNCTION blend{AC_SRC_OVER,0,global_alpha,AC_SRC_ALPHA};
     if (!UpdateLayeredWindow(hwnd_,nullptr,&destination,&bitmap_size_,dc_,&source,0,&blend,ULW_ALPHA)) throw windows_error("UpdateLayeredWindow");
     if(row_animation_active_) row_animation_last_painted_progress_=progress;
 }
@@ -2063,9 +2081,13 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         case header_colors_control: if (HIWORD(wp)==BN_CLICKED) apply_client(); return 0;
         case row_colors_control: if (HIWORD(wp)==BN_CLICKED) apply_client(); return 0;
         case animation_control: if (HIWORD(wp)==BN_CLICKED) apply_client(); return 0;
+        case manual_move_control:
+            if(HIWORD(wp)==BN_CLICKED)
+                set_manual_movement(SendDlgItemMessageW(window,manual_move_control,BM_GETCHECK,0,0)==BST_CHECKED);
+            return 0;
         case move_control:
             if(HIWORD(wp)==BN_CLICKED)
-                if(auto position=edit_overlay_scene(window,hwnd_,scene_position_,pixels(8))) {
+                if(auto position=edit_overlay_scene(window,hwnd_,scene_position_,pixels(8),scene_dialog_)) {
                     scene_position_=std::move(position);
                     fit_table();save_settings();InvalidateRect(hwnd_,nullptr,FALSE);
                 }
@@ -2181,7 +2203,24 @@ LRESULT Overlay::message(UINT msg,WPARAM wp,LPARAM lp) {
         SetWindowPos(hwnd_,nullptr,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE); fit_table(); return 0;
     }
     case WM_DISPLAYCHANGE: fit_table(); return 0;
-    case WM_NCHITTEST: return HTTRANSPARENT;
+    case WM_NCHITTEST: return manual_movement_?HTCAPTION:HTTRANSPARENT;
+    case WM_ENTERSIZEMOVE: dragging_=manual_movement_; return 0;
+    case WM_EXITSIZEMOVE:
+        if(std::exchange(dragging_,false)) {
+            RECT bounds{};
+            if(GetWindowRect(hwnd_,&bounds)) {
+                if(auto position=overlay_position_from_rect(bounds,
+                    MonitorFromRect(&bounds,MONITOR_DEFAULTTONEAREST),pixels(8))) {
+                    scene_position_=std::move(position);
+                    right_anchor_=bounds.right;
+                    fit_table();
+                    save_settings();
+                    if(scene_dialog_)SendMessageW(scene_dialog_,scene_position_changed,0,
+                        reinterpret_cast<LPARAM>(&*scene_position_));
+                }
+            }
+        }
+        return 0;
     case WM_HOTKEY:
         diagnostics::write(diagnostics::Level::info,"ui.hotkey","hotkey="+std::to_string(wp));
         if(wp==toggle_hotkey){overlay_running_=!overlay_running_;update_overlay_visibility();}

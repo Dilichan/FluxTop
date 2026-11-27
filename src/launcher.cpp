@@ -226,7 +226,8 @@ int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
             fluxtop::uninstall_application(directory);
             return 0;
         }
-        if (!prepare && fluxtop::monitor_running()) {
+        // Isolated installations copy files and leave any real monitor running.
+        if (!prepare && !(install_only && custom_directory) && fluxtop::monitor_running()) {
             if (!autostart) MessageBoxW(nullptr,
                 L"FluxTop уже запущен. Откройте настройки через значок в трее или Ctrl+Alt+F9.",
                 L"FluxTop",MB_OK|MB_ICONINFORMATION);

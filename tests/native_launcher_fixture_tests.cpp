@@ -111,6 +111,18 @@ void portable(const fs::path& launcher,const fs::path& monitor,const fs::path& b
 }
 void install(const fs::path& launcher,const fs::path& build) {
     Fixture fixture(build,L"install-native");
+    const auto instance=GetModuleHandleW(nullptr);
+    constexpr wchar_t monitor_class[]=L"FluxTop.Overlay.Window";
+    WNDCLASSW window_class{};
+    window_class.hInstance=instance;
+    window_class.lpfnWndProc=DefWindowProcW;
+    window_class.lpszClassName=monitor_class;
+    check(RegisterClassW(&window_class)!=0,"Cannot register simulated running monitor");
+    struct MonitorWindow {
+        HWND window;
+        ~MonitorWindow(){if(window)DestroyWindow(window);}
+    } monitor{CreateWindowExW(0,monitor_class,L"",WS_POPUP,0,0,1,1,nullptr,nullptr,instance,nullptr)};
+    check(monitor.window!=nullptr,"Cannot create simulated running monitor");
     const auto history=fixture.root/L"history.db";
     put(history,"history remains unchanged");
     check(launch(launcher,fixture.root,L"--install-only")==0,"Fixture installation failed");
@@ -120,6 +132,7 @@ void install(const fs::path& launcher,const fs::path& build) {
     check(fs::is_regular_file(fixture.root/L"Uninstall-FluxTop.exe"),"Native uninstaller payload was not extracted");
     check(launch(launcher,fixture.root,L"--install-only")==0,"Repeat install failed");
     check(get(history)=="history remains unchanged","Installer altered history");
+    check(IsWindow(monitor.window)!=FALSE,"Isolated installation closed the running monitor");
 }
 }
 int wmain(int argc,wchar_t** argv) {

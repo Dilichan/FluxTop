@@ -10,6 +10,7 @@
 namespace fluxtop {
 class AppIconCache;
 inline constexpr UINT blacklist_icons_ready=WM_APP+120;
+inline constexpr UINT scene_position_changed=WM_APP+121;
 inline constexpr int scene_position_units=10000;
 struct OverlayScenePosition {
     int x{}, y{};
@@ -50,8 +51,9 @@ constexpr bool overlay_should_show(bool running,bool always,bool learned,bool bl
     return running && (always || (learned && !blocked));
 }
 HMONITOR overlay_display_monitor(std::wstring_view display,HMONITOR fallback);
+std::optional<OverlayScenePosition> overlay_position_from_rect(const RECT& bounds,HMONITOR monitor,int margin);
 std::optional<OverlayScenePosition> edit_overlay_scene(HWND owner,HWND overlay,
-    std::optional<OverlayScenePosition> initial,int margin);
+    std::optional<OverlayScenePosition> initial,int margin,HWND& dialog);
 void edit_overlay_blacklist(HWND owner,const std::vector<OverlayApplication>& apps,AppIconCache& icons,HWND& dialog,
     const std::function<void(std::size_t,bool)>& changed);
 } // namespace fluxtop
