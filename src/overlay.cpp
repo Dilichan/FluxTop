@@ -51,6 +51,22 @@ enum Control : UINT { open_client = 100, toggle_table, quit_app, top_label, top_
     chart_checkbox_control=2000 };
 constexpr unsigned all_metrics = 31; // Five resource columns; FPS is in the application heading.
 constexpr unsigned default_metrics = 31;
+constexpr int interval_step_ms = 500;
+constexpr int interval_first_step = 1;
+constexpr int interval_last_step = 10000 / interval_step_ms;
+constexpr int interval_position(unsigned milliseconds) noexcept {
+    return std::clamp(static_cast<int>((milliseconds + interval_step_ms / 2) / interval_step_ms),
+        interval_first_step, interval_last_step);
+}
+std::wstring interval_caption(unsigned milliseconds) {
+    auto seconds = std::to_wstring(milliseconds / 1000);
+    if (const auto remainder = milliseconds % 1000) {
+        auto fraction = std::to_wstring(1000 + remainder).substr(1);
+        fraction.erase(fraction.find_last_not_of(L'0') + 1);
+        seconds += L"," + fraction;
+    }
+    return L"Сбор и обновление: " + seconds + L" с (0,5–10)";
+}
 constexpr std::array<Sort, 8> sort_ui_values{Sort::automatic, Sort::cpu, Sort::ram, Sort::gpu,
     Sort::vram, Sort::rx, Sort::tx, Sort::network};
 constexpr std::size_t sort_ui_index(Sort value) noexcept {
@@ -95,13 +111,18 @@ constexpr UINT_PTR settings_timer = 1;
 constexpr UINT_PTR overlay_animation_timer = 2;
 // Timer wakes are cheap; paint scheduling uses actual frame cost and elapsed time.
 constexpr UINT overlay_animation_timer_ms = 40; // 25 FPS maximum; stops at transition end.
-constexpr unsigned overlay_transition_duration_ms(float slot_travel) noexcept {
-    return static_cast<unsigned>(std::clamp(280.0f +
-        6.0f*std::clamp(slot_travel,0.0f,100.0f),280.0f,520.0f));
+constexpr unsigned overlay_transition_budget_ms(unsigned sampling_ms) noexcept {
+    return sampling_ms - std::min(sampling_ms / 2, 2 * overlay_animation_timer_ms);
 }
-static_assert(overlay_transition_duration_ms(0.0f)==280 &&
-    overlay_transition_duration_ms(10.0f)==340 &&
-    overlay_transition_duration_ms(100.0f)==520);
+constexpr unsigned overlay_transition_duration_ms(float slot_travel,unsigned sampling_ms) noexcept {
+    const auto distance_ms = static_cast<unsigned>(280.0f + 6.0f * std::clamp(slot_travel,0.0f,40.0f));
+    return std::min(distance_ms, overlay_transition_budget_ms(sampling_ms));
+}
+static_assert(overlay_transition_duration_ms(0.0f,1000)==280 &&
+    overlay_transition_duration_ms(10.0f,1000)==340 &&
+    overlay_transition_duration_ms(100.0f,1000)==520 &&
+    overlay_transition_duration_ms(100.0f,500)==420 &&
+    overlay_transition_duration_ms(100.0f,250)==170);
 // Animated display only: sampling cadence and AutoScore are unchanged.
 constexpr float overlay_smoothstep(float value) noexcept {
     const float t=std::clamp(value,0.0f,1.0f);
@@ -400,7 +421,11 @@ void Overlay::load_settings() {
     header_colors_ = read(L"header_colors", 1) != 0;
     row_colors_ = read(L"row_colors", 1) != 0;
     animation_enabled_ = read(L"overlay_animation", 1) != 0;
-    if (!options_.interval_explicit) options_.interval_ms = static_cast<unsigned>(std::clamp(read(L"interval_ms", 1000), 1000, 10000));
+    if (!options_.interval_explicit) {
+        const auto saved = read(L"interval_ms", 1000);
+        const auto bounded = std::clamp(saved, interval_first_step * interval_step_ms, interval_last_step * interval_step_ms);
+        options_.interval_ms = static_cast<unsigned>(interval_position(static_cast<unsigned>(bounded)) * interval_step_ms);
+    }
     show_icons_ = read(L"icons", 1) != 0;
     if (!options_.font_explicit) options_.font_size = static_cast<unsigned>(std::clamp(read(L"font_size", 16), 5, 42));
     if (!options_.top_explicit) {
@@ -783,12 +808,13 @@ void Overlay::init_client() {
         control(L"BUTTON",title,BS_LEFT|WS_TABSTOP,id,22,0,536,32);
     const auto startup = control(L"BUTTON", L"Автозапуск при входе в Windows (с запросом UAC)", BS_AUTOCHECKBOX | WS_TABSTOP, startup_control, 22, 337, 536, 26);
     SendMessageW(startup, BM_SETCHECK, autostart_enabled() ? BST_CHECKED : BST_UNCHECKED, 0);
-    control(L"STATIC", (L"Сбор и обновление: " + std::to_wstring(options_.interval_ms/1000) + L" с (1–10)").c_str(),
+    control(L"STATIC", interval_caption(options_.interval_ms).c_str(),
         0, interval_label, 22, 382, 260, 24);
     const auto interval = control(TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP,
         interval_control, 290, 378, 268, 32);
-    SendMessageW(interval, TBM_SETRANGE, TRUE, MAKELPARAM(1,10));
-    SendMessageW(interval, TBM_SETPOS, TRUE, static_cast<LPARAM>(options_.interval_ms/1000));
+    SendMessageW(interval, TBM_SETRANGE, TRUE, MAKELPARAM(interval_first_step,interval_last_step));
+    SendMessageW(interval, TBM_SETPAGESIZE, 0, 1);
+    SendMessageW(interval, TBM_SETPOS, TRUE, interval_position(options_.interval_ms));
     control(L"STATIC", L"Показывать показатели:", 0, 0, 22, 422, 536, 24);
     for (unsigned i=0;i<metric_names.size();++i) {
         const auto box = control(L"BUTTON", metric_names[i], BS_AUTOCHECKBOX | WS_TABSTOP,
@@ -915,7 +941,7 @@ void Overlay::apply_client() {
     const auto selected_font = SendDlgItemMessageW(client_,font_control,TBM_GETPOS,0,0);
     const auto top = SendDlgItemMessageW(client_,top_control,TBM_GETPOS,0,0);
     const auto selected_sort = SendDlgItemMessageW(client_, sort_control, CB_GETCURSEL, 0, 0);
-    const auto seconds = SendDlgItemMessageW(client_,interval_control,TBM_GETPOS,0,0);
+    const auto interval_step = SendDlgItemMessageW(client_,interval_control,TBM_GETPOS,0,0);
     const auto alpha = SendDlgItemMessageW(client_, alpha_control, TBM_GETPOS, 0, 0);
     if (alpha < 1 || alpha > 100 || selected_sort < 0 || selected_sort >= static_cast<LRESULT>(sort_ui_values.size())) return;
     if (top >= 1 && top <= 100) options_.top = static_cast<unsigned>(top);
@@ -923,14 +949,24 @@ void Overlay::apply_client() {
     const auto new_sort = sort_ui_values[static_cast<std::size_t>(selected_sort)];
     if (options_.collectors.gpu || (new_sort != Sort::gpu && new_sort != Sort::vram)) options_.sort = new_sort;
     else SendDlgItemMessageW(client_, sort_control, CB_SETCURSEL, static_cast<WPARAM>(sort_ui_index(options_.sort)), 0);
-    if (seconds >= 1 && seconds <= 10 && seconds*1000 != options_.interval_ms) {
-        options_.interval_ms = static_cast<unsigned>(seconds*1000); worker_.set_interval(options_.interval_ms);
+    if (interval_step >= interval_first_step && interval_step <= interval_last_step &&
+        interval_step != interval_position(options_.interval_ms)) {
+        options_.interval_ms = static_cast<unsigned>(interval_step * interval_step_ms);
+        worker_.set_interval(options_.interval_ms);
+        const auto budget = overlay_transition_budget_ms(options_.interval_ms);
+        if (row_animation_active_ && row_animation_duration_ms_ > budget) {
+            const auto now = GetTickCount64();
+            const auto elapsed = std::min<ULONGLONG>(now - row_animation_started_, row_animation_duration_ms_);
+            row_animation_started_ = now - elapsed * budget / row_animation_duration_ms_;
+            row_animation_duration_ms_ = budget;
+            row_animation_next_frame_tick_ = 0;
+        }
     }
     opacity_ = static_cast<unsigned>(alpha); show_icons_ = SendDlgItemMessageW(client_, icons_control, BM_GETCHECK, 0, 0) == BST_CHECKED;
     SetDlgItemTextW(client_, alpha_label, (L"Непрозрачность: " + std::to_wstring(opacity_) + L"%").c_str());
     SetDlgItemTextW(client_, top_label, (L"Количество приложений: " + std::to_wstring(options_.top) + L" / 100").c_str());
     SetDlgItemTextW(client_, font_label, (L"Размер текста: " + std::to_wstring(options_.font_size) + L" px (5–42)").c_str());
-    SetDlgItemTextW(client_, interval_label, (L"Сбор и обновление: " + std::to_wstring(options_.interval_ms/1000) + L" с (1–10)").c_str());
+    SetDlgItemTextW(client_, interval_label, interval_caption(options_.interval_ms).c_str());
     if(statistics_) statistics_->set_limit(options_.top);
     metrics_ = 0;
     for (unsigned i=0;i<metric_names.size();++i) {
@@ -1285,8 +1321,8 @@ void Overlay::update_view() {
                 if(travel>0.01f) has_motion=true;
             }
             row_animation_started_=tick;
-            // Distance-aware 280-520ms motion. Sampling interval never drags animations out.
-            row_animation_duration_ms_=overlay_transition_duration_ms(max_slot_travel);
+            // Reserve two paint ticks at the end of a short sampling period.
+            row_animation_duration_ms_=overlay_transition_duration_ms(max_slot_travel,options_.interval_ms);
             row_animation_last_painted_progress_=0.0f;
             row_animation_next_frame_tick_=0;
             row_animation_slow_frame_reported_=false;
@@ -1941,7 +1977,7 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
             if(is_font)
                 SetDlgItemTextW(window,font_label,(L"Размер текста: "+std::to_wstring(selected)+L" px (5–42)").c_str());
             else
-                SetDlgItemTextW(window,interval_label,(L"Сбор и обновление: "+std::to_wstring(selected)+L" с (1–10)").c_str());
+                SetDlgItemTextW(window,interval_label,interval_caption(selected * interval_step_ms).c_str());
             if(LOWORD(wp)==TB_ENDTRACK || LOWORD(wp)==TB_THUMBPOSITION) {
                 KillTimer(window,settings_timer);
                 apply_client();
