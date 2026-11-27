@@ -1,5 +1,6 @@
 #include "fluxtop/diagnostics.hpp"
 #include "fluxtop/statistics_page.hpp"
+#include "fluxtop/app_icons.hpp"
 #include "fluxtop/statistics_colors.hpp"
 #include "fluxtop/history_identity.hpp"
 #include "fluxtop/statistics_axis.hpp"
@@ -9,8 +10,6 @@
 #include "fluxtop/overlay_ini.hpp"
 #include "fluxtop/control_wheel.hpp"
 #include <commctrl.h>
-#include <shellapi.h>
-#include <shlobj.h>
 #include <windowsx.h>
 #include <algorithm>
 #include <array>
@@ -290,9 +289,10 @@ HDC StatisticsPage::PaintBuffer::prepare(HDC reference,LONG w,LONG h) {
     return dc;
 }
 StatisticsPage::StatisticsPage(HWND parent,std::filesystem::path database,
-    std::wstring settings_path,unsigned limit,std::shared_ptr<SystemGraphHistory> graph_history)
+    std::wstring settings_path,unsigned limit,std::shared_ptr<SystemGraphHistory> graph_history,
+    std::shared_ptr<AppIconCache> icons)
     :graph_history_(std::move(graph_history)),system_points_(graph_history_->points()),
-    database_(std::move(database)),settings_(std::move(settings_path)) {
+    database_(std::move(database)),settings_(std::move(settings_path)),icons_(std::move(icons)) {
     // The live graph uses the SAME limit as overlay rows, across tabs.
     limit_=std::clamp(limit,1U,100U);
     history_limit_=std::clamp(ini_overlay_read(settings_,L"stats_history_top",limit_),1U,100U);
@@ -790,16 +790,32 @@ LRESULT CALLBACK StatisticsPage::table_dispatch(HWND window,UINT msg,WPARAM wp,L
 HICON StatisticsPage::application_icon(const std::wstring& path) {
     if(path.empty()) return nullptr;
     if(const auto it=icon_cache_.find(path);it!=icon_cache_.end()) return it->second;
+    const auto image=icons_->get(path);
+    if(!image) {icons_->request(path);return nullptr;}
     if(icon_cache_.size()>=256) {
         for(const auto& [name,icon]:icon_cache_) { (void)name; if(icon) DestroyIcon(icon); }
         icon_cache_.clear();
     }
-    SHFILEINFOW info{};
-    DWORD_PTR ok=SHGetFileInfoW(path.c_str(),0,&info,sizeof(info),SHGFI_ICON|SHGFI_SMALLICON);
-    if(!ok) ok=SHGetFileInfoW(L"sample.exe",FILE_ATTRIBUTE_NORMAL,&info,sizeof(info),
-        SHGFI_ICON|SHGFI_SMALLICON|SHGFI_USEFILEATTRIBUTES);
-    auto icon=ok?info.hIcon:nullptr;
-    icon_cache_.emplace(path,icon);return icon;
+    const auto icon=native_app_icon(*image);
+    if(icon)icon_cache_.emplace(path,icon);
+    return icon;
+}
+void StatisticsPage::icons_ready() {
+    const auto fill=[this](HWND list,HIMAGELIST images) {
+        if(!list || !images || !IsWindowVisible(list))return;
+        const int count=std::min(ListView_GetItemCount(list),static_cast<int>(history_.uptime.size()));
+        for(int i=0;i<count;++i) {
+            LVITEMW row{};row.mask=LVIF_IMAGE;row.iItem=i;
+            if(!ListView_GetItem(list,&row) || row.iImage>=0)continue;
+            const auto& app=history_.uptime[static_cast<std::size_t>(i)];
+            if(const auto icon=application_icon(app.path)) {
+                row.iImage=ImageList_AddIcon(images,icon);
+                if(row.iImage>=0)ListView_SetItem(list,&row);
+            }
+        }
+    };
+    fill(table_,image_list_);fill(table_window_list_,table_image_list_);
+    if(tooltip_ && IsWindowVisible(tooltip_))InvalidateRect(tooltip_,nullptr,FALSE);
 }
 bool StatisticsPage::has_popup() const {
     return std::any_of(popups_.begin(),popups_.end(),[](const auto& p){return p.window!=nullptr;});
@@ -854,7 +870,6 @@ void StatisticsPage::set_cpu_view(const CpuViewSettings& settings){
 }
 void StatisticsPage::on_snapshot(std::int64_t timestamp_ms,const std::vector<Process>& grouped,
     unsigned interval_ms,const Snapshot& system) {
-    graph_history_->append(system,GetTickCount64(),now_ms()); // Duplicate delivery is ignored.
     std::vector<wchar_t> found_letters;
     found_letters.reserve(system.disks.size());
     for(const auto& disk:system.disks)found_letters.push_back(disk.letter);
@@ -953,36 +968,22 @@ double StatisticsPage::icon_hue(const std::wstring& key,const std::wstring& path
     std::uint32_t hash=2166136261U;
     for(wchar_t ch:key) {hash^=static_cast<std::uint32_t>(ch);hash*=16777619U;}
     double hue=static_cast<double>(hash%360U);
-    if(auto icon=application_icon(path)) {
-        HDC dc=CreateCompatibleDC(nullptr);
-        BITMAPINFO bmi{};
-        bmi.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth=32;bmi.bmiHeader.biHeight=-32;
-        bmi.bmiHeader.biPlanes=1;bmi.bmiHeader.biBitCount=32;bmi.bmiHeader.biCompression=BI_RGB;
-        void* pixels=nullptr;
-        HBITMAP bitmap=dc?CreateDIBSection(dc,&bmi,DIB_RGB_COLORS,&pixels,nullptr,0):nullptr;
-        if(dc && bitmap && pixels) {
-            auto old=SelectObject(dc,bitmap);
-            std::fill_n(static_cast<std::uint32_t*>(pixels),32*32,0xffffffffU);
-            if(DrawIconEx(dc,0,0,icon,32,32,0,nullptr,DI_NORMAL)) {
-                std::array<double,24> weights{};
-                for(unsigned i=0;i<32*32;++i) {
-                    const auto px=static_cast<std::uint32_t*>(pixels)[i];
-                    const int r=static_cast<int>((px>>16)&255U),g=static_cast<int>((px>>8)&255U),b=static_cast<int>(px&255U);
-                    const int high=std::max({r,g,b}),low=std::min({r,g,b}),delta=high-low;
-                    if(high>242 || high<30 || delta<35) continue;
-                    const auto candidate=pixel_hue(r,g,b);
-                    const auto bin=std::min(23,static_cast<int>(candidate/15.0));
-                    weights[static_cast<std::size_t>(bin)]+=static_cast<double>(delta)/255;
-                }
-                const auto best=std::max_element(weights.begin(),weights.end());
-                if(best!=weights.end() && *best>1.0)
-                    hue=15.0*(std::distance(weights.begin(),best)+.5);
-            }
-            SelectObject(dc,old);
+    if(!path.empty()) {
+        const auto icon=icons_->get(path);
+        if(!icon) {icons_->request(path);return hue;}
+        std::array<double,24> weights{};
+        for(std::size_t i=0;i<icon->pixels.size();i+=4) {
+            const int white=255-std::to_integer<int>(icon->pixels[i+3]);
+            const int b=white+std::to_integer<int>(icon->pixels[i]);
+            const int g=white+std::to_integer<int>(icon->pixels[i+1]);
+            const int r=white+std::to_integer<int>(icon->pixels[i+2]);
+            const int high=std::max({r,g,b}),low=std::min({r,g,b}),delta=high-low;
+            if(high>242 || high<30 || delta<35)continue;
+            const auto bin=std::min(23,static_cast<int>(pixel_hue(r,g,b)/15.0));
+            weights[static_cast<std::size_t>(bin)]+=static_cast<double>(delta)/255;
         }
-        if(bitmap) DeleteObject(bitmap);
-        if(dc) DeleteDC(dc);
+        const auto best=std::max_element(weights.begin(),weights.end());
+        if(*best>1.0)hue=15.0*(std::distance(weights.begin(),best)+.5);
     }
     icon_hues_[key]=hue;
     return hue;

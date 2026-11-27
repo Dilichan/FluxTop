@@ -37,8 +37,7 @@ void DiskCollector::refresh(DWORD drive_mask) {
     // PDH rate counters require two readings. Never report the first as zero.
     PdhCollectQueryData(query_);
 }
-void DiskCollector::collect(Snapshot& snapshot) {
-    const DWORD mask=GetLogicalDrives();
+void DiskCollector::collect(Snapshot& snapshot,DWORD mask) {
     if(!initialized_ || mask!=last_mask_) refresh(mask);
     snapshot.disks.clear();
     snapshot.disks.reserve(counters_.size());

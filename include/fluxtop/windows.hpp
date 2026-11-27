@@ -22,6 +22,17 @@ private:
 inline std::uint64_t filetime_ticks(FILETIME time) {
     return (static_cast<std::uint64_t>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
 }
+inline std::wstring process_image_path(HANDLE process) {
+    wchar_t buffer[512]{};
+    DWORD length=static_cast<DWORD>(_countof(buffer));
+    if(QueryFullProcessImageNameW(process,0,buffer,&length))return {buffer,length};
+    if(GetLastError()!=ERROR_INSUFFICIENT_BUFFER)return {};
+    std::wstring path(32768,L'\0');
+    length=static_cast<DWORD>(path.size());
+    if(!QueryFullProcessImageNameW(process,0,path.data(),&length))return {};
+    path.resize(length);
+    return path;
+}
 inline std::runtime_error windows_error(const char* operation) {
     return std::runtime_error(std::string(operation) + " failed (Windows error " + std::to_string(GetLastError()) + ")");
 }

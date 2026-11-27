@@ -57,6 +57,9 @@ int wmain(int argc,wchar_t** argv){try{
                 need(s.history_error.empty(),"history continues during active collection");
                 for(const auto& p:s.processes)if(p.pid==GetCurrentProcessId()){
                     percent(p.cpu_percent);percent(p.gpu_percent);need(p.working_set.has_value(),"own RAM is accessible");
+                    need(s.self_working_set==p.working_set && p.private_bytes && s.self_private_bytes==p.private_bytes &&
+                        s.self_peak_working_set && *s.self_peak_working_set>=*p.working_set,
+                        "monitor RAM comes from the same measurement as its process row");
                     own_cpu=own_cpu || p.cpu_percent.value_or(0)>0;
                     need(!p.presented_fps || (std::isfinite(*p.presented_fps) && *p.presented_fps>=0),"FPS validity");
                 }

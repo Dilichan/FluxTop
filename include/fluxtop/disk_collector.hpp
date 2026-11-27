@@ -11,7 +11,7 @@ public:
     ~DiskCollector();
     DiskCollector(const DiskCollector&) = delete;
     DiskCollector& operator=(const DiskCollector&) = delete;
-    void collect(Snapshot& snapshot);
+    void collect(Snapshot& snapshot, DWORD drive_mask);
 private:
     struct Counter { wchar_t letter; PDH_HCOUNTER handle{}; };
     void refresh(DWORD drive_mask);

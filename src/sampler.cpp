@@ -3,7 +3,6 @@
 #include "fluxtop/diagnostics.hpp"
 #include "fluxtop/windows.hpp"
 #include "fluxtop/temperatures.hpp"
-#include <psapi.h>
 #include <iostream>
 #include <array>
 #include <cmath>
@@ -49,8 +48,9 @@ Snapshot Sampler::collect() {
     if (!snapshot.gpu_temperature_c) snapshot.gpu_temperature_c = hwtemps.gpu_c;
     if(network_)network_->collect(snapshot);
     else snapshot.network_status="disabled";
-    disks_.collect(snapshot);
-    disk_io_.collect(snapshot); // Physical ETW attribution; never generic process I/O.
+    const auto drive_mask=GetLogicalDrives();
+    disks_.collect(snapshot,drive_mask);
+    disk_io_.collect(snapshot,drive_mask);
     // Observability only: count valid samples; never change or impute measurements.
     // A collector may be operational while many protected PIDs remain unknown.
     if (++coverage_samples_==1 || coverage_samples_%15==0) {
@@ -77,13 +77,6 @@ Snapshot Sampler::collect() {
             " disk_status="+snapshot.disk_io_status);
     }
     spikes_.update(snapshot.processes, snapshot.total_ram_capacity, snapshot.total_gpu_memory_capacity);
-    PROCESS_MEMORY_COUNTERS_EX memory{};
-    memory.cb = sizeof(memory);
-    if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory), sizeof(memory))) {
-        snapshot.self_working_set = memory.WorkingSetSize;
-        snapshot.self_private_bytes = memory.PrivateUsage;
-        snapshot.self_peak_working_set = memory.PeakWorkingSetSize;
-    }
     DWORD handles{};
     if (GetProcessHandleCount(GetCurrentProcess(), &handles)) snapshot.self_handles = handles;
     snapshot.collection_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();

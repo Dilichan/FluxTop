@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 include(cmake/MsvcNinjaDependencies.cmake)
-project(FluxTop VERSION 0.2.11 LANGUAGES CXX RC)
+project(FluxTop VERSION 0.2.12 LANGUAGES CXX RC)
 fluxtop_configure_compiler_environment()
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 set(FLUXTOP_RELEASE_TAG "v${PROJECT_VERSION}" CACHE STRING "GitHub release tag embedded in the downloadable launcher")
@@ -43,7 +43,7 @@ target_link_libraries(fluxtop_collectors PUBLIC fluxtop_core PRIVATE
 target_compile_definitions(fluxtop_collectors PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
 target_compile_options(fluxtop_collectors PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/W4;/WX;/permissive-;/utf-8;/EHsc>)
 
-add_executable(fluxtop src/main.cpp src/overlay.cpp src/statistics_page.cpp src/statistics_history.cpp src/autostart.cpp
+add_executable(fluxtop src/main.cpp src/overlay.cpp src/overlay_scene.cpp src/statistics_page.cpp src/statistics_history.cpp src/autostart.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/fluxtop.rc")
 target_link_libraries(fluxtop PRIVATE fluxtop_collectors fluxtop_icons fluxtop_history
     advapi32 d2d1 dwrite shell32 user32 gdi32 ole32 comctl32 uuid)

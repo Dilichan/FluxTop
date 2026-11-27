@@ -6,7 +6,8 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
-#include <optional>
+#include <string_view>
+#include <windows.h>
 
 namespace fluxtop {
 struct AppIcon {
@@ -20,6 +21,8 @@ struct IconCacheStats {
 };
 // Optional diagnostic export of an owned render surface; no desktop capture.
 bool save_argb_png(const std::filesystem::path& file, const void* pixels, unsigned width, unsigned height);
+// Converts cached pixels for native Win32 controls. The caller owns the handle.
+HICON native_app_icon(const AppIcon& image);
 class AppIconCache {
 public:
     AppIconCache(std::filesystem::path database, std::function<void()> ready);
@@ -28,8 +31,9 @@ public:
     AppIconCache& operator=(const AppIconCache&) = delete;
     // Configures the bounded working set to accommodate visible rows and churn.
     void set_capacity(std::size_t capacity);
-    void request(std::uint32_t pid, std::optional<std::uint64_t> created);
-    std::shared_ptr<const AppIcon> get(std::uint32_t pid, std::optional<std::uint64_t> created);
+    // All views use the same canonical path provided by the process snapshot or history.
+    void request(std::wstring_view exe_path);
+    std::shared_ptr<const AppIcon> get(std::wstring_view exe_path);
     IconCacheStats stats() const;
 private:
     struct Impl;

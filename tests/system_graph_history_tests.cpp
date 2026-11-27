@@ -1,5 +1,9 @@
 #include "fluxtop/system_graph_history.hpp"
 #include "fluxtop/overlay_charts.hpp"
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include "fluxtop/overlay_scene.hpp"
 #include "fluxtop/statistics_chart_controls.hpp"
 #include <algorithm>
 #include <iostream>
@@ -56,6 +60,24 @@ void focused_fps_history(){
 }
 int main(){try{
     focused_fps_history();
+    const std::vector<OverlayApplication> apps{{L"test.exe",L"Test",LR"(C:\Games\test.exe)",false},
+        {L"player.exe",L"Player",LR"(C:\Apps\player.exe)",true}};
+    check(overlay_application_index(apps,overlay_executable_name(LR"(c:\games\TEST.exe)"))==0 &&
+        overlay_application_index(apps,overlay_executable_name(LR"(D:\Games\test.exe)"))==0 &&
+        overlay_application_index(apps,L"PLAYER.EXE")==1 && !overlay_application_index(apps,L"other.exe"),
+        "learned applications match executable names across folders");
+    check(!overlay_should_show(true,false,false,false) && overlay_should_show(true,false,true,false) &&
+        !overlay_should_show(true,false,true,true),
+        "automatic visibility requires a recognized application outside the blacklist");
+    check(overlay_should_show(true,true,false,false) && overlay_should_show(true,true,true,true),
+        "always-show survives focus returning to any application when the client is minimized");
+    check(!overlay_should_show(false,true,true,false) && !overlay_should_show(false,false,true,false),
+        "manual pause hides the overlay in both visibility modes");
+    const int offset=scene_axis_offset(1920,640,8,2500);
+    check(scene_axis_position(1920,640,8,offset)==2500 &&
+        scene_axis_offset(1920,640,8,scene_position_units)==1272 &&
+        scene_axis_position(640,640,0,320)==0,
+        "scene positions round-trip and stay inside the monitor's work area");
     auto history=std::make_shared<SystemGraphHistory>();
     // No page or client window exists during this collection period.
     constexpr std::int64_t start=1800000000000;

@@ -15,11 +15,13 @@
 #include <thread>
 
 namespace fluxtop {
+class AppIconCache;
 // Independent Win32 page. History queries never execute on the UI or sampler thread.
 class StatisticsPage {
 public:
     StatisticsPage(HWND parent, std::filesystem::path database,
-        std::wstring settings_path, unsigned limit,std::shared_ptr<SystemGraphHistory> graph_history);
+        std::wstring settings_path, unsigned limit,std::shared_ptr<SystemGraphHistory> graph_history,
+        std::shared_ptr<AppIconCache> icons);
     ~StatisticsPage();
     StatisticsPage(const StatisticsPage&)=delete;
     StatisticsPage& operator=(const StatisticsPage&)=delete;
@@ -29,6 +31,7 @@ public:
     void set_limit(unsigned limit);
     void set_cpu_view(const CpuViewSettings& settings);
     void on_snapshot(std::int64_t timestamp_ms,const std::vector<Process>& grouped,unsigned interval_ms,const Snapshot& system);
+    void icons_ready();
 private:
     using SystemPoint=SystemChartPoint;
     static LRESULT CALLBACK dispatch(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp);
@@ -259,6 +262,7 @@ private:
     std::vector<StatisticsApplication> live_apps_;
     std::deque<LiveEvent> live_;
     std::map<std::wstring,HICON> icon_cache_;
+    std::shared_ptr<AppIconCache> icons_;
     std::map<std::wstring,double> icon_hues_;
     std::map<std::wstring,COLORREF> chart_colors_;
     int hover_section_=-1;

@@ -49,22 +49,10 @@ Snapshot ProcessCollector::collect() {
                 if (const auto found = paths_.find(row.pid); found != paths_.end() && found->second.creation == *row.creation_time)
                     row.exe_path = found->second.value;
                 else {
-                    // A typical executable path fits in 512 wchar_t. Only allocate
-                    // a large buffer for the exceptional long-path process.
-                    wchar_t short_path[512]{};
-                    DWORD length = static_cast<DWORD>(512U);
-                    std::wstring path;
-                    if (QueryFullProcessImageNameW(process.get(), 0, short_path, &length)) {
-                        path.assign(short_path, length);
-                    } else if (GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
-                        path.resize(32768);
-                        length = static_cast<DWORD>(path.size());
-                        if (QueryFullProcessImageNameW(process.get(), 0, path.data(), &length))
-                            path.resize(length);
-                        else path.clear();
-                    }
+                    auto path=process_image_path(process.get());
                     if (!path.empty()) {
                         // Invariant case folding makes Windows paths stable application keys.
+                        const auto length=path.size();
                         std::wstring folded(length, L'\0');
                         if (LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, path.data(), static_cast<int>(length),
                             folded.data(), static_cast<int>(length), nullptr, nullptr, 0)) path = std::move(folded);
@@ -83,6 +71,11 @@ Snapshot ProcessCollector::collect() {
             if (GetProcessMemoryInfo(process.get(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory), sizeof(memory))) {
                 row.working_set = memory.WorkingSetSize;
                 row.private_bytes = memory.PrivateUsage;
+                if (row.pid == result.self_pid) {
+                    result.self_working_set = row.working_set;
+                    result.self_private_bytes = row.private_bytes;
+                    result.self_peak_working_set = memory.PeakWorkingSetSize;
+                }
             }
         }
         if (!row.cpu_ticks || !row.working_set) ++result.inaccessible;

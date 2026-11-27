@@ -3,6 +3,7 @@
 #include "fluxtop/diagnostics.hpp"
 #include "fluxtop/overlay_layout.hpp"
 #include "fluxtop/overlay_charts.hpp"
+#include "fluxtop/overlay_scene.hpp"
 #include "fluxtop/cpu_view.hpp"
 
 #include "fluxtop/statistics_page.hpp"
@@ -45,6 +46,8 @@ enum Control : UINT { open_client = 100, toggle_table, quit_app, top_label, top_
     alpha_control, visible_control, move_control, icons_control, stats_control, startup_control,
     alpha_label, interval_control, summary_control, header_colors_control, row_colors_control, animation_control, logs_control, metric_control = 200, disk_checkbox_control = 300, disk_total_checkbox_control = 326, tab_control = 450, font_label = 500, interval_label = 501,
     cpu_package_control=604,cpu_max_control,cpu_average_control,cpu_checkbox_control=700,
+    blacklist_button=1800, table_options_group, metrics_options_group, chart_options_group, diagnostic_options_group,
+    next_chart_page, next_table_page, chart_heading_control,
     chart_checkbox_control=2000 };
 constexpr unsigned all_metrics = 31; // Five resource columns; FPS is in the application heading.
 constexpr unsigned default_metrics = 31;
@@ -143,6 +146,7 @@ struct Row {
     // Utilization is stored per cell for load colors.
     std::array<std::optional<double>,4> loads{}; // CPU / RAM / GPU / GPU RAM
     std::vector<std::optional<double>> logical_cpu;
+    std::wstring icon_path;
     bool operator==(const Row&) const = default;
 };
 
@@ -177,8 +181,12 @@ private:
     void client_stats();
     HWND control(const wchar_t* kind, const wchar_t* label, DWORD style, UINT id, int x, int y, int width, int height);
     void set_visible(bool visible);
+    void update_overlay_visibility();
+    void learn_foreground_application();
+    void save_application(std::size_t index);
+    void ensure_icon_cache();
+    void release_unused_icon_cache();
     void activity();
-    void movement();
     void receive();
     void update_foreground();
     void update_view();
@@ -245,8 +253,15 @@ private:
     std::optional<double> foreground_fps_; // Only the currently focused PID.
     HFONT client_font_{};
     UINT dpi_ = 96, client_dpi_ = 96, taskbar_created_{};
-    bool tray_ = false, toggle_key_ = false, client_key_ = false, visible_ = true;
-    bool moving_ = false, show_icons_ = true, stopping_ = false, initializing_client_ = false;
+    bool tray_ = false, toggle_key_ = false, client_key_ = false, visible_ = false;
+    bool overlay_running_=true, always_show_=false, inspect_overlay_=false;
+    bool show_icons_ = true, stopping_ = false, initializing_client_ = false;
+    std::optional<OverlayScenePosition> scene_position_;
+    std::vector<OverlayApplication> learned_apps_;
+    std::optional<std::size_t> foreground_app_;
+    std::optional<std::uint64_t> foreground_app_creation_;
+    bool migrate_app_settings_{};
+    HWND blacklist_dialog_{};
     unsigned opacity_ = 100;
     unsigned metrics_ = default_metrics;
     unsigned selected_disks_mask_{}; // 26 letters, persisted even when a drive disappears.
@@ -266,19 +281,19 @@ private:
     bool summary_ = false;
     bool header_colors_ = true, row_colors_ = true;
     bool animation_enabled_ = true;
-    bool dragging_ = false;
     int x_ = CW_USEDEFAULT, y_ = CW_USEDEFAULT;
     int right_anchor_ = CW_USEDEFAULT;
     std::wstring settings_;
     std::size_t scroll_{};
     std::uint64_t disk_delivery_ui_samples_{}; // Diagnostics, not rendering state.
     int exit_code_{};
-    struct Child { HWND window; RECT bounds; };
+    struct Child { HWND window; RECT bounds; UINT group; };
     std::vector<Child> controls_;
+    UINT open_group_{};
     SamplingWorker worker_;
     SpikeTracker grouped_spikes_; // Updated once per new system snapshot, never per foreground event.
     std::vector<Process> grouped_processes_;
-    std::unique_ptr<AppIconCache> icons_;
+    std::shared_ptr<AppIconCache> icons_;
     std::atomic<bool> icon_posted_{false};
     std::mutex mailbox_mutex_;
     std::optional<Snapshot> pending_, snapshot_;
@@ -351,6 +366,26 @@ void Overlay::load_settings() {
     if (settings_.empty()) return;
     cpu_view_=load_cpu_view([this](const auto& key){return ini_overlay_read_text(settings_,key);});
     const auto read = [&](const wchar_t* key, int fallback) { return ini_overlay_read_int(settings_,key,fallback); };
+    always_show_=read(L"overlay_always_show",0)!=0;
+    const auto scene_x=read(L"scene_x",-1),scene_y=read(L"scene_y",-1);
+    if(scene_x>=0 && scene_y>=0)
+        scene_position_=OverlayScenePosition{std::min(scene_x,scene_position_units),
+            std::min(scene_y,scene_position_units),ini_overlay_read_text(settings_,L"scene_display")};
+    const auto entries=std::clamp(read(L"overlay_applications",0),0,4096);
+    for(int i=0;i<entries;++i) {
+        const auto key=L"overlay_app_"+std::to_wstring(i);
+        auto path=ini_overlay_read_text(settings_,key);
+        auto exe=ini_overlay_read_text(settings_,key+L"_exe");
+        auto name=ini_overlay_read_text(settings_,key+L"_name");
+        const bool blocked=read((key+L"_blocked").c_str(),0)!=0;
+        if(exe.empty()) {exe=overlay_executable_name(path);migrate_app_settings_=true;}
+        if(exe.empty())continue;
+        if(name.empty())name=wide(display_names_detail::base_name(utf8(exe.c_str())));
+        if(const auto existing=overlay_application_index(learned_apps_,exe)) {
+            learned_apps_[*existing].blocked|=blocked;
+            migrate_app_settings_=true;
+        } else learned_apps_.push_back({std::move(exe),std::move(name),std::move(path),blocked});
+    }
     x_ = read(L"x", CW_USEDEFAULT); y_ = read(L"y", CW_USEDEFAULT);
     right_anchor_ = read(L"anchor_right", CW_USEDEFAULT);
     if (read(L"layout_version", 0) >= 2) opacity_ = static_cast<unsigned>(std::clamp(read(L"opacity", 100), 1, 100));
@@ -392,6 +427,11 @@ void Overlay::save_settings() noexcept {
         save(L"disk_columns",static_cast<int>(selected_disks_mask_));
         save(L"disk_total_column",disk_total_enabled_?1:0);
         save(L"interval_ms", static_cast<int>(options_.interval_ms));
+        save(L"overlay_always_show",always_show_?1:0);
+        if(scene_position_) {
+            save(L"scene_x",scene_position_->x);save(L"scene_y",scene_position_->y);
+            ini_overlay_write_text(settings_,L"scene_display",scene_position_->display);
+        }
         save_cpu_view(cpu_view_,[this](const auto& key,const auto& text){ini_overlay_write_text(settings_,key,text);});
     } catch (...) {}
 }
@@ -493,9 +533,7 @@ void Overlay::refresh_disk_controls() {
     constexpr int heading_spacing=28;
     const int temperature_y=cpu_y+heading_spacing+static_cast<int>((cpu_checks_.size()+4)/5)*32;
     const int cpu_aggregate_y=temperature_y+heading_spacing;
-    const int charts_y=cpu_aggregate_y+36;
-    const int chart_rows=static_cast<int>((chart_checks_.size()+4)/5);
-    const int summary_y=charts_y+heading_spacing+chart_rows*32+8;
+    const int summary_y=cpu_aggregate_y+36;
     const int header_y=summary_y+33;
     const int animation_y=header_y+36;
     const int stats_y=animation_y+43;
@@ -514,9 +552,6 @@ void Overlay::refresh_disk_controls() {
     position(cpu_temperature_label_,temperature_y);
     position(GetDlgItem(client_,cpu_package_control),cpu_aggregate_y);position(GetDlgItem(client_,cpu_max_control),cpu_aggregate_y);
     position(GetDlgItem(client_,cpu_average_control),cpu_aggregate_y);
-    position(chart_settings_label_,charts_y);
-    for(std::size_t i=0;i<chart_checks_.size();++i)
-        position(chart_checks_[i],charts_y+heading_spacing+static_cast<int>(i/5)*32);
     position(GetDlgItem(client_,summary_control),summary_y);
     position(GetDlgItem(client_,header_colors_control),header_y);
     position(GetDlgItem(client_,row_colors_control),header_y);
@@ -575,7 +610,8 @@ bool Overlay::refresh_chart_choices(bool create_controls) {
         for(std::size_t i=0;i<chart_choices_.size();++i) {
             const auto& chart=chart_choices_[i];
             const auto box=control(L"BUTTON",chart.title.c_str(),BS_AUTOCHECKBOX|WS_TABSTOP,
-                chart_checkbox_control+static_cast<UINT>(i),22+static_cast<int>(i%5)*104,0,102,26);
+                chart_checkbox_control+static_cast<UINT>(i),22+static_cast<int>(i%5)*104,
+                30+static_cast<int>(i/5)*32,102,26);
             SendMessageW(box,BM_SETCHECK,chart.enabled?BST_CHECKED:BST_UNCHECKED,0);
             if(client_page_!=0)ShowWindow(box,SW_HIDE);
             chart_checks_.push_back(box);
@@ -604,7 +640,9 @@ void Overlay::fonts() {
 void Overlay::fit_table() {
     RECT rect{}; if (!GetWindowRect(hwnd_, &rect)) return;
     MONITORINFO monitor{sizeof(monitor)};
-    if (!GetMonitorInfoW(MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST), &monitor)) return;
+    const auto current=MonitorFromRect(&rect,MONITOR_DEFAULTTONEAREST);
+    const auto display=scene_position_?overlay_display_monitor(scene_position_->display,current):current;
+    if (!GetMonitorInfoW(display,&monitor)) return;
     const auto& area = monitor.rcWork; const int margin = pixels(8);
     const float desired_width=selected_charts_.empty()?table_width():std::max(table_width(),std::max(152.0f,text_size()*12));
     const int width = std::max(1,std::min(pixels(desired_width), static_cast<int>(area.right-area.left-margin*2)));
@@ -613,10 +651,12 @@ void Overlay::fit_table() {
     chart_page_=std::min(chart_page_,last_page);
     const int requested_height = static_cast<int>(std::ceil((row_height() * static_cast<float>(summary_only() ? 1 : options_.top+1) + 4 + chart_layout_.height) * static_cast<float>(dpi_) / 96.0f));
     const int height = std::min(requested_height, static_cast<int>(area.bottom-area.top-margin*2));
-    const int right = dragging_ || right_anchor_ == CW_USEDEFAULT ? rect.right : right_anchor_;
-    const int x = overlay_fitted_left(right, width, area.left, area.right, margin);
-    const int y = std::clamp(static_cast<int>(rect.top), static_cast<int>(area.top+margin), static_cast<int>(area.bottom-margin-height));
-    if (right_anchor_ == CW_USEDEFAULT && !dragging_) right_anchor_ = x + width;
+    const int right = right_anchor_ == CW_USEDEFAULT ? rect.right : right_anchor_;
+    const int x = scene_position_?area.left+scene_axis_offset(area.right-area.left,width,margin,scene_position_->x):
+        overlay_fitted_left(right, width, area.left, area.right, margin);
+    const int y = scene_position_?area.top+scene_axis_offset(area.bottom-area.top,height,margin,scene_position_->y):
+        std::clamp(static_cast<int>(rect.top), static_cast<int>(area.top+margin), static_cast<int>(area.bottom-margin-height));
+    if (right_anchor_ == CW_USEDEFAULT) right_anchor_ = x + width;
     SetWindowPos(hwnd_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
 }
 void Overlay::add_tray() {
@@ -629,12 +669,27 @@ void Overlay::add_tray() {
 void Overlay::tray_menu() {
     const auto popup = CreatePopupMenu(); if (!popup) return;
     AppendMenuW(popup, MF_STRING, open_client, L"Открыть клиент");
-    AppendMenuW(popup, MF_STRING, toggle_table, visible_ ? L"Скрыть оверлей" : L"Показать оверлей");
+    AppendMenuW(popup, MF_STRING, toggle_table, overlay_running_ ? L"Приостановить оверлей" : L"Возобновить оверлей");
+    if(chart_layout_.capacity && selected_charts_.size()>chart_layout_.capacity)
+        AppendMenuW(popup,MF_STRING,next_chart_page,L"Следующая страница графиков");
+    RECT viewport{};GetClientRect(hwnd_,&viewport);
+    const auto rows=visible_rows(dip(viewport.bottom));
+    if(rows && rows<rows_.size())AppendMenuW(popup,MF_STRING,next_table_page,L"Следующая страница приложений");
     AppendMenuW(popup, MF_SEPARATOR, 0, nullptr); AppendMenuW(popup, MF_STRING, quit_app, L"Выход");
     POINT point{}; GetCursorPos(&point); SetForegroundWindow(hwnd_);
     const auto selected = TrackPopupMenu(popup, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, hwnd_, nullptr);
     DestroyMenu(popup); PostMessageW(hwnd_, WM_NULL, 0, 0);
-    if (selected == open_client) show_client(); else if (selected == toggle_table) set_visible(!visible_); else if (selected == quit_app) DestroyWindow(hwnd_);
+    if (selected == open_client) show_client();
+    else if(selected==toggle_table) {overlay_running_=!overlay_running_;update_overlay_visibility();}
+    else if(selected==next_chart_page && chart_layout_.capacity) {
+        const auto pages=(selected_charts_.size()+chart_layout_.capacity-1)/chart_layout_.capacity;
+        if(pages)chart_page_=(chart_page_+1)%pages;
+        InvalidateRect(hwnd_,nullptr,FALSE);
+    } else if(selected==next_table_page && rows<rows_.size()) {
+        const auto maximum=rows_.size()-rows;
+        scroll_=scroll_==maximum?0:std::min(scroll_+rows,maximum);
+        InvalidateRect(hwnd_,nullptr,FALSE);
+    } else if (selected == quit_app) DestroyWindow(hwnd_);
 }
 
 HWND Overlay::control(const wchar_t* kind, const wchar_t* label, DWORD style, UINT id, int x, int y, int width, int height) {
@@ -642,7 +697,14 @@ HWND Overlay::control(const wchar_t* kind, const wchar_t* label, DWORD style, UI
         client_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr), nullptr);
     if (!window) throw windows_error("Client control");
     protect_setting_from_wheel(window,kind);
-    controls_.push_back({window, {x,y,x+width,y+height}}); return window;
+    UINT group=table_options_group;
+    if(id==stats_control || (id==0 && y==859))group=diagnostic_options_group;
+    else if(id==chart_heading_control || id>=chart_checkbox_control)group=chart_options_group;
+    else if((id>=metric_control && id<tab_control) ||
+        (id>=cpu_package_control && id<blacklist_button) || y>=422)group=metrics_options_group;
+    if(y==18 || id==visible_control || id==move_control || id==blacklist_button ||
+        id==logs_control || id==quit_app || (id>=table_options_group && id<=diagnostic_options_group))group=0;
+    controls_.push_back({window, {x,y,x+width,y+height},group}); return window;
 }
 void Overlay::show_client() {
     diagnostics::write(diagnostics::Level::info,"ui.open","settings client requested");
@@ -711,10 +773,14 @@ void Overlay::init_client() {
     SendMessageW(alpha, TBM_SETPOS, TRUE, opacity_);
     const auto icons = control(L"BUTTON", L"Показывать иконки приложений", BS_AUTOCHECKBOX | WS_TABSTOP, icons_control, 22, 238, 380, 26);
     SendMessageW(icons, BM_SETCHECK, show_icons_ ? BST_CHECKED : BST_UNCHECKED, 0);
-    const auto visible = control(L"BUTTON", L"Показывать оверлей", BS_AUTOCHECKBOX | WS_TABSTOP, visible_control, 22, 271, 380, 26);
-    SendMessageW(visible, BM_SETCHECK, visible_ ? BST_CHECKED : BST_UNCHECKED, 0);
-    const auto move = control(L"BUTTON", L"Перемещать оверлей мышью", BS_AUTOCHECKBOX | WS_TABSTOP, move_control, 22, 304, 380, 26);
-    SendMessageW(move, BM_SETCHECK, moving_ ? BST_CHECKED : BST_UNCHECKED, 0);
+    const auto visible = control(L"BUTTON", L"Показывать оверлей всегда", BS_AUTOCHECKBOX | WS_TABSTOP, visible_control, 22, 51, 380, 26);
+    SendMessageW(visible, BM_SETCHECK, always_show_ ? BST_CHECKED : BST_UNCHECKED, 0);
+    control(L"BUTTON",L"Настроить сцену",WS_TABSTOP,move_control,22,86,260,28);
+    control(L"BUTTON",L"Чёрный список приложений",WS_TABSTOP,blacklist_button,22,122,260,28);
+    for(const auto& [id,title]:{std::pair<UINT,const wchar_t*>{table_options_group,L"Внешний вид и обновление"},
+        {metrics_options_group,L"Показатели и датчики"},{chart_options_group,L"Графики в оверлее"},
+        {diagnostic_options_group,L"Диагностика и горячие клавиши"}})
+        control(L"BUTTON",title,BS_LEFT|WS_TABSTOP,id,22,0,536,32);
     const auto startup = control(L"BUTTON", L"Автозапуск при входе в Windows (с запросом UAC)", BS_AUTOCHECKBOX | WS_TABSTOP, startup_control, 22, 337, 536, 26);
     SendMessageW(startup, BM_SETCHECK, autostart_enabled() ? BST_CHECKED : BST_UNCHECKED, 0);
     control(L"STATIC", (L"Сбор и обновление: " + std::to_wstring(options_.interval_ms/1000) + L" с (1–10)").c_str(),
@@ -746,7 +812,8 @@ void Overlay::init_client() {
     shortcuts_label_=control(L"STATIC", L"Ctrl+Alt+F9 — клиент   ·   Ctrl+Alt+F10 — оверлей", 0, 0, 22, 859, 540, 24);
     control(L"BUTTON", L"Логи", WS_TABSTOP, logs_control, 22, 899, 130, 32);
     control(L"BUTTON", L"Завершить работу", WS_TABSTOP, quit_app, 373, 899, 185, 32);
-    statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,options_.top,graph_history_);
+    ensure_icon_cache();
+    statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,options_.top,graph_history_,icons_);
     statistics_->set_cpu_view(cpu_view_);
     statistics_->activate(false);
     if(snapshot_)statistics_->on_snapshot(snapshot_->timestamp_ms,grouped_processes_,options_.interval_ms,*snapshot_);
@@ -756,7 +823,7 @@ void Overlay::init_client() {
         const auto box=control(L"BUTTON",label,BS_AUTOCHECKBOX|WS_TABSTOP,id,22+static_cast<int>(id-cpu_package_control)*190,720,180,26);
         SendMessageW(box,BM_SETCHECK,enabled?BST_CHECKED:BST_UNCHECKED,0);
     }
-    chart_settings_label_=control(L"STATIC",L"Графики в оверлее · последняя минута",0,0,22,0,540,24);
+    chart_settings_label_=control(L"STATIC",L"Графики за последнюю минуту",0,chart_heading_control,22,0,540,24);
     refresh_chart_choices(true);
     refresh_cpu_controls();
     refresh_disk_controls();
@@ -775,7 +842,6 @@ void Overlay::switch_page(unsigned page) {
         if(statistics_) statistics_->set_limit(options_.top);
     }
     client_page_=page==1?1U:0U;
-    for(const auto& child:controls_) ShowWindow(child.window,client_page_==0?SW_SHOW:SW_HIDE);
     // Statistics gets a readable workspace; Settings retains its compact dimensions.
     layout_client();
     if(statistics_) statistics_->activate(client_page_==1);
@@ -784,9 +850,39 @@ void Overlay::layout_client() {
     if (!client_) return;
     const auto px = [this](int value) { return MulDiv(value, static_cast<int>(client_dpi_), 96); };
     const int page_width=client_page_==1?1420:680;
-    int settings_height=840;
-    for(const auto& child:controls_)if(GetDlgCtrlID(child.window)==static_cast<int>(quit_app))
-        settings_height=std::max(settings_height,static_cast<int>(child.bounds.bottom)+68);
+    std::vector<std::pair<HWND,RECT>> placements;
+    placements.reserve(controls_.size());
+    for(const auto& child:controls_) {
+        const auto id=GetDlgCtrlID(child.window);
+        if(!child.group && (id<table_options_group || id>diagnostic_options_group) &&
+            id!=logs_control && id!=quit_app)placements.emplace_back(child.window,child.bounds);
+    }
+    int next=166;
+    constexpr std::array group_titles{L"Внешний вид и обновление",L"Показатели и датчики",
+        L"Графики в оверлее",L"Диагностика и горячие клавиши"};
+    for(UINT group=table_options_group;group<=diagnostic_options_group;++group) {
+        const auto heading=GetDlgItem(client_,static_cast<int>(group));
+        const bool expanded=open_group_==group;
+        const auto title=std::wstring(expanded?L"−   ":L"+   ")+group_titles[group-table_options_group];
+        SetWindowTextW(heading,title.c_str());
+        placements.emplace_back(heading,RECT{22,next,558,next+32});
+        next+=38;
+        if(!expanded)continue;
+        LONG first=LONG_MAX;
+        for(const auto& child:controls_)if(child.group==group)first=std::min(first,child.bounds.top);
+        int bottom=next;
+        for(const auto& child:controls_)if(child.group==group) {
+            RECT bounds=child.bounds;OffsetRect(&bounds,0,next-first);
+            placements.emplace_back(child.window,bounds);
+            const int end=GetDlgCtrlID(child.window)==sort_control?static_cast<int>(bounds.top)+28:
+                static_cast<int>(bounds.bottom);
+            bottom=std::max(bottom,end);
+        }
+        next=bottom+10;
+    }
+    placements.emplace_back(GetDlgItem(client_,logs_control),RECT{22,next+8,152,next+40});
+    placements.emplace_back(GetDlgItem(client_,quit_app),RECT{373,next+8,558,next+40});
+    const int settings_height=next+98;
     MONITORINFO monitor{sizeof(monitor)};GetMonitorInfoW(MonitorFromWindow(client_,MONITOR_DEFAULTTONEAREST),&monitor);
     const int available=std::max(400,MulDiv(monitor.rcWork.bottom-monitor.rcWork.top,96,static_cast<int>(client_dpi_))-80);
     const int page_height=client_page_==1?std::min(1000,available):std::min(settings_height,available);
@@ -795,10 +891,13 @@ void Overlay::layout_client() {
     const auto fitted=[fit](int value){return static_cast<int>(std::lround(value*fit));};
     const auto font = CreateFontW(-px(std::max(9,fitted(14))), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-    for(const auto& child:controls_){
-        SendMessageW(child.window, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-        MoveWindow(child.window,px(child.bounds.left),px(40+fitted(child.bounds.top)),px(child.bounds.right-child.bounds.left),px(fitted(child.bounds.bottom-child.bounds.top)),TRUE);
-        ShowWindow(child.window,client_page_==0?SW_SHOW:SW_HIDE);
+    for(const auto& child:controls_)
+        if(client_page_!=0 || (child.group && child.group!=open_group_))ShowWindow(child.window,SW_HIDE);
+    if(client_page_==0)for(const auto& [window,bounds]:placements) {
+        SendMessageW(window,WM_SETFONT,reinterpret_cast<WPARAM>(font),TRUE);
+        MoveWindow(window,px(bounds.left),px(40+fitted(bounds.top)),px(bounds.right-bounds.left),
+            px(fitted(bounds.bottom-bounds.top)),TRUE);
+        ShowWindow(window,SW_SHOW);
     }
     if(tabs_) MoveWindow(tabs_,0,0,px(page_width),px(page_height),TRUE);
     if(statistics_) statistics_->resize(px(12),px(40),px(page_width-24),px(page_height-52));
@@ -884,29 +983,83 @@ void Overlay::client_stats() {
     SetDlgItemTextW(client_, stats_control, info.c_str());
 }
 
-void Overlay::movement() {
-    auto style = GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
-    if (moving_) style &= ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT); else style |= WS_EX_TRANSPARENT;
-    SetWindowLongPtrW(hwnd_, GWL_EXSTYLE, style);
-    InvalidateRect(hwnd_, nullptr, FALSE);
-}
 void Overlay::activity() { /* History collection continues even when both windows are hidden. */ }
 void Overlay::set_visible(bool visible) {
-    diagnostics::write(diagnostics::Level::info,"ui.overlay",visible?"show":"hide");
     if (visible == visible_) return;
-    if (!visible && !tray_ && !toggle_key_ && !client_) return;
+    diagnostics::write(diagnostics::Level::info,"ui.overlay",visible?"show":"hide");
     visible_ = visible;
     if (!visible) {
         clear_row_images();
         KillTimer(hwnd_,overlay_animation_timer);
         row_animation_active_=false;
         previous_rows_.clear();row_motion_.clear();
-        ShowWindow(hwnd_, SW_HIDE); release_surface(); icons_.reset();
+        ShowWindow(hwnd_, SW_HIDE); release_surface(); release_unused_icon_cache();
         row_text_cache_.clear(); // Hidden overlays should not keep text layout buffers.
     }
-    else { ShowWindow(hwnd_, SW_SHOWNOACTIVATE); update_view(); InvalidateRect(hwnd_, nullptr, FALSE); }
-    if (client_) SendDlgItemMessageW(client_, visible_control, BM_SETCHECK, visible ? BST_CHECKED : BST_UNCHECKED, 0);
+    else {
+        ShowWindow(hwnd_,SW_SHOWNOACTIVATE);
+        // Startup information can override the first ShowWindow request.
+        if(!IsWindowVisible(hwnd_))ShowWindow(hwnd_,SW_SHOWNOACTIVATE);
+        InvalidateRect(hwnd_,nullptr,FALSE);
+    }
     activity();
+}
+void Overlay::update_overlay_visibility() {
+    const bool blocked=foreground_app_ && learned_apps_[*foreground_app_].blocked;
+    set_visible(overlay_should_show(overlay_running_,always_show_ || inspect_overlay_,
+        foreground_app_.has_value(),blocked));
+}
+void Overlay::ensure_icon_cache() {
+    if(!icons_)icons_=std::make_shared<AppIconCache>(history_path(),[this] {
+        if(!icon_posted_.exchange(true))PostMessageW(hwnd_,icon_message,0,0);
+    });
+}
+void Overlay::release_unused_icon_cache() {
+    if(!statistics_ && !blacklist_dialog_ && !(visible_ && show_icons_ && !summary_only()))icons_.reset();
+}
+void Overlay::save_application(std::size_t index) {
+    if(settings_.empty())return;
+    std::error_code error;
+    std::filesystem::create_directories(std::filesystem::path(settings_).parent_path(),error);
+    if(error)return;
+    const auto write=[this](std::size_t i) {
+        const auto key=L"overlay_app_"+std::to_wstring(i);
+        const auto& app=learned_apps_[i];
+        ini_overlay_write_text(settings_,key,app.icon_path);
+        ini_overlay_write_text(settings_,key+L"_exe",app.executable);
+        ini_overlay_write_text(settings_,key+L"_name",app.name);
+        ini_overlay_write(settings_,(key+L"_blocked").c_str(),app.blocked);
+    };
+    if(migrate_app_settings_) {
+        for(std::size_t i=0;i<learned_apps_.size();++i)write(i);
+        migrate_app_settings_=false;
+    } else write(index);
+    ini_overlay_write(settings_,L"overlay_applications",static_cast<int>(learned_apps_.size()));
+}
+void Overlay::learn_foreground_application() {
+    if(foreground_app_ && snapshot_->fps_focus_epoch==foreground_epoch_)return;
+    const auto& processes=snapshot_->processes;
+    const auto row=std::find_if(processes.begin(),processes.end(),
+        [](const Process& process){return process.presented_fps && std::isfinite(*process.presented_fps) &&
+            *process.presented_fps>0;});
+    if(row==processes.end())return;
+    const bool current=snapshot_->fps_focus_epoch==foreground_epoch_ && row->pid==foreground_pid_;
+    auto path=row->exe_path?wide(*row->exe_path):std::wstring{};
+    const auto image=path.empty()?wide(row->name):path;
+    const auto executable=overlay_executable_name(image);
+    if(executable.empty())return;
+    auto app=overlay_application_index(learned_apps_,executable);
+    if(!app && learned_apps_.size()<4096) {
+        app=learned_apps_.size();
+        learned_apps_.push_back({std::wstring(executable),wide(display_names_detail::base_name(row->name)),
+            std::move(path),false});
+        save_application(*app);
+    } else if(app && learned_apps_[*app].icon_path.empty() && !path.empty()) {
+        learned_apps_[*app].icon_path=std::move(path);
+        save_application(*app);
+        if(blacklist_dialog_)PostMessageW(blacklist_dialog_,blacklist_icons_ready,0,0);
+    }
+    if(current) {foreground_app_=app;foreground_app_creation_=row->creation_time;}
 }
 void Overlay::receive() {
     bool finished{}, received_snapshot{};
@@ -917,6 +1070,7 @@ void Overlay::receive() {
         pending_.reset(); pending_finished_ = false; posted_ = false;
     }
     if (received_snapshot && snapshot_) {
+        learn_foreground_application();
         graph_history_->append(*snapshot_,GetTickCount64(),std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
         const auto updated_cpu_columns=cpu_view_columns(cpu_view_,snapshot_->cpu_topology);
@@ -994,15 +1148,33 @@ void Overlay::receive() {
 }
 void Overlay::update_foreground() {
     const HWND active_window = GetForegroundWindow();
-    if (active_window != foreground_window_) {
-        foreground_window_ = active_window;
-        ++foreground_epoch_;
-    }
+    const auto previous_pid=foreground_pid_;
     foreground_pid_ = 0;
     if (active_window && !IsIconic(active_window))
         GetWindowThreadProcessId(active_window, &foreground_pid_);
+    if(active_window!=foreground_window_ || foreground_pid_!=previous_pid) {
+        foreground_window_=active_window;
+        ++foreground_epoch_;
+        foreground_app_.reset();foreground_app_creation_.reset();
+    }
+    if(snapshot_ && foreground_pid_ && foreground_pid_!=GetCurrentProcessId()) {
+        const auto& rows=snapshot_->processes;
+        const auto row=std::find_if(rows.begin(),rows.end(),
+            [this](const Process& item){return item.pid==foreground_pid_;});
+        if(row!=rows.end() && (!foreground_app_ || foreground_app_creation_!=row->creation_time)) {
+            const auto image=wide(row->exe_path?*row->exe_path:row->name);
+            foreground_app_=overlay_application_index(learned_apps_,overlay_executable_name(image));
+            foreground_app_creation_=row->creation_time;
+            if(foreground_app_ && row->exe_path && learned_apps_[*foreground_app_].icon_path.empty()) {
+                learned_apps_[*foreground_app_].icon_path=image;
+                save_application(*foreground_app_);
+                if(blacklist_dialog_)PostMessageW(blacklist_dialog_,blacklist_icons_ready,0,0);
+            }
+        }
+    }
     worker_.set_fps_focus(foreground_pid_!=GetCurrentProcessId() ? FpsFocus{
         reinterpret_cast<std::uintptr_t>(active_window), foreground_pid_, foreground_epoch_} : FpsFocus{});
+    update_overlay_visibility();
 }
 void Overlay::update_view() {
     update_foreground();
@@ -1041,16 +1213,14 @@ void Overlay::update_view() {
             memory(p.working_set),percent(p.gpu_percent),memory(p.dedicated_gpu_bytes),
             network_rate(p.rx_bytes_per_second,p.tx_bytes_per_second),
             p.disk_read_bytes_per_second,p.disk_write_bytes_per_second,
-            p.disk_volume_bytes_per_second,loads,{}});
+            p.disk_volume_bytes_per_second,loads,{},p.exe_path?wide(*p.exe_path):std::wstring{}});
         for(const auto& column:cpu_columns_)next.back().logical_cpu.push_back(cpu_application_core_load(p.cpu_execution,column.id,s.cpu_topology));
     }
     if (visible_ && show_icons_ && !summary_only()) {
-        if (!icons_) icons_ = std::make_unique<AppIconCache>(history_path(), [this] {
-            if (!icon_posted_.exchange(true)) PostMessageW(hwnd_, icon_message, 0, 0);
-        });
+        ensure_icon_cache();
         icons_->set_capacity(std::clamp<std::size_t>(static_cast<std::size_t>(options_.top)+16,32,128));
-        for (const auto& row : next) icons_->request(row.pid,row.created);
-    } else if (!show_icons_ || summary_only()) icons_.reset();
+        for (const auto& row : next) icons_->request(row.icon_path);
+    } else release_unused_icon_cache();
     if (next != rows_) {
         // Numeric-only updates never restart the animation timer.
         bool order_changed=next.size()!=rows_.size();
@@ -1464,7 +1634,7 @@ void Overlay::paint(bool animation_only) {
     // Clear with the identity transform: preserve the header and any still
     // valid row pixels; never use opacity/fade to hide stale content.
     target_->SetTransform(D2D1::Matrix3x2F::Identity());
-    const auto background=D2D1::ColorF(0,0,0,moving_ ? 1.0f/255.0f : 0);
+    const auto background=D2D1::ColorF(0,0,0,0);
     if(animation_only && dip(bitmap_size_.cy)>body_top) {
         target_->PushAxisAlignedClip(D2D1::RectF(0,dirty_top,
             dip(bitmap_size_.cx),dirty_bottom),D2D1_ANTIALIAS_MODE_ALIASED);
@@ -1574,7 +1744,7 @@ void Overlay::paint(bool animation_only) {
         const float y=1+(slot+1.0f)*row_height();
         // Do not issue hundreds of DirectWrite draws for untouched static rows.
         if(partial_body && (y+row_height()+2<dirty_top || y-2>dirty_bottom))continue;
-        if (show_icons_ && icons_) if (const auto icon = icons_->get(row.pid,row.created)) {
+        if (show_icons_ && icons_) if (const auto icon = icons_->get(row.icon_path)) {
             auto found=icon_bitmaps_.find(row.pid);
             if (found==icon_bitmaps_.end() || found->second.created!=row.created || found->second.source!=icon) {
                 // A bounded LRU protects memory when many short-lived processes appear.
@@ -1654,6 +1824,7 @@ int Overlay::run() {
     register_window_class(cls,"Register client class");
     if (x_==CW_USEDEFAULT || y_==CW_USEDEFAULT) { RECT area{}; SystemParametersInfoW(SPI_GETWORKAREA,0,&area,0); x_=area.right-pixels(table_width())-pixels(20); y_=area.top+pixels(20); }
     const bool inspect = env(L"FLUXTOP_OVERLAY_INSPECT")==L"1";
+    inspect_overlay_=inspect || (options_.samples && !env(L"FLUXTOP_OVERLAY_CAPTURE").empty());
     const DWORD style=WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | (inspect ? WS_EX_APPWINDOW : WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
     hwnd_=CreateWindowExW(style,overlay_class,L"Оверлей ресурсов",WS_POPUP,x_,y_,pixels(table_width()),pixels(row_height()*11+4),
         nullptr,nullptr,GetModuleHandleW(nullptr),this);
@@ -1661,14 +1832,12 @@ int Overlay::run() {
     dpi_=GetDpiForWindow(hwnd_); fit_table(); taskbar_created_=RegisterWindowMessageW(L"TaskbarCreated"); add_tray();
     toggle_key_=RegisterHotKey(hwnd_,toggle_hotkey,MOD_CONTROL|MOD_ALT|MOD_NOREPEAT,VK_F10)!=FALSE;
     client_key_=RegisterHotKey(hwnd_,client_hotkey,MOD_CONTROL|MOD_ALT|MOD_NOREPEAT,VK_F9)!=FALSE;
-    ShowWindow(hwnd_,SW_SHOWNOACTIVATE);
-    // A hidden-console startup can override the first ShowWindow call via STARTUPINFO.
-    ShowWindow(hwnd_,SW_SHOWNOACTIVATE);
     foreground_update_target = hwnd_;
     foreground_hook_ = SetWinEventHook(EVENT_SYSTEM_FOREGROUND,EVENT_SYSTEM_FOREGROUND,
         nullptr,foreground_changed,0,0,WINEVENT_OUTOFCONTEXT);
     // If the hook is unavailable, the regular snapshot still updates focused PID.
-    if (inspect && !options_.tray) show_client();
+    update_foreground();
+    if ((inspect && !options_.tray) || (!tray_ && !client_key_ && !options_.samples)) show_client();
     worker_.start(options_,[this](std::optional<Snapshot> snapshot,std::string error,bool finished) {
         std::lock_guard lock(mailbox_mutex_); pending_=std::move(snapshot); pending_error_=std::move(error); pending_finished_=finished;
         if (!posted_) posted_=PostMessageW(hwnd_,sample_message,0,0)!=FALSE;
@@ -1762,6 +1931,11 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         break;
     case WM_COMMAND:
         if (initializing_client_) return 0;
+        if(LOWORD(wp)>=table_options_group && LOWORD(wp)<=diagnostic_options_group && HIWORD(wp)==BN_CLICKED) {
+            open_group_=open_group_==LOWORD(wp)?0:LOWORD(wp);
+            layout_client();
+            return 0;
+        }
         if(LOWORD(wp)>=chart_checkbox_control && LOWORD(wp)<chart_checkbox_control+chart_checks_.size() &&
             HIWORD(wp)==BN_CLICKED) {
             const auto index=LOWORD(wp)-chart_checkbox_control;
@@ -1812,8 +1986,31 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         case header_colors_control: if (HIWORD(wp)==BN_CLICKED) apply_client(); return 0;
         case row_colors_control: if (HIWORD(wp)==BN_CLICKED) apply_client(); return 0;
         case animation_control: if (HIWORD(wp)==BN_CLICKED) apply_client(); return 0;
-        case move_control: moving_=SendDlgItemMessageW(window,move_control,BM_GETCHECK,0,0)==BST_CHECKED; movement(); return 0;
-        case visible_control: set_visible(SendDlgItemMessageW(window,visible_control,BM_GETCHECK,0,0)==BST_CHECKED); return 0;
+        case move_control:
+            if(HIWORD(wp)==BN_CLICKED)
+                if(auto position=edit_overlay_scene(window,hwnd_,scene_position_,pixels(8))) {
+                    scene_position_=std::move(position);
+                    fit_table();save_settings();InvalidateRect(hwnd_,nullptr,FALSE);
+                }
+            return 0;
+        case blacklist_button:
+            if(HIWORD(wp)==BN_CLICKED) {
+                ensure_icon_cache();
+                const auto cache=icons_; // Keep the worker alive until the modal dialog closes.
+                edit_overlay_blacklist(window,learned_apps_,*cache,blacklist_dialog_,[this](std::size_t index,bool blocked){
+                    learned_apps_[index].blocked=blocked;
+                    save_application(index);
+                    update_overlay_visibility();
+                });
+                release_unused_icon_cache();
+            }
+            return 0;
+        case visible_control:
+            if(HIWORD(wp)==BN_CLICKED) {
+                always_show_=SendDlgItemMessageW(window,visible_control,BM_GETCHECK,0,0)==BST_CHECKED;
+                update_overlay_visibility();save_settings();
+            }
+            return 0;
         case logs_control:
             if (HIWORD(wp)==BN_CLICKED) {
                 const auto folder=diagnostics::log_directory();
@@ -1836,6 +2033,7 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         KillTimer(window,settings_timer); apply_client(); DestroyWindow(window); return 0;
     case WM_DESTROY:
         statistics_.reset(); tabs_=nullptr; client_=nullptr; controls_.clear();
+        release_unused_icon_cache();
         chart_settings_label_=nullptr;chart_checks_.clear();
         cpu_label_=nullptr;cpu_temperature_label_=nullptr;cpu_checks_.clear();cpu_topology_ids_.clear();
         disk_checks_.fill(nullptr);disk_total_check_=nullptr;shortcuts_label_=nullptr;
@@ -1906,51 +2104,28 @@ LRESULT Overlay::message(UINT msg,WPARAM wp,LPARAM lp) {
         SetWindowPos(hwnd_,nullptr,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE); fit_table(); return 0;
     }
     case WM_DISPLAYCHANGE: fit_table(); return 0;
-    case WM_ENTERSIZEMOVE: dragging_ = true; return 0;
-    case WM_EXITSIZEMOVE: {
-        dragging_ = false;
-        RECT rect{};
-        if (GetWindowRect(hwnd_, &rect)) right_anchor_ = rect.right;
-        save_settings();
-        return 0;
-    }
-    case WM_NCHITTEST: return moving_ ? HTCAPTION : HTTRANSPARENT;
-    case WM_MOUSEWHEEL: {
-        if (moving_) {
-            RECT rect{}; GetClientRect(hwnd_,&rect);
-            POINT cursor{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
-            ScreenToClient(hwnd_,&cursor);
-            if(chart_layout_.capacity && dip(cursor.y)>=dip(rect.bottom)-chart_layout_.height) {
-                const auto maximum=(selected_charts_.size()-1)/chart_layout_.capacity;
-                if(GET_WHEEL_DELTA_WPARAM(wp)<0)chart_page_=std::min(maximum,chart_page_+1);
-                else if(chart_page_)--chart_page_;
-                InvalidateRect(hwnd_,nullptr,FALSE);
-                return 0;
-            }
-            const auto count=visible_rows(dip(rect.bottom)); const auto maximum=rows_.size()>count ? rows_.size()-count : 0;
-            if (GET_WHEEL_DELTA_WPARAM(wp)<0) scroll_=std::min(maximum,scroll_+1); else if (scroll_) --scroll_;
-            InvalidateRect(hwnd_,nullptr,FALSE);
-        }
-        return 0;
-    }
-    case WM_CONTEXTMENU: if (moving_) show_client(); return 0;
+    case WM_NCHITTEST: return HTTRANSPARENT;
     case WM_HOTKEY:
         diagnostics::write(diagnostics::Level::info,"ui.hotkey","hotkey="+std::to_string(wp));
-        if (wp==toggle_hotkey) set_visible(!visible_); else if (wp==client_hotkey) show_client(); return 0;
+        if(wp==toggle_hotkey){overlay_running_=!overlay_running_;update_overlay_visibility();}
+        else if(wp==client_hotkey)show_client();
+        return 0;
     case tray_message:
         if (lp==WM_LBUTTONDBLCLK || lp==NIN_KEYSELECT) show_client(); else if (lp==WM_RBUTTONUP || lp==WM_CONTEXTMENU) tray_menu(); return 0;
     case sample_message: receive(); return 0;
     case foreground_update_message:
         diagnostics::write(diagnostics::Level::trace,"ui.foreground","foreground window changed");
         ++foreground_epoch_;
-        if (visible_) {
-            update_view(); // Update FPS target and header in every sorting mode.
-            InvalidateRect(hwnd_,nullptr,FALSE);
-        } else update_foreground();
+        update_view(); // Update FPS target and header in every sorting mode.
+        if(visible_)InvalidateRect(hwnd_,nullptr,FALSE);
         return 0;
     case icon_message:
         diagnostics::write(diagnostics::Level::trace,"ui.icons","icon notification received");
-        icon_posted_=false; if (visible_) InvalidateRect(hwnd_,nullptr,FALSE); client_stats(); return 0;
+        icon_posted_=false;
+        if(blacklist_dialog_)SendMessageW(blacklist_dialog_,blacklist_icons_ready,0,0);
+        if(statistics_)statistics_->icons_ready();
+        if (visible_) InvalidateRect(hwnd_,nullptr,FALSE);
+        client_stats();return 0;
     case WM_CLOSE: DestroyWindow(hwnd_); return 0;
     case WM_DESTROY: {
         diagnostics::write(diagnostics::Level::info,"ui.stop","overlay shutdown");

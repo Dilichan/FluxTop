@@ -14,33 +14,35 @@ int wmain(int argc, wchar_t** argv) {
     try {
         check(argc == 2, "Expected build directory");
         const auto path = std::filesystem::path(argv[1]) / (L"icon-cache-test-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) + L".db");
-        FILETIME created{}, exited{}, kernel{}, user{};
-        check(GetProcessTimes(GetCurrentProcess(),&created,&exited,&kernel,&user)!=FALSE,"Cannot read own identity");
-        const auto identity = fluxtop::filetime_ticks(created);
+        const auto executable=fluxtop::process_image_path(GetCurrentProcess());
+        check(!executable.empty(),"Cannot read fixture executable");
         std::mutex mutex;
         std::condition_variable ready;
         const auto notify = [&] { ready.notify_all(); };
         {
             fluxtop::AppIconCache cache(path,notify);
-            cache.request(GetCurrentProcessId(),identity);
+            cache.request(executable);
             std::unique_lock lock(mutex);
-            check(ready.wait_for(lock,std::chrono::seconds(10),[&] { return cache.get(GetCurrentProcessId(),identity)!=nullptr; }),"Icon extraction timed out");
-            const auto icon = cache.get(GetCurrentProcessId(),identity);
+            check(ready.wait_for(lock,std::chrono::seconds(10),[&] { return cache.get(executable)!=nullptr; }),"Icon extraction timed out");
+            const auto icon = cache.get(executable);
+            const auto native=fluxtop::native_app_icon(*icon);
+            check(native!=nullptr,"Cached pixels cannot populate a Win32 image list");
+            DestroyIcon(native);
             std::size_t alpha{};
             for (std::size_t i=3;i<icon->pixels.size();i+=4) if (icon->pixels[i]!=std::byte{}) ++alpha;
             check(alpha>0 && alpha<1024,"Icon must preserve transparent and visible pixels");
             check(cache.stats().persistent,"Persistent cache was not opened");
             for (unsigned batch=0;batch<4;++batch) {
-                for (unsigned i=0;i<20;++i) cache.request(1000000+batch*20+i,0);
+                for (unsigned i=0;i<20;++i)cache.request(L"?:\\missing-"+std::to_wstring(batch*20+i)+L".exe");
                 check(ready.wait_for(lock,std::chrono::seconds(10),[&] { return cache.stats().pending==0; }),"Negative icon batch timed out");
                 check(cache.stats().entries<=64,"Memory cache exceeded its bound");
             }
             const auto count = cache.stats().extractions;
-            cache.request(1000000+3*20+19,0);
+            cache.request(L"?:\\missing-79.exe");
             check(cache.stats().extractions==count,"Negative result was not cached");
             cache.set_capacity(116); // 100 visible applications + 16 slots for churn.
             check(cache.stats().capacity==116,"Adaptive icon capacity is wrong");
-            for (unsigned i=0;i<100;++i) cache.request(2000000+i,0);
+            for (unsigned i=0;i<100;++i)cache.request(L"?:\\adaptive-"+std::to_wstring(i)+L".exe");
             check(ready.wait_for(lock,std::chrono::seconds(20),[&] { return cache.stats().pending==0; }),
                 "Adaptive icon queue timed out");
             check(cache.stats().entries>=100 && cache.stats().entries<=116,
@@ -51,10 +53,28 @@ int wmain(int argc, wchar_t** argv) {
         }
         {
             fluxtop::AppIconCache cache(path,notify);
-            cache.request(GetCurrentProcessId(),identity);
+            cache.request(executable);
             std::unique_lock lock(mutex);
-            check(ready.wait_for(lock,std::chrono::seconds(10),[&] { return cache.get(GetCurrentProcessId(),identity)!=nullptr; }),"Persistent reload timed out");
+            check(ready.wait_for(lock,std::chrono::seconds(10),[&] { return cache.get(executable)!=nullptr; }),"Persistent reload timed out");
             check(cache.stats().disk_hits==1 && cache.stats().extractions==0,"Second session did not reuse the stored PNG");
+        }
+        const auto offline=path.wstring()+L".exe";
+        std::filesystem::copy_file(executable,offline);
+        {
+            fluxtop::AppIconCache cache(path,notify);
+            cache.request(offline);
+            std::unique_lock lock(mutex);
+            check(ready.wait_for(lock,std::chrono::seconds(10),[&]{return cache.get(offline)!=nullptr;}),
+                "Cannot populate cache from the captured application path");
+        }
+        check(std::filesystem::remove(offline),"Remove copied fixture executable");
+        {
+            fluxtop::AppIconCache cache(path,notify);
+            cache.request(offline);
+            std::unique_lock lock(mutex);
+            check(ready.wait_for(lock,std::chrono::seconds(10),[&]{return cache.get(offline)!=nullptr;}),
+                "Offline application should keep its stored icon");
+            check(cache.stats().disk_hits==1 && cache.stats().extractions==0,"Offline icon was not read from history");
         }
         // Retain an archive larger than both former disk limits, then exercise
         // the real cache writer. Only the private test DB is modified here.
@@ -78,16 +98,16 @@ int wmain(int argc, wchar_t** argv) {
         }
         {
             fluxtop::AppIconCache cache(path,notify);
-            cache.request(GetCurrentProcessId(),identity);
+            cache.request(executable);
             std::unique_lock lock(mutex);
-            check(ready.wait_for(lock,std::chrono::seconds(10),[&] { return cache.get(GetCurrentProcessId(),identity)!=nullptr; }),"New icon extraction after archive timed out");
+            check(ready.wait_for(lock,std::chrono::seconds(10),[&] { return cache.get(executable)!=nullptr; }),"New icon extraction after archive timed out");
             check(cache.stats().extractions==1,"Fixture must exercise a new DB write");
         }
         {
             fluxtop::AppIconCache cache(path,notify);
-            cache.request(GetCurrentProcessId(),identity);
+            cache.request(executable);
             std::unique_lock lock(mutex);
-            check(ready.wait_for(lock,std::chrono::seconds(10),[&] { return cache.get(GetCurrentProcessId(),identity)!=nullptr; }),"Archive reload timed out");
+            check(ready.wait_for(lock,std::chrono::seconds(10),[&] { return cache.get(executable)!=nullptr; }),"Archive reload timed out");
             check(cache.stats().disk_hits==1 && cache.stats().extractions==0,"New icon was not persisted beyond the old disk cap");
         }
         sqlite3* db{};

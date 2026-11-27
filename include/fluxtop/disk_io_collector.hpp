@@ -12,6 +12,7 @@ public:
     DiskIoCollector(const DiskIoCollector&)=delete;
     DiskIoCollector& operator=(const DiskIoCollector&)=delete;
     void collect(Snapshot& snapshot);
+    void collect(Snapshot& snapshot,std::uint32_t drive_mask);
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

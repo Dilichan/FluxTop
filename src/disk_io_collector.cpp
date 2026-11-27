@@ -41,9 +41,8 @@ std::optional<std::uint64_t> property(EVENT_RECORD* event,const wchar_t* name) {
         return std::nullopt;
     return value;
 }
-std::vector<PhysicalVolumeExtent> discover_volumes() {
+std::vector<PhysicalVolumeExtent> discover_volumes(DWORD mask) {
     std::vector<PhysicalVolumeExtent> results;
-    const DWORD mask=GetLogicalDrives();
     for(unsigned i=0;i<26;++i) {
         if(!(mask&(1U<<i)))continue;
         const wchar_t letter=static_cast<wchar_t>(L'A'+i);
@@ -291,7 +290,7 @@ struct DiskIoCollector::Impl {
         if(log->EventsLost)static_cast<Impl*>(log->Context)->failed=true;
         return TRUE;
     }
-    Impl() {
+    explicit Impl(DWORD mask) {
         HANDLE raw_token{};
         TOKEN_ELEVATION elevation{};DWORD token_bytes{};
         if(!OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&raw_token)) {status="administrator-required";return;}
@@ -299,7 +298,8 @@ struct DiskIoCollector::Impl {
         if(!GetTokenInformation(raw_token,TokenElevation,&elevation,sizeof(elevation),&token_bytes) || !elevation.TokenIsElevated) {
             status="administrator-required";return;
         }
-        extents=discover_volumes();drive_mask=GetLogicalDrives();
+        drive_mask=mask;
+        extents=discover_volumes(drive_mask);
         const auto processors=GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
         // CSwitch needs real originating-CPU context, not the legacy shared
         // low-frequency buffer stream. Keep an explicit <=32 MiB pool budget.
@@ -361,13 +361,16 @@ struct DiskIoCollector::Impl {
     }
     ~Impl(){stop();}
 };
-DiskIoCollector::DiskIoCollector():impl_(std::make_unique<Impl>()){}
+DiskIoCollector::DiskIoCollector():impl_(std::make_unique<Impl>(GetLogicalDrives())){}
 DiskIoCollector::~DiskIoCollector()=default;
 void DiskIoCollector::collect(Snapshot& snapshot) {
+    collect(snapshot,GetLogicalDrives());
+}
+void DiskIoCollector::collect(Snapshot& snapshot,std::uint32_t drive_mask) {
     const auto recovery_now=EtwRecovery::Clock::now();
     if(recovery_.due(recovery_now)){
         // Destroy/join both consumers and stop only our session before replacing it.
-        impl_.reset();impl_=std::make_unique<Impl>();recovery_.restarted(recovery_now);
+        impl_.reset();impl_=std::make_unique<Impl>(drive_mask);recovery_.restarted(recovery_now);
         diagnostics::write(diagnostics::Level::info,"disk_io.recovery","restarted shared CPU/disk session");
     }
     auto& self=*impl_;
@@ -405,10 +408,10 @@ void DiskIoCollector::collect(Snapshot& snapshot) {
     const auto now=std::chrono::steady_clock::now();
     const double seconds=std::chrono::duration<double>(now-self.previous).count();
     self.previous=now;
-    if(self.drive_mask!=GetLogicalDrives()) {
-        auto next=discover_volumes();
+    if(drive_mask && self.drive_mask!=drive_mask) {
+        auto next=discover_volumes(drive_mask);
         std::lock_guard lock(self.mutex);
-        self.extents=std::move(next);self.drive_mask=GetLogicalDrives();
+        self.extents=std::move(next);self.drive_mask=drive_mask;
     }
     std::unordered_map<DWORD,Impl::Bytes> counts;
     std::array<std::uint64_t,26> physical_by_volume{};

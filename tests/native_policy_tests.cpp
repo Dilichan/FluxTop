@@ -114,7 +114,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "history_.uptime=std::move(item->second.uptime);","DTM_SETRANGE",
             "stats_limit_id","stats_history_top","stats_uptime_top",
             "PostMessageW(GetParent(hwnd_),WM_APP+215"});
-        need(overlay,{"statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,options_.top,graph_history_)",
+        need(overlay,{"statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,options_.top,graph_history_,icons_)",
             "statistics_->set_limit(options_.top)"});
     } else if(policy=="statistics_popout_policy") {
         const auto page=read(root/"src/statistics_page.cpp");
@@ -147,7 +147,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "for(const auto& plot:plots)fill_under(", "for(const auto& plot:plots) {",
             "stats_chart_fill"});
         need(read(root/"src/system_graph_history.cpp"),{"point.values[4]","points_.push_back(std::move(point))"});
-        need(overlay,{"graph_history_->append(*snapshot_", "options_.top,graph_history_)"});
+        need(overlay,{"graph_history_->append(*snapshot_", "options_.top,graph_history_,icons_)"});
         need(header,{"const std::deque<SystemPoint>& system_points_"});
         need(page,{"void extend_recent_line(std::vector<POINT>& line,LONG right,",
             "void extend_fresh_left_edge(std::vector<POINT>& line,const RECT& area,",
@@ -201,7 +201,8 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "page->tooltip_buffer_.prepare(dc,bounds.right,bounds.bottom)",
             "if(content_changed || newly_shown)InvalidateRect(tooltip_,nullptr,FALSE);",
             "WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN"});
-        need(page,{"FluxTop.SystemDashboard.Stage1","graph_history_->append(system,GetTickCount64(),now_ms())",
+        absent(page,{"SHGetFileInfoW(","graph_history_->append("});
+        need(page,{"FluxTop.SystemDashboard.Stage1",
             "stats_selected_section","case WM_LBUTTONUP:","system_popout_id"});
         need(popup,{"popup.kind>=2","draw_system_charts(dc,graph,popup.kind",
             "popup_auto_scale_keys"});
@@ -318,7 +319,7 @@ void run(const std::filesystem::path& root,const std::string& policy) {
             "MAKELPARAM(1,10)","interval_control,TBM_GETPOS","save(L\"font_size\"",
             "save(L\"interval_ms\"","const bool is_font=",
             "SetTimer(window,settings_timer,150,nullptr)","apply_client();",
-            "statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,options_.top,graph_history_)",
+            "statistics_=std::make_unique<StatisticsPage>(client_,history_path(),settings_,options_.top,graph_history_,icons_)",
             "if(page!=0 && client_page_==0) {",
             "const auto pending_top=SendDlgItemMessageW(client_,top_control,TBM_GETPOS,0,0);",
             "static_cast<unsigned>(pending_top)!=options_.top) {",
@@ -340,13 +341,14 @@ void run(const std::filesystem::path& root,const std::string& policy) {
         need(overlay,{"for (const auto label : {L\"Авто\", L\"CPU\", L\"RAM\", L\"GPU\""});
         regex_need(overlay,"L\"Авто\\s*[—-]",false);
         need(overlay,{"disk_checkbox_control = 300","std::array<HWND,26> disk_checks_{};",
-            "disk_checkbox_control+ordinal","const int cpu_y=486+rows*32;","const int charts_y=cpu_aggregate_y+36;",
-            "const int summary_y=charts_y+heading_spacing+chart_rows*32+8;",
+            "disk_checkbox_control+ordinal","const int cpu_y=486+rows*32;","const int summary_y=cpu_aggregate_y+36;",
+            "open_group_==group","edit_overlay_scene(window,hwnd_","edit_overlay_blacklist(window,learned_apps_",
             "position(cpu_temperature_label_,temperature_y)","const int cpu_aggregate_y=temperature_y+heading_spacing;",
             "SendMessageW(disk_checks_[i],BM_GETCHECK,0,0)",
             "right_anchor_ = read(L\"anchor_right\"", "save(L\"anchor_right\"",
             "overlay_fitted_left(right, width, area.left, area.right, margin)"});
         absent(overlay,{"LBS_MULTIPLESEL","LB_GETSEL","LB_SETSEL",
+            "QueryFullProcessImageNameW(","OpenProcess(",
             "Диски (% активности всей системы, не по приложениям):"});
         const auto disk_page=read(root/"src/statistics_page.cpp");
         absent(disk_page,{"общая нагрузка, не отдельного процесса"});

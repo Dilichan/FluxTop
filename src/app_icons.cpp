@@ -10,48 +10,22 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 
 namespace fluxtop {
 namespace {
 using Microsoft::WRL::ComPtr;
 constexpr std::size_t default_memory_limit = 64;
-struct Key {
-    std::uint32_t pid{};
-    std::uint64_t created{};
-    bool operator==(const Key&) const = default;
-};
-struct Hash {
-    std::size_t operator()(const Key& value) const { return std::hash<std::uint64_t>{}(value.created) ^ value.pid; }
-};
-Key key(std::uint32_t pid, std::optional<std::uint64_t> created) { return created ? Key{pid, *created} : Key{}; }
 struct IconHandle { HICON value{}; ~IconHandle() { if (value) DestroyIcon(value); } };
 struct Statement {
     sqlite3_stmt* value{};
     ~Statement() { if (value) sqlite3_finalize(value); }
 };
-
-std::wstring executable(const Key& requested) {
-    if (!requested.pid) return {};
-    Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, requested.pid));
-    if (!process.valid()) return {};
-    FILETIME created{}, exit{}, kernel{}, user{};
-    if (!GetProcessTimes(process.get(), &created, &exit, &kernel, &user) || filetime_ticks(created) != requested.created) return {};
-    wchar_t short_path[512]{};
-    DWORD size=512;
-    if (QueryFullProcessImageNameW(process.get(),0,short_path,&size))
-        return std::wstring(short_path,size);
-    if (GetLastError()!=ERROR_INSUFFICIENT_BUFFER) return {};
-    std::wstring path(32768,L'\0');
-    size=static_cast<DWORD>(path.size());
-    if (!QueryFullProcessImageNameW(process.get(),0,path.data(),&size)) return {};
-    path.resize(size);
-    return path;
-}
 
 class Codec {
 public:
@@ -131,7 +105,8 @@ public:
         // Bound the RAM page cache, not the on-disk archive or its row count.
         const char* schema = "PRAGMA cache_size=-128;"
             "PRAGMA mmap_size=0; PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_mode=WAL; PRAGMA temp_store=MEMORY;"
-            "CREATE TABLE IF NOT EXISTS icons(exe TEXT PRIMARY KEY,stamp INTEGER NOT NULL,bytes INTEGER NOT NULL,png BLOB NOT NULL,used INTEGER NOT NULL);";
+            "CREATE TABLE IF NOT EXISTS icons(exe TEXT PRIMARY KEY,stamp INTEGER NOT NULL,bytes INTEGER NOT NULL,png BLOB NOT NULL,used INTEGER NOT NULL);"
+            "CREATE INDEX IF NOT EXISTS icons_exe_nocase ON icons(exe COLLATE NOCASE);";
         if (sqlite3_exec(db_, schema, nullptr, nullptr, nullptr) != SQLITE_OK) {
             diagnostics::write(diagnostics::Level::warning,"icons.database","cannot initialize shared icons table");
             close();
@@ -139,11 +114,14 @@ public:
     }
     ~Database() { close(); }
     bool available() const { return db_ != nullptr; }
-    std::shared_ptr<AppIcon> get(const std::wstring& path, std::uint64_t stamp, std::uint64_t size, Codec& codec) {
+    std::shared_ptr<AppIcon> get(const std::wstring& path,std::uint64_t stamp,std::uint64_t size,bool metadata,Codec& codec) {
         if (!db_) return {};
         Statement query;
-        if (sqlite3_prepare_v2(db_, "SELECT png FROM icons WHERE exe=?1 AND stamp=?2 AND bytes=?3", -1, &query.value, nullptr) != SQLITE_OK) return {};
+        if (sqlite3_prepare_v2(db_,
+            "SELECT png FROM icons WHERE exe=?1 COLLATE NOCASE AND (?4=0 OR (stamp=?2 AND bytes=?3)) ORDER BY used DESC LIMIT 1",
+            -1,&query.value,nullptr)!=SQLITE_OK)return {};
         bind(query.value, path, stamp, size);
+        sqlite3_bind_int(query.value,4,metadata?1:0);
         if (sqlite3_step(query.value) != SQLITE_ROW) return {};
         diagnostics::write(diagnostics::Level::trace,"icons.cache","persistent icon hit");
         return codec.decode(sqlite3_column_blob(query.value, 0), sqlite3_column_bytes(query.value, 0));
@@ -191,12 +169,30 @@ struct AppIconCache::Impl {
     struct Entry { std::shared_ptr<const AppIcon> image; std::uint64_t used{}; bool pending = true; };
     mutable std::mutex mutex;
     std::condition_variable_any wake;
-    std::unordered_map<Key, Entry, Hash> entries;
-    std::deque<Key> queue;
+    std::map<std::wstring,Entry,std::less<>> entries;
+    std::deque<std::wstring> queue;
     std::uint64_t clock{};
     std::size_t capacity = default_memory_limit;
     IconCacheStats counters;
     std::jthread thread;
+
+    void request(std::wstring_view requested) {
+        std::lock_guard lock(mutex);
+        if(const auto found=entries.find(requested);found!=entries.end()) {found->second.used=++clock;return;}
+        if(queue.size()>=capacity)return;
+        trim(capacity-1);
+        if(entries.size()>=capacity)return;
+        const auto [entry,inserted]=entries.try_emplace(std::wstring(requested),Entry{{},++clock,true});
+        if(inserted)queue.push_back(entry->first);
+        wake.notify_all();
+    }
+    std::shared_ptr<const AppIcon> get(std::wstring_view requested) {
+        std::lock_guard lock(mutex);
+        const auto found=entries.find(requested);
+        if(found==entries.end())return {};
+        found->second.used=++clock;
+        return found->second.image;
+    }
 
     // Called only with mutex held. Never evict in-flight icon requests.
     void trim(std::size_t maximum) {
@@ -220,19 +216,18 @@ struct AppIconCache::Impl {
                 { std::lock_guard lock(mutex); counters.persistent = db.available(); }
                 std::vector<std::byte> png;
                 while (!stop.stop_requested()) {
-                    Key requested;
+                    std::wstring path;
                     {
                         std::unique_lock lock(mutex);
                         wake.wait(lock, stop, [this] { return !queue.empty(); });
                         if (stop.stop_requested()) return;
-                        requested = queue.front(); queue.pop_front();
+                        path = std::move(queue.front()); queue.pop_front();
                     }
-                    const auto path = executable(requested);
                     WIN32_FILE_ATTRIBUTE_DATA data{};
                     const bool metadata = !path.empty() && GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data);
                     const auto stamp = filetime_ticks(data.ftLastWriteTime);
                     const auto size = (static_cast<std::uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
-                    auto image = metadata ? db.get(path, stamp, size, codec) : nullptr;
+                    auto image = !path.empty()?db.get(path,stamp,size,metadata,codec):nullptr;
                     const bool hit = image != nullptr;
                     if (!image) {
                         diagnostics::write(diagnostics::Level::trace,"icons.extract","cache miss, extracting executable icon");
@@ -241,7 +236,7 @@ struct AppIconCache::Impl {
                     }
                     {
                         std::lock_guard lock(mutex);
-                        if (const auto found = entries.find(requested); found != entries.end()) { found->second.image = std::move(image); found->second.pending = false; }
+                        if (const auto found = entries.find(path); found != entries.end()) { found->second.image = std::move(image); found->second.pending = false; }
                         trim(capacity);
                         if (hit) ++counters.disk_hits; else ++counters.extractions;
                     }
@@ -261,27 +256,33 @@ void AppIconCache::set_capacity(std::size_t capacity) {
     impl_->capacity = std::clamp<std::size_t>(capacity,16,128);
     impl_->trim(impl_->capacity);
 }
-void AppIconCache::request(std::uint32_t pid, std::optional<std::uint64_t> created) {
-    std::lock_guard lock(impl_->mutex);
-    const auto requested = key(pid, created);
-    if (const auto found = impl_->entries.find(requested); found != impl_->entries.end()) { found->second.used = ++impl_->clock; return; }
-    // The request queue and memory budget scale together with the visible row count.
-    if (impl_->queue.size() >= impl_->capacity) return;
-    impl_->trim(impl_->capacity - 1);
-    if (impl_->entries.size() >= impl_->capacity) return;
-    impl_->entries.emplace(requested, Impl::Entry{{}, ++impl_->clock, true});
-    impl_->queue.push_back(requested); impl_->wake.notify_all();
-}
-std::shared_ptr<const AppIcon> AppIconCache::get(std::uint32_t pid, std::optional<std::uint64_t> created) {
-    std::lock_guard lock(impl_->mutex);
-    const auto found = impl_->entries.find(key(pid, created));
-    return found == impl_->entries.end() ? nullptr : found->second.image;
-}
+void AppIconCache::request(std::wstring_view path) {impl_->request(path);}
+std::shared_ptr<const AppIcon> AppIconCache::get(std::wstring_view path) {return impl_->get(path);}
 IconCacheStats AppIconCache::stats() const {
     std::lock_guard lock(impl_->mutex);
     auto stats = impl_->counters; stats.entries = impl_->entries.size(); stats.capacity = impl_->capacity;
     for (const auto& [id, entry] : impl_->entries) { (void)id; if (entry.pending) ++stats.pending; }
     return stats;
+}
+
+HICON native_app_icon(const AppIcon& image) {
+    BITMAPINFO info{};
+    info.bmiHeader.biSize=sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth=AppIcon::size;
+    info.bmiHeader.biHeight=-static_cast<LONG>(AppIcon::size);
+    info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;
+    info.bmiHeader.biCompression=BI_RGB;
+    void* pixels{};
+    const auto color=CreateDIBSection(nullptr,&info,DIB_RGB_COLORS,&pixels,nullptr,0);
+    if(!color)return nullptr;
+    std::memcpy(pixels,image.pixels.data(),image.pixels.size());
+    const std::array<std::byte,AppIcon::size*AppIcon::size/8> transparent{};
+    const auto mask=CreateBitmap(AppIcon::size,AppIcon::size,1,1,transparent.data());
+    ICONINFO icon{TRUE,0,0,mask,color};
+    const auto result=mask?CreateIconIndirect(&icon):nullptr;
+    if(mask)DeleteObject(mask);
+    DeleteObject(color);
+    return result;
 }
 
 bool save_argb_png(const std::filesystem::path& file, const void* pixels, unsigned width, unsigned height) {

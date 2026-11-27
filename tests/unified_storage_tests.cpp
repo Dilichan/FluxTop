@@ -30,16 +30,15 @@ int wmain(int argc,wchar_t** argv){
         std::filesystem::create_directories(root);
         const auto path=root/L"fluxtop.db";
         // Icon cache can be the first component to create the shared database.
-        FILETIME created{},exit{},kernel{},user{};
-        require(GetProcessTimes(GetCurrentProcess(),&created,&exit,&kernel,&user)!=FALSE,"process creation time");
-        const auto id=fluxtop::filetime_ticks(created);
+        const auto executable=fluxtop::process_image_path(GetCurrentProcess());
+        require(!executable.empty(),"fixture executable");
         std::mutex mutex;
         std::condition_variable cv;
         {
             fluxtop::AppIconCache cache(path,[&]{cv.notify_all();});
-            cache.request(GetCurrentProcessId(),id);
+            cache.request(executable);
             std::unique_lock lock(mutex);
-            require(cv.wait_for(lock,std::chrono::seconds(10),[&]{return cache.get(GetCurrentProcessId(),id)!=nullptr;}),"icon in shared DB");
+            require(cv.wait_for(lock,std::chrono::seconds(10),[&]{return cache.get(executable)!=nullptr;}),"icon in shared DB");
             require(cache.stats().persistent,"persistent cache open");
         }
         {
