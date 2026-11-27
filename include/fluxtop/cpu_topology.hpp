@@ -13,6 +13,7 @@ struct CpuCoreTemperature {
     unsigned logical_siblings{1};
     // Some E-core DTS readings share a hardware sensor.
     bool sensor_independent_unverified{};
+    bool amd{};
     bool operator==(const CpuCoreTemperature&)const=default;
 };
 struct LogicalCpuLocation {
@@ -31,4 +32,5 @@ struct CpuTopologySnapshot {
     bool partial{};
     std::string status{"initializing"};
 };
+void finalize_core_temperatures(CpuTopologySnapshot& sample) noexcept;
 } // namespace fluxtop

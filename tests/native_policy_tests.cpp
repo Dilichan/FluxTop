@@ -62,7 +62,7 @@ void check_includes(const std::filesystem::path& root,const std::filesystem::pat
 void run(const std::filesystem::path& root,const std::string& policy) {
     const auto overlay=read(root/"src/overlay.cpp");
     if(policy=="architecture_boundaries") {
-        const std::string collectors=R"((^|/)(sampler\.hpp|[^/]*collector\.hpp|cpu_topology_reader\.hpp|intel_dts\.hpp|temperatures\.hpp|disk_temperature\.hpp)$)";
+        const std::string collectors=R"((^|/)(sampler\.hpp|[^/]*collector\.hpp|cpu_topology_reader\.hpp|intel_dts\.hpp|amd_temperature\.hpp|pawnio_reader\.hpp|temperatures\.hpp|disk_temperature\.hpp)$)";
         const std::string platform=R"((^|/)(pdh(msg)?|evntrace|evntcons|tdh|d3dkmthk|wbemidl|winioctl|winsqlite3|sqlite3)\.h$)";
         const std::regex ui(collectors+"|"+platform,std::regex_constants::icase);
         const std::regex core(collectors+"|"+platform+R"(|(^|/)(windows|windowsx|commctrl|d2d1|dwrite)\.h$)",std::regex_constants::icase);

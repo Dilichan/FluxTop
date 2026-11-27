@@ -9,6 +9,7 @@ constexpr bool board_kind(CpuTemperatureKind kind) noexcept {
 constexpr int provider_rank(CpuTemperatureProvider provider) noexcept {
     switch(provider) {
     case CpuTemperatureProvider::intel_dts: return 50;
+    case CpuTemperatureProvider::amd_smn: return 50;
     case CpuTemperatureProvider::hwinfo: return 40;
     case CpuTemperatureProvider::libre_wmi: return 30;
     case CpuTemperatureProvider::open_wmi: return 20;
@@ -23,6 +24,7 @@ int cpu_temperature_rank(CpuTemperatureProvider provider,CpuTemperatureKind kind
         kind==CpuTemperatureKind::die?40:
         kind==CpuTemperatureKind::core_average?30:
         kind==CpuTemperatureKind::core?20:
+        kind==CpuTemperatureKind::control?15:
         kind==CpuTemperatureKind::board?10:0;
     return sensor+provider_rank(provider)+type;
 }
@@ -92,6 +94,7 @@ std::string_view cpu_temperature_kind_name(CpuTemperatureKind kind) noexcept {
     case CpuTemperatureKind::core: return "core";
     case CpuTemperatureKind::board: return "cpu-socket-board";
     case CpuTemperatureKind::acpi: return "cpu-acpi-zone";
+    case CpuTemperatureKind::control: return "cpu-tctl";
     }
     return "unknown";
 }

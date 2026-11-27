@@ -37,7 +37,7 @@ add_library(fluxtop_collectors STATIC
     src/sampler.cpp src/privileges.cpp src/process_collector.cpp src/process_enumerator.cpp
     src/gpu_collector.cpp src/fps_collector.cpp src/presented_frame_window.cpp src/network_collector.cpp
     src/disk_collector.cpp src/disk_temperature.cpp src/disk_io_collector.cpp src/cpu_etw_collector.cpp src/etw_session.cpp
-    src/temperatures.cpp src/cpu_topology.cpp src/intel_dts.cpp src/cpu_logical_collector.cpp)
+    src/temperatures.cpp src/cpu_topology.cpp src/intel_dts.cpp src/amd_temperature.cpp src/cpu_logical_collector.cpp)
 target_link_libraries(fluxtop_collectors PUBLIC fluxtop_core PRIVATE
     fluxtop_history fluxtop_logging psapi pdh advapi32 gdi32 user32 ole32 oleaut32 wbemuuid tdh)
 target_compile_definitions(fluxtop_collectors PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
@@ -70,7 +70,9 @@ add_custom_command(OUTPUT "${launcher_resource}"
         "-DUNINSTALLER=$<TARGET_FILE:fluxtop_uninstaller>"
         "-DRELEASE_TAG=${FLUXTOP_RELEASE_TAG}" "-DTEMPLATE=${PROJECT_SOURCE_DIR}/src/launcher.rc.in"
         -P "${PROJECT_SOURCE_DIR}/tools/Generate-LauncherResource.cmake"
-    DEPENDS fluxtop fluxtop_uninstaller "${PROJECT_SOURCE_DIR}/assets/pawnio/PawnIO_setup.exe" "${PROJECT_SOURCE_DIR}/assets/branding/fluxtop.ico" "${PROJECT_SOURCE_DIR}/tools/Generate-LauncherResource.cmake" "${PROJECT_SOURCE_DIR}/tools/PawnIO-Pin.cmake" "${PROJECT_SOURCE_DIR}/src/launcher.rc.in"
+    DEPENDS fluxtop fluxtop_uninstaller "${PROJECT_SOURCE_DIR}/assets/pawnio/PawnIO_setup.exe"
+        "${PROJECT_SOURCE_DIR}/assets/pawnio/IntelMSR.bin" "${PROJECT_SOURCE_DIR}/assets/pawnio/AMDFamily17.bin"
+        "${PROJECT_SOURCE_DIR}/assets/branding/fluxtop.ico" "${PROJECT_SOURCE_DIR}/tools/Generate-LauncherResource.cmake" "${PROJECT_SOURCE_DIR}/tools/PawnIO-Pin.cmake" "${PROJECT_SOURCE_DIR}/src/launcher.rc.in"
     VERBATIM)
 add_executable(fluxtop_launcher WIN32 src/launcher.cpp src/installation.cpp src/pawnio_bundle.cpp "${launcher_resource}")
 target_include_directories(fluxtop_launcher PRIVATE include)
@@ -96,11 +98,11 @@ target_compile_definitions(fluxtop_source_autostart PRIVATE FLUXTOP_SOURCE_GUI)
 target_link_libraries(fluxtop_source_autostart PRIVATE fluxtop_source_checkout fluxtop_logging shell32 ole32 advapi32 uuid)
 set_target_properties(fluxtop_source_autostart PROPERTIES OUTPUT_NAME FluxTopSourceAutostart)
 
-if(EXISTS "${PROJECT_SOURCE_DIR}/assets/pawnio/IntelMSR.bin")
+foreach(module IntelMSR AMDFamily17)
     add_custom_command(TARGET fluxtop POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "${PROJECT_SOURCE_DIR}/assets/pawnio/IntelMSR.bin" "$<TARGET_FILE_DIR:fluxtop>/IntelMSR.bin")
-endif()
+            "${PROJECT_SOURCE_DIR}/assets/pawnio/${module}.bin" "$<TARGET_FILE_DIR:fluxtop>/${module}.bin")
+endforeach()
 include(CTest)
 if(BUILD_TESTING)
     if(MSVC)
@@ -251,6 +253,10 @@ if(BUILD_TESTING)
     target_compile_definitions(fluxtop_temperature_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
     target_link_libraries(fluxtop_temperature_tests PRIVATE fluxtop_collectors)
     add_test(NAME temperature_detection COMMAND fluxtop_temperature_tests)
+    add_executable(fluxtop_amd_temperature_tests tests/amd_temperature_tests.cpp)
+    target_include_directories(fluxtop_amd_temperature_tests PRIVATE src)
+    target_link_libraries(fluxtop_amd_temperature_tests PRIVATE fluxtop_collectors)
+    add_test(NAME amd_temperature COMMAND fluxtop_amd_temperature_tests)
     add_executable(fluxtop_temperature_selection_tests tests/temperature_selection_tests.cpp)
     target_link_libraries(fluxtop_temperature_selection_tests PRIVATE fluxtop_core)
     target_compile_features(fluxtop_temperature_selection_tests PRIVATE cxx_std_20)

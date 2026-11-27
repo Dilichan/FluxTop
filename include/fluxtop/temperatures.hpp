@@ -7,7 +7,7 @@
 #include "fluxtop/cpu_topology.hpp"
 namespace fluxtop {
 struct HardwareTemperatures {
-    CpuTopologySnapshot intel_cores; // Cached source data for v50, independent of selected CPU package provider.
+    CpuTopologySnapshot cpu_topology;
     std::optional<double> cpu_c, gpu_c;
     bool cpu_from_board{}; // Explicit CPU socket/board zone, NOT processor die/package.
     std::string cpu_source{"unavailable"}; // Diagnostic provenance, not a process metric.

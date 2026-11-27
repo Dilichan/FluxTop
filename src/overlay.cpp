@@ -1501,6 +1501,10 @@ void Overlay::draw_heading(std::wstring_view line,D2D1_RECT_F rect,IDWriteTextFo
     }
 }
 void Overlay::draw_overlay_charts(float width,float top) {
+    struct ChartVertex {
+        D2D1_POINT_2F point;
+        bool connected;
+    };
     const auto& layout=chart_layout_;
     if(!layout.capacity)return;
     target_->SetTransform(D2D1::Matrix3x2F::Identity());
@@ -1512,6 +1516,8 @@ void Overlay::draw_overlay_charts(float width,float top) {
     const auto start=end-duration;
     const auto begin=std::lower_bound(samples.begin(),samples.end(),start,
         [](const SystemChartPoint& point,std::int64_t time){return point.time<time;});
+    std::array<std::vector<ChartVertex>,2> series_points;
+    for(auto& points:series_points)points.reserve(static_cast<std::size_t>(samples.end()-begin));
     const float tile_width=(width-layout.gap*(static_cast<float>(layout.columns)+1))/static_cast<float>(layout.columns);
     if(tile_width<=0)return;
     for(auto index=first;index<last;++index) {
@@ -1550,7 +1556,8 @@ void Overlay::draw_overlay_charts(float width,float top) {
                     primary_max=std::max(primary_max,*value*1.1);
         }
         target_->PushAxisAlignedClip(D2D1::RectF(x,plot_top,x+tile_width,plot_bottom),D2D1_ANTIALIAS_MODE_ALIASED);
-        std::array<std::optional<D2D1_POINT_2F>,2> previous;
+        for(auto& points:series_points)points.clear();
+        std::array<bool,2> connected{};
         std::int64_t previous_time{};
         const FocusedFpsSource* previous_source=nullptr;
         const std::array<D2D1_COLOR_F,2> colors{chart_ink(overlay_chart_series_color(kind)),
@@ -1559,28 +1566,62 @@ void Overlay::draw_overlay_charts(float width,float top) {
             const auto current=overlay_chart_values(chart,*sample);
             const auto* source=sample->fps?sample->fps->source.get():nullptr;
             if(sample->time-previous_time>2LL*options_.interval_ms ||
-                (kind==OverlayChartKind::fps && source!=previous_source))previous={};
+                (kind==OverlayChartKind::fps && source!=previous_source))connected={};
             previous_time=sample->time;
             previous_source=source;
             const auto px=x+static_cast<float>(sample->time-start)/static_cast<float>(duration)*(tile_width-1);
             const std::array readings{current.primary,current.secondary};
             for(std::size_t series=0;series<readings.size();++series) {
                 if(!readings[series] || !std::isfinite(*readings[series])) {
-                    previous[series].reset();continue;
+                    connected[series]=false;continue;
                 }
                 const auto maximum=series==0?primary_max:130.0;
                 const auto ratio=static_cast<float>(std::clamp(*readings[series]/maximum,0.0,1.0));
                 const auto point=D2D1::Point2F(px,plot_bottom-1-ratio*(plot_bottom-plot_top-2));
-                if(previous[series]) {
+                series_points[series].push_back({point,connected[series]});
+                connected[series]=true;
+            }
+        }
+        // Fill each uninterrupted segment before painting any strokes.
+        for(std::size_t series=0;series<series_points.size();++series) {
+            const auto& points=series_points[series];
+            if(std::none_of(points.begin(),points.end(),[](const ChartVertex& vertex){return vertex.connected;}))
+                continue;
+            ComPtr<ID2D1PathGeometry> area;
+            ComPtr<ID2D1GeometrySink> sink;
+            if(FAILED(factory_->CreatePathGeometry(area.GetAddressOf())) || FAILED(area->Open(sink.GetAddressOf())))
+                continue;
+            const float baseline=plot_bottom-1;
+            for(auto segment=points.begin();segment!=points.end();) {
+                const auto next=std::find_if(segment+1,points.end(),
+                    [](const ChartVertex& vertex){return !vertex.connected;});
+                if(next-segment>=2) {
+                    sink->BeginFigure(D2D1::Point2F(segment->point.x,baseline),D2D1_FIGURE_BEGIN_FILLED);
+                    for(auto vertex=segment;vertex!=next;++vertex)sink->AddLine(vertex->point);
+                    sink->AddLine(D2D1::Point2F((next-1)->point.x,baseline));
+                    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                }
+                segment=next;
+            }
+            if(SUCCEEDED(sink->Close())) {
+                auto fill=colors[series];
+                fill.a*=0.20f;
+                brush_->SetColor(fill);
+                target_->FillGeometry(area.Get(),brush_.Get());
+            }
+        }
+        for(std::size_t series=0;series<series_points.size();++series) {
+            const auto& points=series_points[series];
+            for(auto vertex=points.begin();vertex!=points.end();++vertex) {
+                if(vertex->connected) {
                     brush_->SetColor(D2D1::ColorF(0,0,0,.8f));
-                    target_->DrawLine(*previous[series],point,brush_.Get(),3);
+                    target_->DrawLine((vertex-1)->point,vertex->point,brush_.Get(),3);
                     brush_->SetColor(colors[series]);
-                    target_->DrawLine(*previous[series],point,brush_.Get(),1.5f);
+                    target_->DrawLine((vertex-1)->point,vertex->point,brush_.Get(),1.5f);
                 } else {
                     brush_->SetColor(colors[series]);
-                    target_->FillEllipse(D2D1::Ellipse(point,1,1),brush_.Get());
+                    target_->FillEllipse(D2D1::Ellipse(vertex->point,1,1),brush_.Get());
                 }
-                previous[series]=point;
             }
         }
         target_->PopAxisAlignedClip();

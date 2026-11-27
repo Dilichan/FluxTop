@@ -14,6 +14,13 @@ public:
     Handle(const Handle&) = delete;
     Handle& operator=(const Handle&) = delete;
     Handle(Handle&& other) noexcept : value_(std::exchange(other.value_, nullptr)) {}
+    Handle& operator=(Handle&& other) noexcept {
+        if(this!=&other) {
+            if(valid())CloseHandle(value_);
+            value_=std::exchange(other.value_,nullptr);
+        }
+        return *this;
+    }
     HANDLE get() const { return value_; }
     bool valid() const { return value_ && value_ != INVALID_HANDLE_VALUE; }
 private:

@@ -2,7 +2,7 @@
 
 ## Артефакты и устройство установщика
 
-Пользователь скачивает один файл `FluxTop.exe` для Windows x64. Он содержит Win32 launcher/updater, монитор `fluxtop.exe` (ресурс 201), деинсталлятор (205), модуль IntelMSR (206) и неизменённый официальный установщик PawnIO (207). Сборка MSVC Runtime статически слинкована. Git, CMake, Python и PowerShell на пользовательском компьютере не требуются.
+Пользователь скачивает один файл `FluxTop.exe` для Windows x64. Он содержит Win32 launcher/updater, монитор `fluxtop.exe` (ресурс 201), деинсталлятор (205), модули IntelMSR (206) и AMDFamily17 (208), а также неизменённый официальный установщик PawnIO (207). Сборка MSVC Runtime статически слинкована. Git, CMake, Python и PowerShell на пользовательском компьютере не требуются.
 
 После установки используются `%LOCALAPPDATA%\FluxTop\FluxTop.exe`, `Uninstall-FluxTop.exe` и `versions/<SHA-256>/fluxtop.exe`. Удаление через Windows Installed Apps выполняет нативный EXE. История, настройки и журналы сохраняются. Структура данных описана в [HISTORY.md](HISTORY.md).
 
@@ -48,7 +48,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Apply-V56.ps1
 
 Перед публичным релизом подтвердите результаты на чистых Windows 10 и 11 x64 со стандартной защитой. На каждой системе проверьте отсутствие PawnIO, его штатную установку, повторное обнаружение и отказ от установки. Проверьте отказ UAC, запуск через «Пуск» и автозапуск после входа, обновление с сохранением INI/SQLite и удаление с сохранением общего PawnIO. [Интерактивные сценарии](STABILITY.md)
 
-Встроенный `IntelMSR.bin` совпадает по SHA-256 с файлом из официального выпуска PawnIO.Modules 0.2.11 (`d6ed85d65ab17a22f813ef98207d6d537155ee2ded5976a21cb48413c9b92e5f`). Автор разрешает распространение официального установщика PawnIO. Перед публикацией приложите к пакету требуемое уведомление LGPL 2.1 и обеспечьте доступ к соответствующим исходникам модуля по условиям этой лицензии. [Руководство автора](https://github.com/namazso/PawnIO.Modules/wiki/Using-PawnIO-Modules) · [Выпуск 0.2.11](https://github.com/namazso/PawnIO.Modules/releases/tag/0.2.11) · [Исходники и лицензия 0.2.11](https://github.com/namazso/PawnIO.Modules/tree/0.2.11)
+Сборка проверяет SHA-256 встроенных `IntelMSR.bin` и `AMDFamily17.bin` по зафиксированным контрольным суммам официального выпуска PawnIO.Modules 0.2.11. Перед публикацией приложите к пакету уведомление LGPL 2.1 и исходники соответствующей версии модулей. [Руководство автора](https://github.com/namazso/PawnIO.Modules/wiki/Using-PawnIO-Modules) · [Выпуск 0.2.11](https://github.com/namazso/PawnIO.Modules/releases/tag/0.2.11) · [Исходники и лицензия 0.2.11](https://github.com/namazso/PawnIO.Modules/tree/0.2.11)
 
 ## Проверка тега и публикация
 

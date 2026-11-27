@@ -6,8 +6,8 @@
 
 namespace fluxtop {
 // Stable temperature identity. A CPU socket is not a CPU die measurement.
-enum class CpuTemperatureKind : unsigned char { package, die, core_average, core, board, acpi };
-enum class CpuTemperatureProvider : unsigned char { intel_dts, hwinfo, libre_wmi, open_wmi, acpi };
+enum class CpuTemperatureKind : unsigned char { package, die, core_average, core, board, acpi, control };
+enum class CpuTemperatureProvider : unsigned char { intel_dts, hwinfo, libre_wmi, open_wmi, acpi, amd_smn };
 struct CpuTemperatureCandidate {
     CpuTemperatureProvider provider{CpuTemperatureProvider::intel_dts};
     CpuTemperatureKind kind{CpuTemperatureKind::package};

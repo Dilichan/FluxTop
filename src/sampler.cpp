@@ -38,9 +38,9 @@ Snapshot Sampler::collect() {
         snapshot.fps_focus_epoch=fps_focus_.epoch;
         fps_->collect(snapshot.processes, fps_focus_);
     }
-    const auto hwtemps = read_hardware_temperatures(cpu_temperature_);
+    auto hwtemps = read_hardware_temperatures(cpu_temperature_);
     snapshot.cpu_temperature_c = hwtemps.cpu_c;
-    snapshot.cpu_topology = hwtemps.intel_cores;
+    snapshot.cpu_topology = std::move(hwtemps.cpu_topology);
     cpu_logical_.collect(snapshot.cpu_logical_usage,snapshot.cpu_logical_status,
         snapshot.cpu_topology.logical_members);
     snapshot.cpu_temperature_board = hwtemps.cpu_from_board;

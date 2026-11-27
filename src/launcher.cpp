@@ -304,14 +304,14 @@ int WINAPI wWinMain(HINSTANCE module,HINSTANCE,PWSTR,int) {
         std::filesystem::create_directories(version);
         const auto monitor=version/L"fluxtop.exe";
         publish(monitor,bytes,size);
-        // Optional pre-verified MSR module is packaged into the launcher at build time.
-        // No downloads, no implicit driver installation and no launch failure if absent.
-        if(const auto resource_msr=FindResourceW(module,MAKEINTRESOURCEW(206),RT_RCDATA)) {
-            const auto content_msr=LoadResource(module,resource_msr);
-            const auto* data_msr=content_msr?static_cast<const BYTE*>(LockResource(content_msr)):nullptr;
-            const auto size_msr=SizeofResource(module,resource_msr);
-            if(data_msr && size_msr>0 && size_msr<=65536)
-                publish(version/L"IntelMSR.bin",data_msr,size_msr);
+        // These modules use the existing optional PawnIO driver.
+        for(const auto& [id,filename]:{std::pair{206,L"IntelMSR.bin"},std::pair{208,L"AMDFamily17.bin"}}) {
+            if(const auto cpu_resource=FindResourceW(module,MAKEINTRESOURCEW(id),RT_RCDATA)) {
+                const auto content=LoadResource(module,cpu_resource);
+                const auto* data=content?static_cast<const BYTE*>(LockResource(content)):nullptr;
+                const auto cpu_size=SizeofResource(module,cpu_resource);
+                if(data && cpu_size>0 && cpu_size<=65536)publish(version/filename,data,cpu_size);
+            }
         }
         cache_launcher(directory);
         if (prepare) return 0;

@@ -99,6 +99,8 @@ void portable(const fs::path& launcher,const fs::path& monitor,const fs::path& b
     const fs::path extracted=fixture.root/L"versions"/sha256(monitor)/L"fluxtop.exe";
     check(fs::is_regular_file(extracted),"Embedded monitor is missing");
     check(same_file(monitor,extracted),"Extracted monitor differs from source payload");
+    for(const auto* module:{L"IntelMSR.bin",L"AMDFamily17.bin"})
+        check(same_file(monitor.parent_path()/module,extracted.parent_path()/module),"Bundled CPU module mismatch");
     check(fs::is_regular_file(fixture.root/L"FluxTop.exe"),"Stable launcher copy is missing");
     const auto history=fixture.root/L"history.db";
     put(history,"history sentinel");

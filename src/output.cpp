@@ -149,6 +149,7 @@ void write_jsonl(std::ostream& out, const Snapshot& s, unsigned top) {
         ? "true" : "false");
     // v50: additional fields, preserving legacy cpu_temperature_c/source fields.
     const auto& cpu_cores=s.cpu_topology;
+    const bool amd=!cpu_cores.cores.empty() && cpu_cores.cores.front().amd;
     out << ",\"cpu_core_max_c\":"; measured(out,cpu_cores.core_max_c);
     out << ",\"cpu_core_average_c\":"; measured(out,cpu_cores.core_average_c);
     out << ",\"cpu_physical_core_count\":" << cpu_cores.physical_cores
@@ -165,7 +166,7 @@ void write_jsonl(std::ostream& out, const Snapshot& s, unsigned top) {
         out << "{\"processor_group\":" << cpu.group
             << ",\"logical_processor\":" << cpu.number
             << ",\"core_id\":" << cpu.core_id
-            << ",\"type\":" << json_escape(cpu.performance?"P":"E")
+            << ",\"type\":" << json_escape(amd?"core":cpu.performance?"P":"E")
             << ",\"usage_percent\":";
         measured(out,cpu.percent);
         out << '}';
@@ -179,7 +180,7 @@ void write_jsonl(std::ostream& out, const Snapshot& s, unsigned top) {
             << ",\"processor_group\":" << core.group
             << ",\"logical_processor\":" << core.logical
             << ",\"logical_siblings\":" << core.logical_siblings
-            << ",\"type\":" << json_escape(core.performance?"P":"E")
+            << ",\"type\":" << json_escape(core.amd?"core":core.performance?"P":"E")
             << ",\"sensor_independence_unverified\":"
             << (core.sensor_independent_unverified?"true":"false")
             << ",\"temperature_c\":";

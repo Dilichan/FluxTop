@@ -54,6 +54,7 @@ inline std::wstring disk_name(wchar_t letter) {
 // Provenance is explicit; absent sensor data must never be presented as CPU die.
 inline std::wstring cpu_sensor_name(std::string_view source,bool board) {
     if(source=="unavailable" || source.empty())return L"Источник неизвестен";
+    if(source=="amd-smn-tctl")return L"AMD Tctl";
     if(source.find("acpi")!=std::string_view::npos)return L"ACPI";
     return board?L"датчик платы":L"CPU Package/Die";
 }

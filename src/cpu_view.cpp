@@ -64,6 +64,7 @@ std::optional<double> cpu_application_load(const CpuProcessExecution& execution,
     return {};
 }
 std::wstring cpu_core_label(const CpuCoreTemperature& core,std::span<const CpuCoreTemperature> topology){
+    if(core.amd)return L"Ядро "+std::to_wstring(core.core_id+1);
     unsigned ordinal=0;
     for(const auto& entry:topology){
         if(entry.performance==core.performance)++ordinal;
@@ -109,7 +110,7 @@ std::vector<CpuChartSeries> cpu_core_chart_series(const CpuChartSample& sample,C
 std::optional<double> cpu_application_core_load(const CpuProcessExecution& execution,CpuViewId id,const CpuTopologySnapshot& topology){
     unsigned expected{};for(const auto& core:topology.cores)if(id==CpuViewId{core.group,core.core_id})expected=core.logical_siblings;
     double sum=0;unsigned count=0;
-    for(const auto& cpu:topology.logical_members)if(cpu.group==id.group && cpu.core_id==id.number){
+    for(const auto& cpu:topology.logical_members)if(cpu.core_id==id.number){
         const auto value=cpu_application_load(execution,{cpu.group,cpu.number});if(!value)return {};sum+=*value;++count;
     }
     return count && count==expected?std::optional<double>{sum/count}:std::nullopt;
@@ -125,7 +126,7 @@ std::optional<double> cpu_chart_value(const CpuChartSeries& series,const CpuChar
     case CpuSeriesKind::core_load: {
         unsigned expected{};for(const auto& core:sample.cores)if(series.id==CpuViewId{core.group,core.core_id})expected=core.logical_siblings;
         double sum=0;unsigned count=0;
-        for(const auto& cpu:sample.logical)if(cpu.group==series.id.group && cpu.core_id==series.id.number){
+        for(const auto& cpu:sample.logical)if(cpu.core_id==series.id.number){
             const auto value=cpu_logical_percent(cpu.percent.value_or(-1));if(!value)return {};sum+=*value;++count;
         }
         return count && count==expected?std::optional<double>{sum/count}:std::nullopt;

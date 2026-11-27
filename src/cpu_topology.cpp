@@ -5,6 +5,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstring>
+#include <cmath>
 #include <string_view>
 
 namespace fluxtop {
@@ -36,6 +37,26 @@ std::array<char,12> read_cpu_vendor() noexcept {
     return vendor;
 }
 
+// A missing core is represented by nullopt. Never include it in aggregates.
+void finalize_core_temperatures(CpuTopologySnapshot& sample) noexcept {
+    sample.physical_cores=static_cast<unsigned>(sample.cores.size());
+    sample.available_cores=0;
+    sample.core_max_c.reset();
+    sample.core_average_c.reset();
+    double sum=0.0;
+    for(const auto& core:sample.cores){
+        if(!core.celsius || !std::isfinite(*core.celsius) ||
+            *core.celsius < -10.0 || *core.celsius>125.0)continue;
+        ++sample.available_cores;
+        sum+=*core.celsius;
+        if(!sample.core_max_c || *sample.core_max_c<*core.celsius)
+            sample.core_max_c=*core.celsius;
+    }
+    if(sample.available_cores)
+        sample.core_average_c=sum/static_cast<double>(sample.available_cores);
+    sample.partial=sample.physical_cores==0 ||
+        sample.available_cores<sample.physical_cores || !sample.package_c;
+}
 CpuTopologySnapshot read_cpu_topology() {
     CpuTopologySnapshot result;
     result.cpu_name=cpu_name();
