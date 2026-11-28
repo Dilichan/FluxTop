@@ -18,8 +18,9 @@
   · <a href="https://github.com/Dilichan/FluxTop/issues">Сообщить об ошибке</a>
 </p>
 
-## Что нового в v0.2.14
+## Что нового в v0.2.15
 
+- **Показ поверх игр.** При смене активного окна FluxTop поднимает оверлей над перекрывающим окном «поверх всех» без перехвата фокуса.
 - **Положение оверлея.** Можно перетаскивать оверлей мышью и настраивать его через сцену. Оба способа сохраняют одну позицию.
 - **Интервал обновления.** От 0,5 до 10 секунд с шагом 0,5 секунды. Анимация строк учитывает короткий интервал.
 - **AMD и графики.** Доступны показатели физических ядер AMD и полупрозрачная заливка под линиями графиков оверлея. [Поддержка датчиков AMD](docs/CPU_UI.md)
@@ -96,7 +97,7 @@ FluxTop связывает нагрузку с конкретными проце
 Требуются **Windows 10/11 x64**, MSVC/Windows SDK, CMake 3.24+ и Git. В PowerShell либо Developer Command Prompt:
 
 ```powershell
-cmake --preset windows -DFLUXTOP_RELEASE_TAG:STRING=v0.2.14
+cmake --preset windows -DFLUXTOP_RELEASE_TAG:STRING=v0.2.15
 cmake --build --preset release
 ctest --preset release --output-on-failure
 ```

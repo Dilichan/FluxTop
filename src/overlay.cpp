@@ -51,6 +51,24 @@ enum Control : UINT { open_client = 100, toggle_table, quit_app, top_label, top_
     chart_checkbox_control=2000 };
 constexpr unsigned all_metrics = 31; // Five resource columns; FPS is in the application heading.
 constexpr unsigned default_metrics = 31;
+bool raise_overlay_above_foreground(HWND overlay, HWND foreground) {
+    if (!foreground || overlay == foreground ||
+        !(GetWindowLongPtrW(foreground, GWL_EXSTYLE) & WS_EX_TOPMOST)) return false;
+    RECT overlay_bounds{}, foreground_bounds{}, overlap{};
+    if (!GetWindowRect(overlay, &overlay_bounds) || !GetWindowRect(foreground, &foreground_bounds) ||
+        !IntersectRect(&overlap, &overlay_bounds, &foreground_bounds)) return false;
+    // Both windows can be topmost. Only raise the overlay when the foreground
+    // window is actually ahead of it in that band. Bound traversal as the order can change.
+    HWND window = overlay;
+    for (unsigned inspected = 0; inspected < 64; ++inspected) {
+        window = GetWindow(window, GW_HWNDPREV);
+        if (!window) break;
+        if (window == foreground)
+            return SetWindowPos(overlay, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER) != FALSE;
+    }
+    return false;
+}
 constexpr int interval_step_ms = 500;
 constexpr int interval_first_step = 1;
 constexpr int interval_last_step = 10000 / interval_step_ms;
@@ -1204,7 +1222,8 @@ void Overlay::update_foreground() {
     foreground_pid_ = 0;
     if (active_window && !IsIconic(active_window))
         GetWindowThreadProcessId(active_window, &foreground_pid_);
-    if(active_window!=foreground_window_ || foreground_pid_!=previous_pid) {
+    const bool focus_changed=active_window!=foreground_window_ || foreground_pid_!=previous_pid;
+    if(focus_changed) {
         foreground_window_=active_window;
         ++foreground_epoch_;
         foreground_app_.reset();foreground_app_creation_.reset();
@@ -1226,7 +1245,12 @@ void Overlay::update_foreground() {
     }
     worker_.set_fps_focus(foreground_pid_!=GetCurrentProcessId() ? FpsFocus{
         reinterpret_cast<std::uintptr_t>(active_window), foreground_pid_, foreground_epoch_} : FpsFocus{});
+    const bool was_visible=visible_;
     update_overlay_visibility();
+    if(visible_ && (focus_changed || !was_visible) && !scene_dialog_ && !blacklist_dialog_ && !dragging_ &&
+        foreground_pid_ && foreground_pid_!=GetCurrentProcessId() && raise_overlay_above_foreground(hwnd_,active_window))
+        diagnostics::write(diagnostics::Level::info,"ui.overlay","raised above overlapping foreground window pid="+
+            std::to_string(foreground_pid_));
 }
 void Overlay::update_view() {
     update_foreground();
@@ -2107,6 +2131,7 @@ LRESULT Overlay::client_message(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         case visible_control:
             if(HIWORD(wp)==BN_CLICKED) {
                 always_show_=SendDlgItemMessageW(window,visible_control,BM_GETCHECK,0,0)==BST_CHECKED;
+                diagnostics::write(diagnostics::Level::info,"ui.overlay",always_show_?"always enabled":"always disabled");
                 update_overlay_visibility();save_settings();
             }
             return 0;
